@@ -3,25 +3,6 @@ import { watch as watchCb, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { SOURCES } from './config.js';
-import { collectClaudeFile } from './collectors/claude.js';
-import { collectCodexFile } from './collectors/codex.js';
-import { collectZcodeDb } from './collectors/zcode.js';
-import { collectDshFile } from './collectors/dsh.js';
-import { collectWorkbuddyFile } from './collectors/workbuddy.js';
-import { collectGrokFile } from './collectors/grok.js';
-import { collectPiFile } from './collectors/pi.js';
-import { collectOpencodeDb } from './collectors/opencode.js';
-
-const COLLECTORS = {
-  claude: async (store, args) => ({ ...(await collectClaudeFile(store, args)), state: { _v: args.version } }),
-  codex: collectCodexFile,
-  zcode: collectZcodeDb,
-  dsh: async (store, args) => ({ ...(await collectDshFile(store, args)), state: { _v: args.version } }), // 快照式，无跨次状态
-  workbuddy: async (store, args) => ({ ...(await collectWorkbuddyFile(store, args)), state: { _v: args.version } }),
-  grok: async (store, args) => ({ ...(await collectGrokFile(store, args)), state: { _v: args.version } }),
-  pi: collectPiFile,           // 自带 state：project 来自首行 session.cwd，须跨增量轮次保留
-  opencode: collectOpencodeDb, // 自带 state：message / part 两张表各一个 rowid 水位
-};
 
 async function* walkByExt(root, match) {
   let entries;
@@ -50,7 +31,8 @@ async function* enumerate(source) {
       }
     }
     return;
-  }  for (const root of source.roots) {
+  }
+  for (const root of source.roots) {
     for await (const p of walkByExt(root, (n) => n.endsWith('.jsonl'))) yield [p, null];
   }
 }
@@ -119,15 +101,19 @@ export class Scanner extends EventEmitter {
 
         this.store.db.exec('BEGIN');
         try {
-          const r = await COLLECTORS[src.collector](this.store, {
+          if (typeof src.collect !== 'function') {
+            throw new Error(`source ${src.tool} has no collector`);
+          }
+          const r = await src.collect(this.store, {
             tool: src.tool, path, fileId, offset, state, version: src.version,
           });
           inserted += r.inserted;
+          const nextState = { ...(r.state || {}), _v: src.version };
           this.store.saveFile({
             path, tool: src.tool, session_id: fileId, size: s.size,
             mtime_ms: s.mtimeMs,
             offset: src.kind === 'jsonl' ? r.newOffset : 0,
-            state_json: r.state ? JSON.stringify(r.state) : null,
+            state_json: JSON.stringify(nextState),
           });
           this.store.db.exec('COMMIT');
         } catch (err) {
