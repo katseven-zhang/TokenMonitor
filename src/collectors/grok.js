@@ -1,4 +1,4 @@
-import { basename, dirname } from 'node:path';
+import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
 
@@ -9,13 +9,23 @@ import { normalizeModel } from '../models.js';
  *   OpenAI 口径；modelUsage 为逐模型拆分；costUsdTicks 为厂商侧成本刻度，暂存原始值）；
  * - 工具调用在 tool_call 事件（title/kind 为名，toolCallId 去重）；
  * - timestamp 为 Unix 秒（防御性兼容毫秒）。
+ *
+ * Windows 实测目录名是 encodeURIComponent(绝对路径)，例如
+ * `D%3A%5CAgentData%5C...%5CTokenMonitor`（%5C = 反斜杠，%3A = 冒号）。
+ * 必须用 path.win32，禁止 split('/') / lastIndexOf('/')：POSIX 切法在反斜杠路径上
+ * 会得到整段字符串，项目名就会变成整条 URL 编码路径。
  */
 function projectFromDir(p) {
   // .../sessions/<项目目录(URL编码)>/<会话uuid>/updates.jsonl → 取项目目录。
-  // 用 dirname/basename 而不是 split('/')：Windows 上分隔符是反斜杠，
-  // 按 '/' 切会得到单元素数组，取到 undefined。
-  const projDir = basename(dirname(dirname(p))) || basename(dirname(p));
-  try { return basename(decodeURIComponent(projDir)); } catch { return basename(projDir); }
+  const encoded = win32.basename(win32.dirname(win32.dirname(p)))
+    || win32.basename(win32.dirname(p));
+  let decoded = encoded;
+  try { decoded = decodeURIComponent(encoded); } catch { /* 非法 % 序列：保持原名 */ }
+  return win32.basename(decoded) || decoded;
+}
+
+function stripCR(line) {
+  return line.endsWith('\r') ? line.slice(0, -1) : line;
 }
 
 export async function collectGrokFile(store, { tool, path, fileId, offset }) {
@@ -25,7 +35,8 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
   let liveSid = null;
   const project = projectFromDir(path);
 
-  const { newOffset } = await readLinesFrom(path, offset, (line) => {
+  const { newOffset } = await readLinesFrom(path, offset, (raw) => {
+    const line = stripCR(raw);
     if (!line.includes('"turn_completed"') && !line.includes('"sessionUpdate":"tool_call"') && !line.includes('"totalTokens"')) return;
     let rec;
     try { rec = JSON.parse(line); } catch { return; }
