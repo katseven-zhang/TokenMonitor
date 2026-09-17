@@ -3,53 +3,155 @@
  * Token Watcher — 本地多源 token 用量与配额面板
  *
  * 用法：
- *   tokenwatcher scan          全量/增量扫描一次并退出
- *   tokenwatcher serve [--port 8787]   扫描 + 常驻服务 + 实时监听（默认命令）
- *   tokenwatcher today         打印今日与累计用量摘要
- *   tokenwatcher install-agent [--port 8787]   装成 macOS 开机自启服务
- *   tokenwatcher uninstall-agent               停止并移除该服务
- *   tokenwatcher bar [--port 8787]             启动 macOS 菜单栏胶囊
+ *   tokenwatcher scan
+ *   tokenwatcher serve [--port 8787]
+ *   tokenwatcher today
+ *   tokenwatcher status [--port 8787]
+ *   tokenwatcher install-agent [--port 8787]
+ *   tokenwatcher uninstall-agent
+ *   tokenwatcher bar [--port 8787]
  *
  * tokenmeter 为旧命令名，仍作为别名保留（1.2 及更早版本装的是这个名字）。
  */
-import { existsSync, renameSync } from 'node:fs';
+import { existsSync, renameSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import http from 'node:http';
 import { Store } from '../src/store.js';
 import { Scanner } from '../src/scanner.js';
 import { startServer } from '../src/server.js';
 import { BalancePoller } from '../src/balance.js';
-import { DB_PATH, DEFAULT_PORT } from '../src/config.js';
-
-// 一次性迁移：旧 ~/.token-stats → ~/.tokenmeter
-const LEGACY = join(homedir(), '.token-stats');
-const NEWDIR = join(homedir(), '.tokenmeter');
-if (existsSync(LEGACY) && !existsSync(NEWDIR)) renameSync(LEGACY, NEWDIR);
-const LEGACY_DB = join(NEWDIR, 'token-stats.db');
-if (existsSync(LEGACY_DB) && !existsSync(DB_PATH)) renameSync(LEGACY_DB, DB_PATH);
+import { DB_PATH, DEFAULT_PORT, DATA_DIR } from '../src/config.js';
 
 const log = (msg) => console.log(`[token-watcher] ${msg}`);
+const err = (msg) => console.error(`[token-watcher] ${msg}`);
 
-/**
- * 常驻服务的兜底：本地只读面板最坏结果是数字变陈旧，不该因为某一轮解析/请求出错就整个消失。
- * launchd 的 KeepAlive 会把崩溃拉起来（掩盖问题），`npx token-watcher serve` 则直接死掉。
- * 只给 serve 装——scan/today 是一次性命令，出错必须大声失败（非 0 退出码）。
- */
+const COMMANDS = ['scan', 'serve', 'today', 'install-agent', 'uninstall-agent', 'bar', 'status'];
+const PKG = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
+
 function installDaemonGuards() {
-  process.on('unhandledRejection', (err) => log(`unhandled rejection: ${err?.message ?? err}`));
-  process.on('uncaughtException', (err) => log(`uncaught exception: ${err?.stack ?? err}`));
+  process.on('unhandledRejection', (e) => log(`unhandled rejection: ${e?.message ?? e}`));
+  process.on('uncaughtException', (e) => log(`uncaught exception: ${e?.stack ?? e}`));
 }
 
-const COMMANDS = ['scan', 'serve', 'today', 'install-agent', 'uninstall-agent', 'bar'];
+function helpText() {
+  const win = process.platform === 'win32';
+  const agent = win
+    ? `  install-agent [--port N]   Current-user Task Scheduler (Windows) is not in this CLI yet.
+                               Run "token-watcher serve" to stay resident for now.
+  uninstall-agent            Same: Windows uninstaller is not in this CLI yet.`
+    : `  install-agent [--port N]   Install a current-user macOS LaunchAgent (no admin).
+  uninstall-agent            Stop and remove that LaunchAgent.`;
+  const bar = win
+    ? `  bar [--port N]             Windows tray is not in this CLI yet. Open http://127.0.0.1:<port>`
+    : `  bar [--port N]             Open the macOS menu-bar capsule (connects to 127.0.0.1:<port>).`;
+  return `Token Watcher ${PKG.version}
+
+Usage:
+  token-watcher <command> [options]
+
+Commands:
+  scan                       Incremental scan once, then exit
+  serve [--port N]           Scan, serve the local panel, watch for changes (default)
+  today                      Print today's usage summary
+  status [--port N]          Backend online/offline, port, and data directory (no session contents)
+${agent}
+${bar}
+
+Options:
+  --port, -p N               Loopback port (1-65535). Default ${DEFAULT_PORT}. Invalid values error; they do not fall back.
+  --help, -h                 Show this help (does not create a database)
+  --version, -v              Print version (does not create a database)
+  --force                    install-agent: replace a conflicting legacy agent
+
+Exit codes:
+  0  success / controlled shutdown (Ctrl+C, SIGTERM)
+  1  runtime error
+  2  usage error (unknown command, bad or missing --port)
+`;
+}
+
+function usageExit(msg) {
+  err(msg);
+  err('Run token-watcher --help for usage.');
+  process.exit(2);
+}
 
 function parseArgs(argv) {
-  const args = { cmd: 'serve', port: DEFAULT_PORT, force: false };
+  let cmd = null;
+  let port = null;
+  let force = false;
+  let help = false;
+  let version = false;
   for (let i = 0; i < argv.length; i++) {
-    if (COMMANDS.includes(argv[i])) args.cmd = argv[i];
-    if (argv[i] === '--port' || argv[i] === '-p') args.port = Number(argv[i + 1]) || DEFAULT_PORT;
-    if (argv[i] === '--force') args.force = true;
+    const a = argv[i];
+    if (a === '--help' || a === '-h' || a === 'help') { help = true; continue; }
+    if (a === '--version' || a === '-v' || a === 'version') { version = true; continue; }
+    if (a === '--force') { force = true; continue; }
+    if (a === '--port' || a === '-p') {
+      const raw = argv[i + 1];
+      if (raw == null || String(raw).startsWith('-')) usageExit('Missing value for --port');
+      i++;
+      if (!/^\d+$/.test(String(raw))) usageExit(`Invalid port '${raw}'`);
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) usageExit(`Invalid port '${raw}' (expected 1-65535)`);
+      port = n;
+      continue;
+    }
+    if (a.startsWith('-')) usageExit(`Unknown option '${a}'`);
+    if (COMMANDS.includes(a)) {
+      if (cmd && cmd !== a) usageExit(`Multiple commands: '${cmd}' and '${a}'`);
+      cmd = a;
+      continue;
+    }
+    usageExit(`Unknown command '${a}'`);
   }
-  return args;
+  return {
+    help,
+    version,
+    cmd: cmd || 'serve',
+    port: port ?? DEFAULT_PORT,
+    portExplicit: port != null,
+    force,
+  };
+}
+
+function migrateLegacyHome() {
+  const LEGACY = join(homedir(), '.token-stats');
+  const NEWDIR = join(homedir(), '.tokenmeter');
+  if (existsSync(LEGACY) && !existsSync(NEWDIR)) renameSync(LEGACY, NEWDIR);
+  const LEGACY_DB = join(NEWDIR, 'token-stats.db');
+  if (existsSync(LEGACY_DB) && !existsSync(DB_PATH)) renameSync(LEGACY_DB, DB_PATH);
+}
+
+async function probeBackend(port) {
+  return new Promise((resolve) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: '/api/summary?days=1',
+      method: 'GET',
+      timeout: 1500,
+      headers: { host: `127.0.0.1:${port}` },
+    }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200 || res.statusCode === 403 ? 'online' : `http_${res.statusCode}`);
+    });
+    req.on('timeout', () => { req.destroy(); resolve('offline'); });
+    req.on('error', () => resolve('offline'));
+    req.end();
+  });
+}
+
+function printStatus({ port, backend }) {
+  const lines = [
+    `backend: ${backend}`,
+    `port: ${port}`,
+    `data_dir: ${DATA_DIR}`,
+    `db: ${existsSync(DB_PATH) ? 'present' : 'absent'}`,
+    `offline_mode: ${process.env.TOKENMETER_OFFLINE === '1' ? 'yes' : 'no'}`,
+  ];
+  for (const line of lines) console.log(line);
 }
 
 const fmt = (n) => {
@@ -59,12 +161,34 @@ const fmt = (n) => {
   return String(n ?? 0);
 };
 
-const { cmd, port, force } = parseArgs(process.argv.slice(2));
+const args = parseArgs(process.argv.slice(2));
+if (args.help) {
+  process.stdout.write(helpText());
+  process.exit(0);
+}
+if (args.version) {
+  console.log(PKG.version);
+  process.exit(0);
+}
+
+const { cmd, port, force } = args;
+
+if (cmd === 'status') {
+  const backend = await probeBackend(port);
+  printStatus({ port, backend });
+  process.exit(0);
+}
 
 // 装卸服务与数据无关，必须在 new Store 之前返回：否则仅仅为了装个开机自启
 // 就会在用户机器上建出数据库文件。
 if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
   try {
+    if (process.platform === 'win32') {
+      if (cmd === 'bar') {
+        throw new Error(`Windows tray is not in this CLI yet. Start "token-watcher serve --port ${port}" and open http://127.0.0.1:${port}`);
+      }
+      throw new Error('Windows Task Scheduler install/uninstall is not in this CLI yet. Run "token-watcher serve" to stay resident.');
+    }
     if (cmd === 'bar') {
       const { openBar } = await import('../src/bar.js');
       openBar({ port, log });
@@ -73,13 +197,14 @@ if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
       if (cmd === 'install-agent') installAgent({ port, force, log });
       else uninstallAgent({ log });
     }
-  } catch (err) {
-    log(err.message);
+  } catch (e) {
+    err(e.message);
     process.exit(1);
   }
   process.exit(0);
 }
 
+migrateLegacyHome();
 const store = new Store(DB_PATH);
 
 if (cmd === 'scan') {
@@ -96,7 +221,7 @@ if (cmd === 'scan') {
   const start = new Date(); start.setHours(0, 0, 0, 0);
   const today = db.prepare('SELECT SUM(total_tokens) t FROM events WHERE ts >= ?').get(start.getTime());
   const byTool = db.prepare('SELECT tool, SUM(total_tokens) t FROM events WHERE ts >= ? GROUP BY tool').all(start.getTime());
-  log(`今日: ${fmt(today.t || 0)} tokens（${byTool.map(r => `${r.tool} ${fmt(r.t)}`).join(' | ') || '无'}）`);
+  log(`今日: ${fmt(today.t || 0)} tokens（${byTool.map((r) => `${r.tool} ${fmt(r.t)}`).join(' | ') || '无'}）`);
   store.close();
 } else {
   installDaemonGuards();
@@ -109,6 +234,20 @@ if (cmd === 'scan') {
   }
   scanner.startWatching();
   const balancePoller = new BalancePoller(store, { log });
-  await startServer({ store, scanner, balancePoller, port, log });
+  const server = await startServer({ store, scanner, balancePoller, port, log });
   log('实时监听已启动（FSEvents + 60s 兜底轮询），余额每 30 分钟轮询，Ctrl+C 退出');
+  let shutting = false;
+  const shutdown = (signal) => {
+    if (shutting) return;
+    shutting = true;
+    process.stderr.write(`[token-watcher] shutting down (${signal})\n`);
+    try { scanner.stop(); } catch { /* already stopped */ }
+    try { balancePoller.stop?.(); } catch { /* optional */ }
+    try { server.close(); } catch { /* listen failed */ }
+    try { store.close(); } catch { /* already closed */ }
+    process.exit(0);
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  if (process.platform === 'win32') process.on('SIGBREAK', () => shutdown('SIGBREAK'));
 }
