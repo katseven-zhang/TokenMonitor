@@ -31,10 +31,12 @@ const EXPECTED = [
   { tool: 'opencode', kind: 'sqlite', version: 2, apiBilled: false, collector: 'opencode' },
 ];
 
-console.log('\n[compat] 现有 9 个来源');
+console.log('\n[compat] 内建 9 个来源');
 {
   ok('默认加载无来源级错误', SOURCE_ERRORS.length === 0, JSON.stringify(SOURCE_ERRORS));
-  ok('正好 9 个来源', SOURCES.length === 9, String(SOURCES.length));
+  // 内建 9 源必须逐一在册；之后按“新来源只带自己的文件”边界落地的新来源
+  // 也允许出现在注册表里（UI 走 #16 的确定性回退色），因此只下限断言。
+  ok('内建 9 源全部在册（允许新来源落册）', SOURCES.length >= 9, String(SOURCES.length));
   const byTool = Object.fromEntries(SOURCES.map((s) => [s.tool, s]));
   for (const e of EXPECTED) {
     const s = byTool[e.tool];

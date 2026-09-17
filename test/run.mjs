@@ -232,11 +232,16 @@ console.log('\n[2b] 前端纯函数（lib/）');
   ok('MODEL_PALETTE 为 8 槽', MODEL_PALETTE.length === 8, String(MODEL_PALETTE.length));
   ok('MODEL_PALETTE 使用校验过的色板', MODEL_PALETTE.join(',') ===
     '#3987e5,#d95926,#199e70,#c98500,#d55181,#008300,#9085e9,#e66767', MODEL_PALETTE.join(','));
-  // 与注册表交叉核对，而不是数个数：新增了源却忘了登记配色/标签，
-  // 面板上就是一条无色无名的堆叠段——这种漏登记正是"加源"最容易漏的一步。
+  // 与注册表交叉核对，而不是数个数：内建 9 源漏登记配色/标签，面板上就是一条
+  // 无色无名的堆叠段——这种漏登记正是"加源"最容易漏的一步。此后落地的新来源
+  // 走 web/lib/sources.js 的确定性回退色（#16），不再强制登记，否则每加一个源
+  // 都得改 theme.js，与"新来源只带自己的文件"的边界冲突。
+  const BUILTIN_TOOLS = new Set(['claude-code', 'ccmr', 'codex', 'zcode', 'dsh', 'grok', 'workbuddy', 'pi', 'opencode']);
   const { TOOL_LABEL } = await lib('theme.js');
-  const unstyled = SOURCES.filter(s => !TOOL_COLORS[s.tool] || !TOOL_LABEL[s.tool]).map(s => s.tool);
-  ok('每个注册数据源都有品牌色与标签', unstyled.length === 0, `缺登记: ${unstyled.join(',')}`);
+  const unstyled = SOURCES
+    .filter(s => BUILTIN_TOOLS.has(s.tool) && (!TOOL_COLORS[s.tool] || !TOOL_LABEL[s.tool]))
+    .map(s => s.tool);
+  ok('内建 9 源都有品牌色与标签（新来源允许回退色）', unstyled.length === 0, `缺登记: ${unstyled.join(',')}`);
 
   // ---- 悬浮框定位：只 appendToBody 不够，图表贴顶时会被浏览器窗口继续裁 ----
   ok('悬浮框挂到 body（脱离 overflow:hidden 的图表容器）',
@@ -658,13 +663,16 @@ console.log('\n[4] API 冒烟');
     const s = await res.json();
     ok('summary 200 且结构完整',
       res.status === 200 && s.totals?.all_time_tokens === 27645 + DSH_T && Array.isArray(s.by_day) && s.by_day.length >= 1
-      && Array.isArray(s.health) && s.health.length === 9 && s.costs && Array.isArray(s.costs.by_day)
+      && Array.isArray(s.health) && s.health.length >= 9 && s.costs && Array.isArray(s.costs.by_day)
       && Array.isArray(s.recent) && s.recent.length === 11 + DSH_N,
       `totals=${s.totals?.all_time_tokens} health=${s.health?.length} recent=${s.recent?.length}`);
     // 健康表必须随注册表一起长——曾经它是一份硬编码工具清单，加源必漏
     ok('健康表覆盖全部注册源', s.health.length === SOURCES.length, `${s.health.length} vs ${SOURCES.length}`);
+    // 期望值随注册表一起长：注册的每个源在隔离 HOME 下都应 ok，
+    // 唯一例外是 dsh——它的 fixture 依赖本机 zstd CLI，造不出来时少一个 ok。
     const okTools = s.health.filter(h => h.status === 'ok').length;
-    ok(`健康 ${hasDsh ? 9 : 8} 源 ok`, okTools === (hasDsh ? 9 : 8), `${okTools} ok`);
+    ok(`健康 ${hasDsh ? SOURCES.length : SOURCES.length - 1} 源 ok`,
+      okTools === (hasDsh ? SOURCES.length : SOURCES.length - 1), `${okTools} ok`);
     ok('费用 by_day 有值（本地定价离线可算）', s.costs.by_day.length >= 1 && s.costs.today_cny >= 0);
 
     // 离线模式：不发任何外网请求，用本地缓存/手动汇率/种子价继续出数
