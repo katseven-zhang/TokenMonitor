@@ -42,6 +42,7 @@
     "install-agent": "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
     "uninstall-agent": "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
     "test": "node --disable-warning=ExperimentalWarning test/run.mjs",
+    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "prepack": "bash menubar/build.sh"
   },
   "engines": {

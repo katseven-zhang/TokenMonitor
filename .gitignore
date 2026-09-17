@@ -16,3 +16,5 @@ learnings/
 # Local collaboration metadata
 .agentchatroom/
 .workbuddy/
+# Windows 构建产物（固定覆盖目录，不入库）
+dist/
