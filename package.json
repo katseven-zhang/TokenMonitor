@@ -48,7 +48,8 @@
     "node": ">=22.13"
   },
   "dependencies": {
-    "echarts": "^5.5.0"
+    "echarts": "^5.5.0",
+    "fzstd": "^0.1.1"
   },
   "files": [
     "bin/tokenwatcher.js",
