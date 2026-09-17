@@ -1,0 +1,62 @@
+{
+  "name": "token-watcher",
+  "version": "1.4.3",
+  "description": "Local real-time token usage & quota dashboard for AI coding agents (Claude Code, ccmr, Codex, ZCode, dsh, WorkBuddy, Grok Build, Pi, OpenCode)",
+  "keywords": [
+    "token",
+    "usage",
+    "dashboard",
+    "quota",
+    "cost",
+    "llm",
+    "ai-agent",
+    "claude-code",
+    "codex",
+    "observability",
+    "cli",
+    "macos"
+  ],
+  "homepage": "https://github.com/luwill/token-watcher#readme",
+  "bugs": {
+    "url": "https://github.com/luwill/token-watcher/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luwill/token-watcher.git"
+  },
+  "license": "MIT",
+  "author": "louwill",
+  "type": "module",
+  "bin": {
+    "token-watcher": "bin/tokenwatcher.js",
+    "tokenwatcher": "bin/tokenwatcher.js",
+    "tokenmeter": "bin/tokenwatcher.js"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "scan": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js scan",
+    "serve": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js serve",
+    "today": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js today",
+    "bar": "open bin/token-watcher.app",
+    "build-bar": "bash menubar/build.sh",
+    "install-agent": "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
+    "uninstall-agent": "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
+    "test": "node --disable-warning=ExperimentalWarning test/run.mjs",
+    "prepack": "bash menubar/build.sh"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "echarts": "^5.5.0"
+  },
+  "files": [
+    "bin/tokenwatcher.js",
+    "bin/token-watcher.app/",
+    "src/",
+    "web/",
+    "README.md",
+    "LICENSE",
+    "docs/ARCHITECTURE.md"
+  ]
+}
