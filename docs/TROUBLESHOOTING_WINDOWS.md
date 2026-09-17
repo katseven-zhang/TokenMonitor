@@ -17,7 +17,7 @@ schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 核对自启任务（�
 
 ## 1. 端口被占用（serve 启动失败 / status 显示 offline）
 
-**现象**：`serve` 报端口冲突；日志出现 `port conflict on 127.0.0.1:<端口>` 及占用进程描述（🟡 #11 诊断能力）。
+**现象**：`serve` 报端口冲突；日志出现 `port conflict on 127.0.0.1:<端口>` 及占用进程描述（🟡 #11 评审通过待集成，诊断能力已在 main）。
 
 **诊断**（把 8787 换成实际端口）：
 
@@ -48,10 +48,10 @@ node bin\tokenwatcher.js install-agent --force           # 覆盖式重建任务
 - **登录未触发**：任务为当前用户登录触发（LogonTrigger），注销重登或 `schtasks /Run /TN "TokenMonitor-Server"` 手动启动验证。
 - 卸载时提示任务不存在属正常（幂等卸载，见 [../src/platform/windows-service.js](../src/platform/windows-service.js)；测试 [../test/windows/service.test.mjs](../test/windows/service.test.mjs)）。
 
-## 3. 托盘离线 / 托盘不存在
+## 3. 托盘不在线 / 托盘 EXE 缺失
 
-- Windows 系统托盘**尚未实现**（⛔ Pending，#9）。执行 `bar` 会得到明确报错并提示面板地址，这不是故障。
-- 面板离线：先 `status` 确认后台，再 `serve` 启动；浏览器访问 `http://127.0.0.1:<端口>`。
+- Windows 系统托盘**已实现**（✅ #9 `b534213`，.NET 8 自包含单文件）。`bar` 会查找托盘 EXE 并以 `--port` 拉起；托盘 EXE 属构建产物，源码目录未 `dotnet publish` 时会得到含 `tray` 与面板地址的明确提示——这不是故障，构建托盘（`dotnet publish windows\tray\TokenMonitorTray.csproj -c Release -r win-x64`）或直接用浏览器打开面板均可。
+- 托盘单实例互斥，重复执行 `bar` 不会开出第二个托盘；托盘显示离线时先 `status` 确认后台，再 `serve` 启动或用托盘菜单「启动或重启后台」；浏览器访问 `http://127.0.0.1:<端口>`。
 
 ## 4. SQLite 数据库被占用 / 来源错误提示 SQLITE_BUSY
 
@@ -87,7 +87,7 @@ npm ci        # 或 npm install
 
 ## 8. 日志里出现 [REDACTED]
 
-预期脱敏行为（🟡 #11，[../src/platform/runtime.js](../src/platform/runtime.js) `sanitizeLogMessage`）：`Authorization`/`Bearer` 头、`sk-ant-`/`sk-`/`key-` API Key、`token`/`auth_token`/`access_token` 字段及会话正文片段统一替换为 `[REDACTED]`。日志固定在 `%LOCALAPPDATA%\TokenMonitor\logs\`，单文件 5 MiB、最多 5 个备份轮转，不会无限增长。日志位置本身没有可配置项；如需完整排障，请携带**已脱敏**的日志片段反馈。
+预期脱敏行为（🟡 #11 评审通过待集成，[../src/platform/runtime.js](../src/platform/runtime.js) `sanitizeLogMessage`）：`Authorization`/`Bearer` 头、`sk-ant-`/`sk-`/`key-` API Key、`token`/`auth_token`/`access_token` 字段及会话正文片段统一替换为 `[REDACTED]`。日志固定在 `%LOCALAPPDATA%\TokenMonitor\logs\`，单文件 5 MiB、最多 5 个备份轮转，不会无限增长。日志位置本身没有可配置项；如需完整排障，请携带**已脱敏**的日志片段反馈。
 
 ## 9. 已知遗留问题（非阻断）
 

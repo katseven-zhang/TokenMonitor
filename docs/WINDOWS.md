@@ -2,8 +2,8 @@
 
 适用平台：Windows 10/11 x64。本文只描述**当前已验证**的能力，未实现或尚未通过独立评审的功能一律标注 **Pending** / **待评审**，不把计划写成完成。故障排查见 [TROUBLESHOOTING_WINDOWS.md](./TROUBLESHOOTING_WINDOWS.md)。
 
-- 撰写基线：main 分支，撰写时 HEAD 为 `235cbda`（2026-09-17）。
-- 状态图例：✅ 已集成（独立评审通过并集成）｜🟡 待评审（代码已在 main 工作树，Work Report 已提交，等待另一软件身份验收）｜⛔ Pending（未实现，标注对应任务号）。
+- 撰写基线：main 分支，初版 HEAD 为 `235cbda`（2026-09-17），状态刷新时 HEAD 为 `71697ce`（2026-09-18）。
+- 状态图例：✅ 已集成（独立评审通过并集成）｜🟡 评审通过、integration 待提交（代码已在 main，Work Report 已提交且独立评审 approved，按"未集成不称交付"规约不标 ✅）｜⛔ Pending（未实现或无本地数据面，标注对应任务号）。
 
 ## 1. 系统要求
 
@@ -40,7 +40,7 @@ node bin\tokenwatcher.js serve    # 启动后台与本地面板，默认 http://
 | `today` | 打印今日用量汇总 |
 | `status [--port N]` | 报告后台在线/离线、端口、数据目录、数据库在否、离线模式；**不读取会话内容** |
 | `install-agent` / `uninstall-agent` | 安装/卸载当前用户任务计划（见第 4 节） |
-| `bar` | Windows 上明确报错并提示面板地址（托盘 Pending，见第 5 节） |
+| `bar` | 启动 Windows 系统托盘；托盘 EXE 缺失时打印含 `tray` 与面板地址的明确提示（见第 5 节） |
 | `--help` / `--version` | 不创建数据库 |
 
 - 退出码：`0` 成功或受控关闭（Ctrl+C / SIGTERM / SIGBREAK）；`1` 运行错误；`2` 用法错误（未知命令、非法或缺失 `--port`）。实测：未知命令与 `--port 0` 均返回 2，不静默回退默认端口。
@@ -49,7 +49,7 @@ node bin\tokenwatcher.js serve    # 启动后台与本地面板，默认 http://
 ## 3. 数据目录与端口
 
 - **数据库**：`%USERPROFILE%\.tokenmeter\tokenmeter.db`（[../src/config.js](../src/config.js)）。旧目录 `%USERPROFILE%\.token-stats` 会在首次运行 `scan`/`serve`/`today` 时自动改名迁移（幂等；仅当新目录不存在时执行，见 [../bin/tokenwatcher.js](../bin/tokenwatcher.js) 的 `migrateLegacyHome`）。
-- **运行锁与日志目录（🟡 待评审，#11）**：默认 `%LOCALAPPDATA%\TokenMonitor`（未设置 `LOCALAPPDATA` 时退回 `~/.tokenmeter`）；单实例锁文件为 `tokenmonitor-<端口>.lock`；日志在其 `logs\` 子目录（见第 6 节）。实现：[../src/platform/runtime.js](../src/platform/runtime.js)；测试：[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
+- **运行锁与日志目录（🟡 评审通过待集成，#11）**：默认 `%LOCALAPPDATA%\TokenMonitor`（未设置 `LOCALAPPDATA` 时退回 `~/.tokenmeter`）；单实例锁文件为 `tokenmonitor-<端口>.lock`；日志在其 `logs\` 子目录（见第 6 节）。实现：[../src/platform/runtime.js](../src/platform/runtime.js)；测试：[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
 - **端口**：默认 `8787`；`--port N`（1–65535）对 serve/status/install-agent/bar 均可用，非法值直接报错退出。服务只绑定 `127.0.0.1` 回环并校验 `Host` 头（DNS rebinding 防护，[../src/server.js](../src/server.js)）。
 - **离线模式**：设置 `$env:TOKENMETER_OFFLINE='1'` 后，汇率、LiteLLM 牌价表、厂商余额三类外网请求全部跳过，改用本地缓存 / 内置牌价 / 种子价继续出数（[../src/config.js](../src/config.js)）。CI 与 Windows 专项测试默认离线运行。
 
@@ -68,17 +68,19 @@ schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST  # 手动核对任务状�
 - 卸载只删除该任务，不触碰机器上其他任务计划；任务不存在时卸载友好提示而非报错。
 - 重复安装是覆盖更新；任务 XML 写入前有敏感串检查，**不包含 Token / API Key**。
 
-## 5. 系统托盘（⛔ Pending，#9）
+## 5. 系统托盘（✅ 已集成，#9）
 
-Windows 系统托盘尚未实现。当前在 Windows 上执行 `bar` 会得到明确报错并给出替代方案，不会静默失败：
+实现：[../windows/tray/](../windows/tray/)（.NET 8 WinForms NotifyIcon，自包含单文件 x64）；测试：[../test/windows/tray.test.mjs](../test/windows/tray.test.mjs)。
 
-```text
-Windows tray is not in this CLI yet. Start "token-watcher serve --port 8787" and open http://127.0.0.1:8787
+```powershell
+dotnet publish windows\tray\TokenMonitorTray.csproj -c Release -r win-x64   # 构建自包含单文件托盘
+node bin\tokenwatcher.js bar                                                 # 查找并以 --port 拉起托盘
 ```
 
-替代方式：浏览器打开 `http://127.0.0.1:<端口>`。托盘交付后本节将更新。
+- `bar` 依次查找 `windows/tray/publish` 与包内 `tray/` 目录下的托盘 EXE；找到则以当前 `--port` 拉起，找不到则打印含 `tray` 与面板地址的明确提示，不静默失败（托盘 EXE 属构建产物，源码目录默认没有）。
+- 托盘行为：单实例互斥（命名 Mutex）；约 5 秒异步轮询 `/api/status` 更新图标状态；菜单为「打开面板 / 启动或重启后台 / 退出托盘」。托盘只管理它自己拉起的后台进程，不触碰其他 node.exe。
 
-## 6. 日志（🟡 待评审，#11）
+## 6. 日志（🟡 评审通过待集成，#11）
 
 实现：[../src/platform/runtime.js](../src/platform/runtime.js)（`RuntimeLogger` / `sanitizeLogMessage`）；测试：[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
 
@@ -97,8 +99,8 @@ npm ci
 node bin\tokenwatcher.js status    # 确认后台在线；如已停止则重新 serve
 ```
 
-- 基于安装器的覆盖升级（先验证候选、失败可回滚、保留数据库与配置）：⛔ Pending（#13）。
-- 固定目录覆盖式 EXE 构建（`dist/windows-x64`）：⛔ Pending（#12）。
+- 基于安装器的覆盖升级（先验证候选、失败可回滚、保留数据库与配置）：✅ 已集成（#13，`558380a` + 修复 `50fab85`）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
+- 固定目录覆盖式 EXE 构建（`dist/windows-x64`）：✅ 已集成（#12，`c5db723`）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256）。
 
 ## 8. 卸载与数据备份
 
@@ -121,7 +123,7 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 | --- | --- | --- |
 | 自启安装/卸载 | 当前用户任务计划 `TokenMonitor-Server`（schtasks，免管理员） | 当前用户 LaunchAgent（launchctl + plist） |
 | 核对自启 | `schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST` | `launchctl print gui/$(id -u)/com.tokenmeter.server` |
-| `bar` | 明确报错，提示面板地址（托盘 Pending） | 打开菜单栏胶囊 |
+| `bar` | 启动系统托盘（✅ #9）；托盘 EXE 缺失时明确提示面板地址 | 打开菜单栏胶囊 |
 | 数据目录 | `%USERPROFILE%\.tokenmeter` | `~/.tokenmeter` |
 | 停止后台 | `serve` 窗口 Ctrl+C（SIGBREAK 同样受控关闭） | `launchctl bootout` 或 Ctrl+C |
 | 路径引用 | PowerShell 中含空格/中文路径一律加引号 | 多数场景无需引号 |
@@ -137,7 +139,7 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 
 ## 11. 能力与证据总表
 
-实测环境：Windows x64，Node v24.14.0，2026-09-17；除注明外均为离线（`TOKENMETER_OFFLINE=1`）运行且退出码 0。
+实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMETER_OFFLINE=1`）运行且退出码 0。
 
 | 能力 | 状态 | 任务/commit | 代码 | 测试 |
 | --- | --- | --- | --- | --- |
@@ -151,13 +153,16 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 | Windows 源码/路径 CI 烟测 | ✅ | #14 `d85f78a` | [windows.yml](../.github/workflows/windows.yml)、[verify-windows-source.ps1](../scripts/verify-windows-source.ps1) | [ci-smoke.mjs](../test/windows/ci-smoke.mjs) |
 | 文件监听降级与防抖生命周期 | 🟡 | #7 `e24ad72` | [watch.js](../src/platform/watch.js) | [watch.test.mjs](../test/windows/watch.test.mjs) |
 | 单实例锁/日志/端口诊断/受控关闭 | 🟡 | #11 `235cbda` | [runtime.js](../src/platform/runtime.js) | [runtime.test.mjs](../test/windows/runtime.test.mjs) |
-| 系统托盘 | ⛔ Pending | #9 | — | — |
-| 非管理员安装器（安装/升级/卸载） | ⛔ Pending | #13 | — | — |
-| EXE 覆盖式构建 | ⛔ Pending | #12 | — | — |
-| 面板来源元数据动态展示 | ⛔ Pending | #16 | — | — |
-| 新来源 Antigravity / TRAE / Hermes | ⛔ Pending | #17–#19 | — | — |
+| 系统托盘（WinForms，单实例，状态轮询） | ✅ | #9 `b534213` | [windows/tray/](../windows/tray/) | [tray.test.mjs](../test/windows/tray.test.mjs) |
+| 非管理员安装器（安装/升级/卸载/回滚） | ✅ | #13 `558380a`/`50fab85` | [install-windows.ps1](../scripts/install-windows.ps1)、[uninstall-windows.ps1](../scripts/uninstall-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
+| EXE 覆盖式构建（dist/windows-x64 + manifest） | ✅ | #12 `c5db723` | [build-windows.ps1](../scripts/build-windows.ps1) | —（验收轮实跑验证） |
+| 面板来源元数据动态展示（/api/sources + 回退色） | ✅ | #16 `eedf2c4` | [../src/server.js](../src/server.js)、[../web/lib/sources.js](../web/lib/sources.js) | [ui-sources.test.mjs](../test/windows/ui-sources.test.mjs) |
+| 新来源 Antigravity（~/.gemini/antigravity SQLite） | ✅ | #20 `71697ce` | [antigravity.js](../src/collectors/antigravity.js) | [antigravity.test.mjs](../test/sources/antigravity/antigravity.test.mjs) |
+| 新来源 TRAE / Hermes | ⛔ Pending（blocker：本地无用量数据面） | #18 / #19 | — | — |
 
 ### 本次核验命令与退出码
+
+实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMETER_OFFLINE=1`）运行且退出码 0。
 
 ```text
 TOKENMETER_OFFLINE=1 node test/windows/cli.test.mjs              exit 0
@@ -168,6 +173,10 @@ TOKENMETER_OFFLINE=1 node test/windows/sqlite-sources.test.mjs   exit 0
 TOKENMETER_OFFLINE=1 node test/windows/dsh.test.mjs              exit 0
 TOKENMETER_OFFLINE=1 node test/windows/watch.test.mjs            exit 0
 TOKENMETER_OFFLINE=1 node test/windows/runtime.test.mjs          exit 0
+TOKENMETER_OFFLINE=1 node test/windows/tray.test.mjs             exit 0
+TOKENMETER_OFFLINE=1 node test/windows/installer.test.mjs        exit 0
+TOKENMETER_OFFLINE=1 node test/windows/ui-sources.test.mjs       exit 0
+TOKENMETER_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs  exit 0
 node test/windows/ci-smoke.mjs                                   exit 0
 npm test（在线全量）                                              exit 0，全部通过
 node bin/tokenwatcher.js --version / --help / status             exit 0
