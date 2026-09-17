@@ -3,7 +3,8 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { extname, join, resolve, dirname } from 'node:path';
-import { WEB_DIR, ECHARTS_PATH, DB_PATH, isOffline, SOURCES } from './config.js';
+import { WEB_DIR, ECHARTS_PATH, DB_PATH, isOffline, SOURCES, SOURCE_ERRORS } from './config.js';
+import { TOOL_COLORS, TOOL_LABEL } from '../web/lib/theme.js';
 import { learnWorkbuddyRates } from './rates.js';
 import { loadPricing, computeCosts, computeRecon } from './pricing.js';
 import { ensurePrices, setOnChange as onPricesLoaded } from './litellm.js';
@@ -312,6 +313,26 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
         pid: process.pid,
         port,
         offline: isOffline(),
+      });
+    }
+
+    if (p === '/api/sources') {
+      // 来源注册表元数据：前端据此零改动渲染新来源；roots/文件名不出网，
+      // error 文本里的绝对路径统一抹成 <path>（细节只在本地日志）。
+      return json(res, 200, {
+        sources: SOURCES.map((s) => ({
+          tool: s.tool,
+          label: TOOL_LABEL[s.tool] || s.label || s.tool,
+          color: TOOL_COLORS[s.tool] || null,
+          kind: s.kind,
+          version: s.version,
+          apiBilled: s.apiBilled,
+          capabilities: { kind: s.kind, apiBilled: s.apiBilled, incremental: true },
+        })),
+        errors: SOURCE_ERRORS.map((e) => ({
+          tool: e.tool ?? null,
+          error: String(e.error || '').replace(/[A-Za-z]:[\\/][^\s'",)]*/g, '<path>'),
+        })),
       });
     }
 

@@ -7,10 +7,20 @@ import {
 } from './lib/theme.js';
 import { pickSeries, assignSlots, stackTipFormatter, dayAxis, fillDays } from './lib/series.js';
 import { chartTooltip as makeTooltip } from './lib/tooltip.js';
+import { mergeSourceMeta, fallbackColorFor } from './lib/sources.js';
 
 let days = 7;
 let heatMode = 'd';
 let lastSummary = null;
+
+/** 来源元数据：内建品牌表打底；/api/sources 到达后合并注册表新来源（loadSourceMeta）。
+ *  渲染一律经 toolLabel/toolColor 取值——新来源注册后无需再改本文件。 */
+const SOURCE_META = mergeSourceMeta(TOOL_COLORS, TOOL_LABEL, null);
+const toolLabel = (t) => (SOURCE_META.labels[t] ?? String(t ?? ''));
+const toolColor = (t) => SOURCE_META.colors[t] || fallbackColorFor(t);
+let sourceErrors = [];      // 来源注册表加载错误（/api/sources errors），健康条可见
+let sourceFilterEl = null;  // 会话表来源筛选下拉（动态创建，index.html 无需改动）
+let sourceFilterValue = '';
 
 const charts = {};
 for (const [k, id] of [['trend', 'ch-trend'], ['model', 'ch-model'], ['tool', 'ch-tool'], ['heat', 'ch-heat'], ['toolsAct', 'ch-tools-act'], ['sess', 'sess-detail'], ['costday', 'ch-costday']]) {
@@ -158,7 +168,7 @@ function renderStatus(quota, balances, rates, recon, costs) {
   // API 花费
   if (costs && (costs.today_cny > 0 || costs.all_cny > 0)) {
     const chips = esc((costs.by_tool || []).slice(0, 4)
-      .map(t => `${TOOL_LABEL[t.tool] || t.tool} ¥${t.cost_cny.toFixed(2)}`).join(' · '));
+      .map(t => `${toolLabel(t.tool)} ¥${t.cost_cny.toFixed(2)}`).join(' · '));
     const unpriced = costs.unpriced?.length ? `<div class="recon dim" title="${esc(costs.unpriced.join(', '))}">⚠ ${costs.unpriced.length} 个模型未配价</div>` : '';
     html += `<div class="quota-card">
       <div class="quota-head"><span class="q-title">API 花费（LiteLLM 牌价）</span>
@@ -259,10 +269,10 @@ function renderBalanceStatus(list) {
   }
 }
 
-/** 数据源健康条 */
+/** 数据源健康条：来源/健康走元数据渲染；空来源与注册错误也可见（不静默空白） */
 function renderHealth(health) {
   const host = document.getElementById('health');
-  if (!host || !health?.length) return;
+  if (!host) return;
   const ago = (ts) => {
     if (!ts) return '无';
     const m = Math.floor((Date.now() - ts) / 60000);
@@ -272,11 +282,18 @@ function renderHealth(health) {
   };
   const dot = { ok: '#39d353', empty: '#55556a', stale: '#e0b34c', error: '#e0655f' };
   const label = { ok: '', empty: ' 无数据', stale: ' 疑似停更', error: ' 解析错误' };
-  host.innerHTML = health.map(h =>
+  let html = (health || []).map(h =>
     `<span class="h-chip" title="${esc(h.last_error || (h.last_event_ts ? '最近事件 ' + new Date(h.last_event_ts).toLocaleString('zh-CN') : ''))}">
-      <i style="background:${dot[h.status] || '#55556a'}"></i>${esc(TOOL_LABEL[h.tool] || h.tool)}
+      <i style="background:${dot[h.status] || '#55556a'}"></i>${esc(toolLabel(h.tool))}
       <b>${ago(h.last_event_ts)}</b><em class="${h.status === 'ok' ? '' : 'warn'}">${label[h.status] || ''}</em>
     </span>`).join('');
+  if (sourceErrors.length) {
+    html += `<span class="h-chip" title="${esc(sourceErrors.map(e => `${e.tool ?? '?'}: ${e.error}`).join('\n'))}">
+      <i style="background:#e0655f"></i>来源注册错误<b>${sourceErrors.length}</b>
+    </span>`;
+  }
+  if (!html) { host.innerHTML = '<span class="h-chip dim">暂无来源数据</span>'; return; }
+  host.innerHTML = html;
 }
 
 setInterval(() => {
@@ -294,11 +311,12 @@ setInterval(() => {
 function renderTrend(byDay) {
   const rows = fillDays(byDay, days || 90);
   // 只画范围内真正用过的工具，最近用过的排前面（今天没用、范围内用过的仍保留，
-  // 否则那天的柱子没有图例可解释）；工具数超出品牌色数量时归入「其他」
-  const { keys, rest } = pickSeries(rows, r => r.tools, Object.keys(TOOL_COLORS).length);
-  const slots = assignSlots(keys.filter(t => !TOOL_COLORS[t]), MODEL_PALETTE.length, TOOL_SLOT);
-  const colorOf = (t) => TOOL_COLORS[t] || MODEL_PALETTE[slots.get(t)];
-  const labelOf = (t) => TOOL_LABEL[t] || t;
+  // 否则那天的柱子没有图例可解释）；不在元数据表里的工具走确定性回退色，
+  // 仍超出模型色板容量时归入「其他」
+  const { keys, rest } = pickSeries(rows, r => r.tools, Object.keys(SOURCE_META.colors).length);
+  const slots = assignSlots(keys.filter(t => !SOURCE_META.colors[t]), MODEL_PALETTE.length, TOOL_SLOT);
+  const colorOf = (t) => SOURCE_META.colors[t] || MODEL_PALETTE[slots.get(t)];
+  const labelOf = (t) => toolLabel(t);
   const otherName = rest.length ? `其他(${rest.length})` : '';
   const sumOf = (names, day) => names.reduce((s, n) => s + (day[n] || 0), 0);
   const barOf = (name, names, itemStyle) => ({
@@ -354,7 +372,7 @@ async function renderToolActivity() {
       tooltip: chartTooltip('toolsAct', {
         formatter: (p) => {
           const t = tools[p.dataIndex]?.tools || {};
-          const src = Object.entries(t).map(([k, v]) => `${TOOL_LABEL[k] || k} ${v}`).join(' · ');
+          const src = Object.entries(t).map(([k, v]) => `${toolLabel(k)} ${v}`).join(' · ');
           return `${esc(p.name)}<br/>${p.value} 次调用<br/><span style="color:#8a8aa0">${esc(src)}</span>`;
         },
       }),
@@ -369,7 +387,7 @@ async function renderToolActivity() {
   } catch { /* 静默 */ }
 }
 
-/** 会话钻取：某天的会话列表 + 单会话 token 曲线 */
+/** 会话钻取：某天的会话列表（可按来源筛选）+ 单会话 token 曲线 */
 async function loadSessions(day) {
   const dateInput = document.getElementById('sess-date');
   const d = day || dateInput.value || new Date().toLocaleDateString('sv-SE');
@@ -383,12 +401,17 @@ async function loadSessions(day) {
       host.innerHTML = '<div class="dim" style="padding:12px 8px">当日无会话（点击趋势图柱子或切换日期）</div>';
       return;
     }
+    const visible = sourceFilterValue ? sessions.filter(s => s.tool === sourceFilterValue) : sessions;
+    if (!visible.length) {
+      host.innerHTML = `<div class="dim" style="padding:12px 8px">${esc(toolLabel(sourceFilterValue))} 当日无会话（切换来源或日期）</div>`;
+      return;
+    }
     const hh = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
     host.innerHTML = `<table>
       <thead><tr><th>时间段</th><th>工具</th><th>模型</th><th>项目</th><th>tokens</th><th>调用</th><th>峰值上下文(估)</th></tr></thead>
-      <tbody>${sessions.map(s => `<tr class="sess-row" data-sid="${esc(s.session_id)}">
+      <tbody>${visible.map(s => `<tr class="sess-row" data-sid="${esc(s.session_id)}">
         <td class="dim" style="font-variant-numeric:tabular-nums">${hh(s.first_ts)}–${hh(s.last_ts)}</td>
-        <td><span class="badge ${esc(s.tool)}">${esc(TOOL_LABEL[s.tool] || s.tool)}</span></td>
+        <td><span class="badge ${esc(s.tool)}">${esc(toolLabel(s.tool))}</span></td>
         <td class="ellip" title="${esc((s.models || '').split(',').filter(Boolean).join(', '))}">${esc((s.models || '').split(',').filter(Boolean).slice(0, 2).join(', ')) || '-'}</td>
         <td class="dim ellip-sm" title="${esc(s.project)}">${esc(s.project) || '-'}</td>
         <td>${fmt(s.total)}</td>
@@ -564,7 +587,7 @@ function renderTool(byTool) {
       type: 'pie', radius: ['52%', '76%'], center: ['50%', '52%'],
       itemStyle: { borderColor: '#14141c', borderWidth: 2 },
       label: { color: '#c7c7d8', fontSize: 12, formatter: '{b}\n{d}%' },
-      data: byTool.map(r => ({ name: TOOL_LABEL[r.tool] || r.tool, value: r.total, itemStyle: { color: TOOL_COLORS[r.tool] } })),
+      data: byTool.map(r => ({ name: toolLabel(r.tool), value: r.total, itemStyle: { color: toolColor(r.tool) } })),
     }],
   }, true);
 }
@@ -744,7 +767,7 @@ function renderFeed(recent) {
     <thead><tr><th>时间</th><th>工具</th><th>模型</th><th>项目</th><th>输入</th><th>缓存读</th><th>输出</th></tr></thead>
     <tbody>${recent.map(e => `<tr>
       <td class="dim">${hhmm(e.ts)}</td>
-      <td><span class="badge ${esc(e.tool)}">${esc(TOOL_LABEL[e.tool] || e.tool)}</span></td>
+      <td><span class="badge ${esc(e.tool)}">${esc(toolLabel(e.tool))}</span></td>
       <td>${esc(e.model) || '<span class="dim">-</span>'}</td>
       <td class="dim">${esc(e.project) || '-'}</td>
       <td>${fmtShort(e.input_tokens)}</td>
@@ -774,6 +797,49 @@ function connectSSE() {
   };
 }
 
+/** 来源注册表元数据：新来源零前端改动即可显示。
+ *  旧服务端没有 /api/sources 时静默退回内建 9 源，不影响其余功能。 */
+async function loadSourceMeta() {
+  try {
+    const res = await fetch('/api/sources');
+    if (!res.ok) return;
+    const merged = mergeSourceMeta(TOOL_COLORS, TOOL_LABEL, await res.json());
+    Object.assign(SOURCE_META.colors, merged.colors);
+    Object.assign(SOURCE_META.labels, merged.labels);
+    SOURCE_META.kinds = merged.kinds;
+    SOURCE_META.billed = merged.billed;
+    sourceErrors = merged.errors;
+    buildSourceFilter();
+    load(); // 元数据已变，立即按新颜色/标签重渲染
+  } catch { /* 端点不存在或网络失败：内建表照常工作 */ }
+}
+
+/** 会话表来源筛选：选项由元数据生成，动态插入面板标题行（index.html 无需改动） */
+function buildSourceFilter() {
+  const panel = document.getElementById('sessions-panel');
+  const h2 = panel?.querySelector('h2');
+  if (!h2) return;
+  if (!sourceFilterEl) {
+    sourceFilterEl = document.createElement('select');
+    sourceFilterEl.setAttribute('aria-label', '按来源筛选会话');
+    sourceFilterEl.style.cssText = 'float:right;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font-size:12px;margin-left:8px';
+    sourceFilterEl.addEventListener('change', () => {
+      sourceFilterValue = sourceFilterEl.value;
+      loadSessions();
+    });
+    h2.appendChild(sourceFilterEl);
+  }
+  const tools = Object.keys(SOURCE_META.labels);
+  sourceFilterEl.innerHTML = '<option value="">全部来源</option>'
+    + tools.map(t => `<option value="${esc(t)}">${esc(SOURCE_META.labels[t] || t)}</option>`).join('');
+  sourceFilterEl.value = sourceFilterValue;
+  if (sourceFilterEl.value !== sourceFilterValue) { // 选中项已不在注册表 → 回到全部
+    sourceFilterValue = '';
+    sourceFilterEl.value = '';
+  }
+}
+
+loadSourceMeta();
 load();
 connectSSE();
 setInterval(load, 60_000); // 兜底轮询
