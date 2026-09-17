@@ -1,8 +1,8 @@
 import { readdir, stat } from 'node:fs/promises';
-import { watch as watchCb, existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { SOURCES } from './config.js';
+import { createWatchManager } from './platform/watch.js';
 
 async function* walkByExt(root, match) {
   let entries;
@@ -47,15 +47,24 @@ async function liveRootsOf(source) {
 }
 
 export class Scanner extends EventEmitter {
-  constructor(store, { log = () => {} } = {}) {
+  constructor(store, { log = () => {}, sources = SOURCES, watchOptions = {} } = {}) {
     super();
     this.store = store;
     this.log = log;
+    this.sources = sources;
     this.scanning = false;
     this.stats = {}; // tool -> { files, parse_errors, last_error, last_scan_ms }
-    this._watchers = [];
-    this._debounceTimer = null;
-    this._intervalTimer = null;
+    this._watchOptions = watchOptions;
+    this._watchManager = null;
+    this._scanPending = false;
+  }
+
+  get _watchers() {
+    return this._watchManager ? this._watchManager.watchers : [];
+  }
+
+  get watchManager() {
+    return this._watchManager;
   }
 
   _stat(tool) {
@@ -65,13 +74,17 @@ export class Scanner extends EventEmitter {
 
   /** 全量增量扫描：游标未变的文件直接跳过。 */
   async scanAll({ quiet = false } = {}) {
-    if (this.scanning) return { skippedConcurrent: true };
+    if (this.scanning) {
+      this._scanPending = true;
+      return { skippedConcurrent: true };
+    }
     this.scanning = true;
+    this._scanPending = false;
     const t0 = Date.now();
     let files = 0, inserted = 0;
 
     try {
-    for (const src of SOURCES) {
+    for (const src of this.sources) {
       const st = this._stat(src.tool);
       st.parse_errors = 0; // 每轮重置为"本轮错误数"
       st.last_scan_ms = Date.now();
@@ -128,6 +141,10 @@ export class Scanner extends EventEmitter {
     } finally {
       // 必须无条件复位：留在 true 会让之后每一轮扫描都被"并发中"挡掉，面板从此停更
       this.scanning = false;
+      if (this._scanPending) {
+        this._scanPending = false;
+        queueMicrotask(() => this.scanAll({ quiet: true }).catch(() => {}));
+      }
     }
     this._inheritCodexModels();
     if (!quiet) {
@@ -198,44 +215,29 @@ export class Scanner extends EventEmitter {
     }
   }
 
-  /** FSEvents 监听 + 防抖 + 周期兜底扫描 */
-  startWatching() {
-    for (const src of SOURCES) {
-      for (const root of src.roots) {
-        // sqlite 源：WAL 写入不改变主文件，必须监听父目录才能收到 -wal 变更事件
-        const watchDir = src.kind === 'sqlite' ? dirname(root) : root;
-        // 目录不存在 = 用户没装这个工具，属正常情况，不该刷一行 watch failed 吓人
-        if (!existsSync(watchDir)) continue;
-        try {
-          const w = watchCb(watchDir, { recursive: true }, () => this._scheduleScan());
-          this._watchers.push(w);
-        } catch {
-          try {
-            const w = watchCb(watchDir, () => this._scheduleScan());
-            this._watchers.push(w);
-          } catch (err) {
-            this.log(`watch failed ${watchDir}: ${err.message}`);
-          }
-        }
-      }
-    }
-    this._intervalTimer = setInterval(() => this._scheduleScan(), 60_000);
-    this._intervalTimer.unref();
+  /** Windows 兼容监听 + 优雅降级 + 防抖 + 周期兜底扫描 */
+  startWatching(options = {}) {
+    if (this._watchManager) return; // 幂等保护
+    this._watchManager = createWatchManager({
+      sources: this.sources,
+      onChanged: () => this.scanAll({ quiet: true }).catch(err => this.log(`scan failed: ${err?.message ?? err}`)),
+      log: this.log,
+      ...this._watchOptions,
+      ...options,
+    });
+    this._watchManager.start();
   }
 
   _scheduleScan() {
-    if (this._debounceTimer) return;
-    this._debounceTimer = setTimeout(() => {
-      this._debounceTimer = null;
-      // 定时器回调里的 rejection 无人接手 = 未处理 rejection = 进程退出，必须就地收敛
-      this.scanAll({ quiet: true }).catch(err => this.log(`scan failed: ${err?.message ?? err}`));
-    }, 800);
-    this._debounceTimer.unref();
+    if (this._watchManager) {
+      this._watchManager._scheduleScan('manual');
+    }
   }
 
   stop() {
-    for (const w of this._watchers) w.close();
-    if (this._intervalTimer) clearInterval(this._intervalTimer);
-    if (this._debounceTimer) clearTimeout(this._debounceTimer);
+    if (this._watchManager) {
+      this._watchManager.stop();
+      this._watchManager = null;
+    }
   }
 }
