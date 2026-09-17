@@ -8,6 +8,7 @@ import { learnWorkbuddyRates } from './rates.js';
 import { loadPricing, computeCosts, computeRecon } from './pricing.js';
 import { ensurePrices, setOnChange as onPricesLoaded } from './litellm.js';
 import { ensureFxRate, setOnChange as onFxLoaded } from './fx.js';
+import { diagnosePortConflict } from './platform/runtime.js';
 
 const DB_DIRPATH = dirname(DB_PATH);
 
@@ -304,6 +305,16 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
 
+    if (p === '/api/status') {
+      return json(res, 200, {
+        status: 'ok',
+        uptime: process.uptime(),
+        pid: process.pid,
+        port,
+        offline: isOffline(),
+      });
+    }
+
     if (p === '/api/summary') {
       const days = Math.max(0, Math.min(3650, Number(url.searchParams.get('days')) || 30));
       try {
@@ -389,7 +400,21 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     res.writeHead(404); res.end();
   }, log));
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        const conflict = diagnosePortConflict(port, '127.0.0.1');
+        log(`port conflict on 127.0.0.1:${port}: ${conflict.diagnostics}`);
+        err.conflict = conflict;
+      }
+      reject(err);
+    });
+    server.on('close', () => {
+      for (const res of clients) {
+        try { res.end(); } catch {}
+      }
+      clients.clear();
+    });
     server.listen(port, '127.0.0.1', () => {
       log(`listening on http://127.0.0.1:${port}`);
       resolve(server);
