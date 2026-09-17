@@ -1,0 +1,4 @@
+# dotnet 构建产物不入库（publish 输出即托盘构建物，重建即可恢复）
+bin/
+obj/
+publish/

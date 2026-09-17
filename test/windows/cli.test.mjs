@@ -90,17 +90,33 @@ console.log('\n[status] 不读会话、不建库');
   ok('status 未创建数据库', !existsSync(dbFile));
 }
 
-console.log('\n[agent/bar] Store 创建前分流，Windows 文案准确');
+console.log('\n[agent/bar] Store 创建前分流，bar 按构建物有无给出两种明确行为');
 {
   const src = (await import('node:fs')).readFileSync(CLI, 'utf8');
   ok('install-agent 在 new Store 之前',
     src.indexOf("cmd === 'install-agent'") < src.indexOf('new Store(DB_PATH)'));
+
+  // #9 之后 Windows bar 的契约：有托盘构建物 → detached 启动托盘（exit 0）；
+  // 没有构建物 → stderr 给出含 tray/127.0.0.1 的构建指引（非零）。两种情况都不建库。
+  const trayExe = join(ROOT, 'windows', 'tray', 'publish', 'TokenMonitorTray.exe');
+  const trayRunningBefore = spawnSync('tasklist', ['/FI', 'IMAGENAME eq TokenMonitorTray.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8' })
+    .stdout?.includes('TokenMonitorTray.exe') ?? false;
+
   const bar = run(['bar', '--port', '9001'], { home: HOME });
   ok('bar 未创建数据库', !existsSync(dbFile));
-  ok('bar 非零（本机无对应桌面实现或平台限制）', bar.status !== 0, String(bar.status));
-  ok('bar 错误在 stderr', bar.stderr.length > 0 && !bar.stdout.includes('listening'));
-  if (process.platform === 'win32') {
-    ok('Windows bar 说明托盘未在本 CLI', /tray|127\.0\.0\.1/i.test(bar.stderr), bar.stderr.slice(0, 160));
+  if (process.platform === 'win32' && existsSync(trayExe)) {
+    ok('bar 启动托盘 exit 0（构建物存在）', bar.status === 0, String(bar.status));
+    ok('bar 启动日志在 stdout 且未进入 serve', !bar.stdout.includes('listening') && bar.stdout.includes('127.0.0.1'), bar.stdout.slice(0, 160));
+    if (!trayRunningBefore) {
+      // 测试拉起的托盘要清理（用户自己的托盘不在测试前运行则不受影响）
+      spawnSync('taskkill', ['/IM', 'TokenMonitorTray.exe', '/F'], { stdio: 'ignore' });
+    }
+  } else {
+    ok('bar 非零（无构建物/平台限制）', bar.status !== 0, String(bar.status));
+    ok('bar 错误在 stderr', bar.stderr.length > 0 && !bar.stdout.includes('listening'));
+    if (process.platform === 'win32') {
+      ok('Windows bar 未构建时给出 tray/127.0.0.1 构建指引', /tray|127\.0\.0\.1/i.test(bar.stderr), bar.stderr.slice(0, 160));
+    }
   }
   ok('help 列出 install-agent', /install-agent/.test(readFileSync(CLI, 'utf8')));
 }

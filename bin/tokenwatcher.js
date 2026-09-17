@@ -42,7 +42,7 @@ function helpText() {
     : `  install-agent [--port N]   Install a current-user macOS LaunchAgent (no admin).
   uninstall-agent            Stop and remove that LaunchAgent.`;
   const bar = win
-    ? `  bar [--port N]             Windows tray is not in this CLI yet. Open http://127.0.0.1:<port>`
+    ? `  bar [--port N]             Launch the Windows system tray (connects to 127.0.0.1:<port>).`
     : `  bar [--port N]             Open the macOS menu-bar capsule (connects to 127.0.0.1:<port>).`;
   return `Token Watcher ${PKG.version}
 
@@ -182,9 +182,6 @@ if (cmd === 'status') {
 // 就会在用户机器上建出数据库文件。
 if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
   try {
-    if (process.platform === 'win32' && cmd === 'bar') {
-      throw new Error(`Windows tray is not in this CLI yet. Start "token-watcher serve --port ${port}" and open http://127.0.0.1:${port}`);
-    }
     if (cmd === 'bar') {
       const { openBar } = await import('../src/bar.js');
       openBar({ port, log });
