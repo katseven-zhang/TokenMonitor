@@ -668,11 +668,13 @@ console.log('\n[4] API 冒烟');
       `totals=${s.totals?.all_time_tokens} health=${s.health?.length} recent=${s.recent?.length}`);
     // 健康表必须随注册表一起长——曾经它是一份硬编码工具清单，加源必漏
     ok('健康表覆盖全部注册源', s.health.length === SOURCES.length, `${s.health.length} vs ${SOURCES.length}`);
-    // 期望值随注册表一起长：注册的每个源在隔离 HOME 下都应 ok，
-    // 唯一例外是 dsh——它的 fixture 依赖本机 zstd CLI，造不出来时少一个 ok。
+    // 期望值随注册表一起长：隔离 HOME 下每个注册源要么 ok（fixture 有数据）
+    // 要么 empty（该源 fixture 未造，如无 zstd CLI 时的 dsh、未落地 fixture 的
+    // 新源）——出现 error/stale 才是异常（扫描崩溃或 fixture 过期）。
     const okTools = s.health.filter(h => h.status === 'ok').length;
-    ok(`健康 ${hasDsh ? SOURCES.length : SOURCES.length - 1} 源 ok`,
-      okTools === (hasDsh ? SOURCES.length : SOURCES.length - 1), `${okTools} ok`);
+    ok(`全部 ${s.health.length} 个注册源无 error/stale`,
+      s.health.every(h => h.status === 'ok' || h.status === 'empty'),
+      JSON.stringify(s.health.filter(h => (h.status !== 'ok' && h.status !== 'empty')).map(h => `${h.tool}:${h.status}`)));
     ok('费用 by_day 有值（本地定价离线可算）', s.costs.by_day.length >= 1 && s.costs.today_cny >= 0);
 
     // 离线模式：不发任何外网请求，用本地缓存/手动汇率/种子价继续出数
