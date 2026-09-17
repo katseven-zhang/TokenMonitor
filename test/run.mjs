@@ -28,6 +28,26 @@ const ok = (name, cond, detail = '') => {
   else { failed++; console.error(`  ✗ ${name} ${detail}`); }
 };
 
+async function killAndWait(child, signal = 'SIGTERM') {
+  if (!child || child.exitCode !== null) return;
+  await new Promise(resolve => {
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      resolve();
+    }, 5000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      child.kill(signal);
+    } catch {
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+}
+
 /* ---------- 第 1 层：语法 ---------- */
 console.log('\n[1] 语法检查');
 {
@@ -292,7 +312,7 @@ console.log('\n[2c] 后端健壮性');
   rdb.prepare('INSERT INTO balance_history VALUES (?,?,?)').run(t - 7_200_000, 'deepseek', 130);
   rdb.prepare('INSERT INTO balance_history VALUES (?,?,?)').run(t - 60_000, 'deepseek', 127);
   const fakeStore = { getBalances: () => [{ id: 'deepseek', provider: 'DeepSeek', balance: 127 }] };
-  const usdPricing = { models: { 'deepseek-v4.1-flash': { currency: 'USD', input_miss: 0.30, input_hit: 0.006, output: 1.20 } } };
+  const usdPricing = { models: { 'deepseek-v4.1-flash': { currency: 'USD', input_miss: 0.30, input_hit: 0.006, output: 1.20, off_peak: 1 } } };
   // 余额轮询熔断：GLM 端点持续 404，真实日志两天里带着 key 重试了 85 次
   const { BalancePoller } = await mod('src/balance.js');
   const etmp = mkdtempSync(join(tmpdir(), 'tokenmeter-env-'));
@@ -676,7 +696,7 @@ console.log('\n[4] API 冒烟');
     ok('ECharts 内容像是 JS 而非错误页',
       (ec.headers.get('content-type') || '').includes('javascript'), ec.headers.get('content-type'));
   }
-  child.kill('SIGTERM');
+  await killAndWait(child, 'SIGTERM');
 }
 
 /* ---------- 第 5 层：增量续写（Pi 的 project 必须跨轮次存活） ----------
@@ -867,7 +887,7 @@ console.log('\n[6] DeepSeek 峰谷价');
     ok('谷时减半落到金额上（¥4 而非 ¥6）', m && Math.abs(m.cost_cny - 4) < 1e-9,
       JSON.stringify(m));
   }
-  child.kill();
+  await killAndWait(child);
 }
 
 /* ---------- 第 7 层：无 zstd CLI 时仍能解 dsh ----------
@@ -972,7 +992,7 @@ console.log('\n[9] LaunchAgent 生成');
   }
 
   const entry = entryScript();
-  ok('入口脚本解析到真实存在的文件', existsSync(entry) && entry.endsWith('bin/tokenwatcher.js'), entry);
+  ok('入口脚本解析到真实存在的文件', existsSync(entry) && entry.replaceAll('\\', '/').endsWith('bin/tokenwatcher.js'), entry);
 
   // 装卸服务与数据无关。若排在 new Store 之后，仅仅装个开机自启就会在用户机器上
   // 建出数据库文件——这种副作用没人会想到要去测，只能靠顺序锁住。

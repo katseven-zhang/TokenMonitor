@@ -91,14 +91,41 @@ function migrate(db) {
   }
 }
 
+function openDatabaseWithRetry(dbPath, maxRetries = 10, delayMs = 100) {
+  for (let attempt = 0; ; attempt++) {
+    let db = null;
+    try {
+      db = new DatabaseSync(dbPath);
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA synchronous = NORMAL');
+      // 常驻 serve 与一次性 CLI（today/scan）会并发访问同一库：不设超时则立刻 SQLITE_BUSY
+      db.exec('PRAGMA busy_timeout = 5000');
+      return db;
+    } catch (err) {
+      if (db) {
+        try { db.close(); } catch { /* ignore */ }
+      }
+      const isTransient = err && (
+        err.code === 'ERR_SQLITE_ERROR' ||
+        err.message?.includes('SQLITE_IOERR') ||
+        err.message?.includes('SQLITE_BUSY') ||
+        err.message?.includes('busy') ||
+        err.message?.includes('locked')
+      );
+      if (attempt < maxRetries && isTransient) {
+        // Windows 上短暂的文件锁或 WAL 回放竞争，退避重试
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 export class Store {
   constructor(dbPath) {
     mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA synchronous = NORMAL');
-    // 常驻 serve 与一次性 CLI（today/scan）会并发访问同一库：不设超时则立刻 SQLITE_BUSY
-    this.db.exec('PRAGMA busy_timeout = 5000');
+    this.db = openDatabaseWithRetry(dbPath);
     this.db.exec(SCHEMA);
     migrate(this.db);
     this._insertEvent = this.db.prepare(`

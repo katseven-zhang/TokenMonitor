@@ -22,10 +22,12 @@ const ok = (name, cond, detail = '') => {
   else { failed++; console.error(`  ✗ ${name} ${detail}`); }
 };
 
-if (typeof zlib.zstdCompressSync !== 'function') {
-  console.error('This Node cannot create zstd fixtures (need zlib.zstdCompressSync)');
-  process.exit(2);
-}
+const FIXTURES_B64 = {
+  cat: 'KLUv/SAIQQAAeyJuIjoxfQootS/9IAhBAAB7Im4iOjJ9Cii1L/0gCEEAAHsibiI6M30K',
+  v3: 'KLUv/SBjGQMAeyJ0eXBlIjoic2Vzc2lvbiIsInNlcSI6MSwidGltZSI6MTc3Mzc0OTk3ODAwMCwiY3dkIjoiRDpcXFVzZXJzXFxUZXN0IFVzZXJcXOaIkeeahCDpobnnm65cXHByb2pJIn0KKLUv/SBxLQMAwkUVHGBtc3g8Qm70BbdjMoWCgcKRtoqMipvNIsggwAHJ7m4iIZLiDk433hqGsSwcjcIv/dJMWTNSqmDAtQg4QAykzyxqJEg7d0Z+3tgVgLpDnD9O/xFRvwQANgUb6n6LPR8zBQUotS/9YBUAtQUAAssiH2BJ2wamsFd+ntpCxej9u0MQ9mADsZb+r77JIAAuuBOF994jMDTvwYDggSc+WdWU5xVbCYRxLWnMmzy+I2CgRLv18RTbizFASrdgEYgixxPQrhl5Zptoh3YLW2/SLdt8RHnGuH6T11Z1POcc6TiMVKSE8qusPhZ5hOXj90CZVwFops2LWZ/fJaHfBA8APEWySgWxJqOtwGmnyAwxNMnZSapzEeJ2LfW+zRixshWC3MOrnAE=',
+  old: 'KLUv/SBEIQIAeyJ0eXBlIjoic2Vzc2lvbiIsInNlcSI6MSwidGltZSI6MTc3Mzc0OTk3ODAwMCwiY3dkIjoiL3dvcmsvcHJvakoifQootS/9IHEtAwDCRRUcYG1zeDxCbvQFt2MyhYKBwpG2ioyKm80iyCDAAcnubiIhkuIOTjfeGoaxLByNwi/90kxZM1KqYMC1CDhADKTPLGokSDt3Rn7e2BWAukOcP07/EVG/BAA2BRvqfos9HzMFBSi1L/0gxD0EAFKIGhpwV22oeJJY9vXLSLVWBKf/NQ7U36k8gIYgRIDWWjuWXetwKlQoqQNlkkx+qWjmEHhebRxCs2fXI7zrkswebf4R+IVYP8Jnp/JL6UAUggiUoRSB18Lqn4E3KP/eLGOSQG82L+Y8Xp9DPwoKADnpQLiWIt/GRgiHtcrGhQGfAAIeaHgVMw==',
+  good: 'KLUv/SDKFQQA0gcZGnBp21SeRB5futStss2ngoAetg7DcioAFRSbxnvvfR2faNqFlrZ8hzcvkGRva6vFcKRUgiJQom7LTBNb6KYwdYftDp+d6eYYHME5CF6X6hsEr1C+uR6SWRegWTYr5jxelUXfBQoAcwhuMYTMJBqn0ZuZIUVImtLNShRU18sAoA=='
+};
 
 function makeStore() {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-store-'));
@@ -41,16 +43,29 @@ function eventsOf(store) {
   return store.db.prepare("SELECT * FROM events WHERE tool='dsh' ORDER BY id").all();
 }
 
-const NOW = Date.now();
-const zstdFrames = (lines) => Buffer.concat(lines.map((l) => zlib.zstdCompressSync(Buffer.from(l + '\n'))));
+const NOW = 1773750000000;
+const hasBuiltinCompress = typeof zlib.zstdCompressSync === 'function';
+const zstdFrames = (lines, b64Key) => {
+  if (hasBuiltinCompress) {
+    return Buffer.concat(lines.map((l) => zlib.zstdCompressSync(Buffer.from(l + '\n'))));
+  }
+  if (b64Key && FIXTURES_B64[b64Key]) {
+    return Buffer.from(FIXTURES_B64[b64Key], 'base64');
+  }
+  throw new Error('This Node cannot create zstd fixtures without builtin or precomputed fixtures');
+};
 
 console.log('\n[multi-frame] fzstd 解出全部帧，不靠 zstd.exe');
 {
-  const cat = zstdFrames(['{"n":1}', '{"n":2}', '{"n":3}']);
+  const cat = zstdFrames(['{"n":1}', '{"n":2}', '{"n":3}'], 'cat');
   const text = decompressZstdBuffer(cat);
   ok('三帧全部解出', text.includes('"n":1') && text.includes('"n":2') && text.includes('"n":3'), text);
-  const firstOnly = zlib.zstdDecompressSync(cat).toString();
-  ok('对照：Node 内置只解第一帧（回归靶心）', firstOnly.includes('"n":1') && !firstOnly.includes('"n":2'));
+  if (typeof zlib.zstdDecompressSync === 'function') {
+    const firstOnly = zlib.zstdDecompressSync(cat).toString();
+    ok('对照：Node 内置只解第一帧（回归靶心）', firstOnly.includes('"n":1') && !firstOnly.includes('"n":2'));
+  } else {
+    ok('对照：Node 22.13 无内置 zstd，完全依赖 fzstd 解压', true);
+  }
 }
 
 console.log('\n[v3 + old] 黄金数字，PATH 为空');
@@ -73,7 +88,7 @@ console.log('\n[v3 + old] 黄金数字，PATH 为空');
         message: { role: 'assistant', source: { kind: 'model', model: 'Dsh-Test-Model' } },
       },
     }),
-  ]);
+  ], 'v3');
   const old = zstdFrames([
     JSON.stringify({ type: 'session', seq: 1, time: NOW - 22000, cwd: '/work/projJ' }),
     JSON.stringify({ type: 'request/header', seq: 2, time: NOW - 21500, data: { header: { config: { model: 'Dsh-Header-Model' } } } }),
@@ -81,7 +96,7 @@ console.log('\n[v3 + old] 黄金数字，PATH 为空');
       type: 'assistant/chunk', seq: 3, time: NOW - 20500,
       data: { turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 200, reasoningTokens: 5 } } },
     }),
-  ]);
+  ], 'old');
   writeFileSync(join(v3dir, 'session.v3.jsonl.zstd'), v3);
   writeFileSync(join(olddir, 'session.jsonl.zstd'), old);
   const store = makeStore();
@@ -110,11 +125,13 @@ console.log('\n[v3 + old] 黄金数字，PATH 为空');
 
 console.log('\n[truncated] 坏/截断帧保留已完整帧，不让进程崩');
 {
-  const good = zlib.zstdCompressSync(Buffer.from(JSON.stringify({
-    type: 'assistant/message', seq: 1, time: NOW,
-    data: { usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2 },
-      message: { source: { model: 'm' } } },
-  }) + '\n'));
+  const good = hasBuiltinCompress
+    ? zlib.zstdCompressSync(Buffer.from(JSON.stringify({
+        type: 'assistant/message', seq: 1, time: NOW,
+        data: { usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2 },
+          message: { source: { model: 'm' } } },
+      }) + '\n'))
+    : Buffer.from(FIXTURES_B64.good, 'base64');
   const bad = Buffer.concat([good, Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3])]);
   const text = decompressZstdBuffer(bad);
   ok('截断尾帧后仍解出完整帧', text.includes('"seq":1'), text.slice(0, 80));
