@@ -1,6 +1,15 @@
 import { DatabaseSync } from 'node:sqlite';
-import { basename } from 'node:path';
+import { win32 } from 'node:path';
 import { normalizeModel } from '../models.js';
+
+function isLockError(err) {
+  const m = String(err?.message || err);
+  return /SQLITE_BUSY|SQLITE_LOCKED|database is locked|unable to open/i.test(m);
+}
+
+function openReadonly(path) {
+  return new DatabaseSync(path, { readOnly: true, timeout: 2000 });
+}
 
 /**
  * 水位回看窗口。time_updated 是写入方提交前算好的时间戳，而同一个库可能有多个写入方
@@ -22,13 +31,14 @@ const UPDATED_LOOKBACK_MS = 60_000;
  * 即 input 不含缓存、reasoning 已含在 output 内——与 Pi 相同，与库内公式同构。
  */
 export async function collectOpencodeDb(store, { tool, path, state, version }) {
-  const st = { msgUpdatedAt: 0, partMaxRowid: 0, ...(state ?? {}), _v: version };
+  const prev = { msgUpdatedAt: 0, partMaxRowid: 0, ...(state ?? {}) };
+  const st = { ...prev, _v: version };
   let inserted = 0;
   let db;
   try {
-    db = new DatabaseSync(path, { readOnly: true });
+    db = openReadonly(path);
   } catch {
-    return { inserted, state: st, skip: true }; // db 不存在/被锁：跳过本轮
+    return { inserted: 0, state: prev, skip: true }; // db 不存在/被锁：跳过本轮，水位不动
   }
   try {
     const sessDir = db.prepare('SELECT directory FROM session WHERE id = ?');
@@ -80,7 +90,7 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
         tool,
         model: normalizeModel(d.modelID),
         session_id: m.session_id,
-        project: dir ? basename(dir) : null,
+        project: dir ? (win32.basename(dir) || dir) : null,
         input_tokens: input,
         cached_input: cached,
         cache_write: cacheWrite,
@@ -106,8 +116,11 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
         dedup_key: `${tool}:tc:${d.callID || p.id}`,
       });
     }
+  } catch (err) {
+    if (isLockError(err)) return { inserted: 0, state: prev, skip: true };
+    throw err;
   } finally {
-    db.close();
+    try { db.close(); } catch { /* 只读句柄释放；Windows 上必须关掉才能删临时库 */ }
   }
   return { inserted, state: st };
 }

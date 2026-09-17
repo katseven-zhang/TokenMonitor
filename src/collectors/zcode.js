@@ -1,6 +1,15 @@
 import { DatabaseSync } from 'node:sqlite';
-import { basename } from 'node:path';
+import { win32 } from 'node:path';
 import { normalizeModel } from '../models.js';
+
+function isLockError(err) {
+  const m = String(err?.message || err);
+  return /SQLITE_BUSY|SQLITE_LOCKED|database is locked|unable to open/i.test(m);
+}
+
+function openReadonly(path) {
+  return new DatabaseSync(path, { readOnly: true, timeout: 2000 });
+}
 
 /**
  * ZCode 采集器：直接读 `~/.zcode/cli/db/db.sqlite` 的 model_usage 表（只读，可与其 WAL 并发）。
@@ -10,15 +19,14 @@ import { normalizeModel } from '../models.js';
  *   入库时拆为 新输入/缓存命中；total = input + cache_write + output。
  */
 export async function collectZcodeDb(store, { path, state, version }) {
-  let st = state ?? { maxRowid: 0, toolMaxRowid: 0 };
-  st._v = version;
-  st.toolMaxRowid ??= 0; // v1 存量 state 无此字段：从 0 补读 tool_usage（dedup 幂等）
+  const prev = state ?? { maxRowid: 0, toolMaxRowid: 0 };
+  const st = { ...prev, _v: version, toolMaxRowid: prev.toolMaxRowid ?? 0 };
   let inserted = 0;
   let db;
   try {
-    db = new DatabaseSync(path, { readOnly: true });
+    db = openReadonly(path);
   } catch {
-    return { inserted, state: st, skip: true }; // db 不存在/被锁：跳过本轮
+    return { inserted: 0, state: prev, skip: true }; // db 不存在/被锁：跳过本轮，水位不动
   }
   try {
     // 工具调用水位（tool_usage 表）
@@ -55,7 +63,7 @@ export async function collectZcodeDb(store, { path, state, version }) {
         tool: 'zcode',
         model: normalizeModel(r.model_id),
         session_id: r.session_id,
-        project: dir ? basename(dir) : null,
+        project: dir ? (win32.basename(dir) || dir) : null,
         input_tokens: inputRaw - cached,
         cached_input: cached,
         cache_write: cacheWrite,
@@ -65,8 +73,11 @@ export async function collectZcodeDb(store, { path, state, version }) {
         dedup_key: `zcode:${r.id}`,
       });
     }
+  } catch (err) {
+    if (isLockError(err)) return { inserted: 0, state: prev, skip: true };
+    throw err;
   } finally {
-    db.close();
+    try { db.close(); } catch { /* 只读句柄释放；Windows 上必须关掉才能删临时库 */ }
   }
   return { inserted, state: st };
 }
