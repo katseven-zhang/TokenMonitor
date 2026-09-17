@@ -1,0 +1,64 @@
+name: windows-source
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Verification only. No secrets, no publish, no artifact upload of DBs/logs.
+env:
+  TOKENMETER_OFFLINE: '1'
+
+jobs:
+  windows-smoke:
+    name: smoke Node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.13', '24']
+    defaults:
+      run:
+        working-directory: 'Token Monitor'
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: 'Token Monitor'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm ci
+        run: npm ci --omit=dev
+      - name: import smoke
+        run: node test/windows/ci-smoke.mjs
+      - name: CLI help/version
+        run: |
+          node bin/tokenwatcher.js --help
+          node bin/tokenwatcher.js --version
+      - name: Chinese-path local verifier
+        run: powershell -NoProfile -File scripts/verify-windows-source.ps1
+
+  windows-npm-test:
+    name: npm test Node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.13', '24']
+    defaults:
+      run:
+        working-directory: 'Token Monitor'
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: 'Token Monitor'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: npm ci
+        run: npm ci --omit=dev
+      - name: npm test (failures reported as-is; no continue-on-error)
+        run: npm test
+        # Intentionally no continue-on-error. Baseline failures must fail the job.
