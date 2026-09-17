@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { DEFAULT_PORT } from './config.js';
+import { installWindowsAgent, uninstallWindowsAgent } from './platform/windows-service.js';
 
 /**
  * macOS LaunchAgent 的生成与装卸。
@@ -74,7 +75,17 @@ function requireDarwin() {
   }
 }
 
-export function installAgent({ port = DEFAULT_PORT, force = false, log = console.log } = {}) {
+export function installAgent({ port = DEFAULT_PORT, force = false, log = console.log, run } = {}) {
+  if (process.platform === 'win32') {
+    return installWindowsAgent({
+      node: process.execPath,
+      script: entryScript(),
+      port,
+      force,
+      log,
+      run,
+    });
+  }
   requireDarwin();
   // 旧标签的服务监听同一个端口。装第二个不会报错，只会两边抢端口、一边反复重启，
   // 是那种"看起来装好了其实一直在坏"的状态，所以默认挡住。
@@ -95,7 +106,10 @@ export function installAgent({ port = DEFAULT_PORT, force = false, log = console
   log(`  停用：token-watcher uninstall-agent`);
 }
 
-export function uninstallAgent({ log = console.log } = {}) {
+export function uninstallAgent({ log = console.log, run } = {}) {
+  if (process.platform === 'win32') {
+    return uninstallWindowsAgent({ log, run });
+  }
   requireDarwin();
   log(bootout(AGENT_LABEL) ? '已停止服务' : '服务未在运行');
   if (existsSync(PLIST_PATH)) { rmSync(PLIST_PATH); log(`已移除 ${PLIST_PATH}`); }

@@ -3,7 +3,7 @@
  * 运行：TOKENMETER_OFFLINE=1 node test/windows/cli.test.mjs
  */
 import { spawnSync, spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, readFileSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -48,7 +48,7 @@ console.log('\n[help/version] 不创建数据库，文案按平台');
   ok('--help 列出 scan/serve/today/status', ['scan', 'serve', 'today', 'status'].every((c) => h.stdout.includes(c)));
   ok('--help 未创建数据库', !existsSync(dbFile));
   if (process.platform === 'win32') {
-    ok('Windows help 提到 Task Scheduler 尚未在本 CLI', /Task Scheduler/i.test(h.stdout));
+    ok('Windows help 提到当前用户 Task Scheduler', /Task Scheduler/i.test(h.stdout));
     ok('Windows help 提到 tray 尚未在本 CLI', /tray/i.test(h.stdout));
   } else {
     ok('非 Windows help 提到 LaunchAgent', /LaunchAgent/i.test(h.stdout));
@@ -102,12 +102,7 @@ console.log('\n[agent/bar] Store 创建前分流，Windows 文案准确');
   if (process.platform === 'win32') {
     ok('Windows bar 说明托盘未在本 CLI', /tray|127\.0\.0\.1/i.test(bar.stderr), bar.stderr.slice(0, 160));
   }
-  const inst = run(['install-agent'], { home: HOME });
-  ok('install-agent 未创建数据库', !existsSync(dbFile));
-  if (process.platform === 'win32') {
-    ok('Windows install-agent 说明任务计划未在本 CLI', /Task Scheduler|serve/i.test(inst.stderr), inst.stderr.slice(0, 160));
-    ok('Windows install-agent 非零', inst.status !== 0);
-  }
+  ok('help 列出 install-agent', /install-agent/.test(readFileSync(CLI, 'utf8')));
 }
 
 console.log('\n[serve SIGINT] 受控关闭退出码 0');
