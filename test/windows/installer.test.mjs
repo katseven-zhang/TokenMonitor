@@ -46,13 +46,15 @@ function runPs(script, args, { stdin = '' } = {}) {
   return { code: r.status, out: ((r.stdout || '') + (r.stderr || '')) };
 }
 
-/** Minimal but REAL candidate: node.exe + bin + src + package.json (--version works). */
+/** Minimal but REAL candidate: node.exe + bin + src + web + package.json (--version works).
+ *  web/ 不能省：server.js 自 #16 起静态导入 ../web/lib/theme.js（评审 4020427f187e46b4）。 */
 function makeCandidate(root, version) {
   const cand = join(root, 'cand-' + version);
   mkdirSync(join(cand, 'bin'), { recursive: true });
   cpSync(process.execPath, join(cand, 'node.exe'));
   copyFileSync(join(repo, 'bin', 'tokenwatcher.js'), join(cand, 'bin', 'tokenwatcher.js'));
   copyTree(join(repo, 'src'), join(cand, 'src'));
+  copyTree(join(repo, 'web'), join(cand, 'web'));
   writeFileSync(join(cand, 'package.json'), JSON.stringify({ name: 'token-watcher', version, type: 'module' }));
   return cand;
 }
