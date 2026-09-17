@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
 
@@ -33,7 +33,7 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
 
     if (rec.type === 'session_meta' || payload.type === 'session_meta') {
       // session_meta 的 type 在记录顶层，payload 即 SessionMeta（含 cwd）
-      st.project = payload.cwd ? basename(payload.cwd) : st.project;
+      st.project = payload.cwd ? (win32.basename(payload.cwd) || payload.cwd) : st.project;
       st.parent = payload.parent_thread_id || null; // resume 链：模型可从父会话继承
       return;
     }
@@ -46,7 +46,7 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         store.insertToolCall({
           ts, tool: 'codex', name: payload.name,
           session_id: fileId,
-          dedup_key: `codex:tc:${path}:${payload.call_id ?? `${st.seq}`}`,
+          dedup_key: `codex:tc:${fileId}:${payload.call_id ?? `${st.seq}`}`,
         });
       }
       return;
@@ -100,7 +100,7 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         output_tokens: Math.max(d.o, 0),
         reasoning_tokens: Math.max(d.r, 0),
         total_tokens: total,
-        dedup_key: `codex:${path}:${st.seq}`, // 文件内单调序号，重放幂等
+        dedup_key: `codex:${fileId}:${st.seq}`, // 会话键+序号：归档搬移后路径变了也不能重复计数
       });
     }
   });

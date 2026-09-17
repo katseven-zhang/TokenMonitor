@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
 
@@ -9,6 +9,7 @@ import { normalizeModel } from '../models.js';
  * 每条 type=assistant 记录的 message.usage 即一次 API 调用用量；
  * 同一 message.id + requestId 可能因流式分片/会话复制重复出现，全局去重。
  * model="<synthetic>" 是本地合成消息（无真实用量），跳过。
+ * project 来自 rec.cwd：Windows 路径必须用 path.win32.basename，禁止 split('/')。
  */
 export async function collectClaudeFile(store, { tool, path, fileId, offset }) {
   let inserted = 0;
@@ -39,7 +40,7 @@ export async function collectClaudeFile(store, { tool, path, fileId, offset }) {
       tool,
       model: normalizeModel(model),
       session_id: rec.sessionId || rec.session_id || fileId,
-      project: rec.cwd ? basename(rec.cwd) : null,
+      project: rec.cwd ? (win32.basename(rec.cwd) || rec.cwd) : null,
       input_tokens: input,
       cached_input: cached,
       cache_write: cacheWrite,
