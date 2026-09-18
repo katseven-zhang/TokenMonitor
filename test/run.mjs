@@ -1461,6 +1461,93 @@ console.log('\n[16] codex-pace 消耗节奏与耗尽风险（#47：burn/EWMA/saf
   }
 }
 
+/* ---------- [17] Codex 配额窗口采集（#44） ---------- */
+console.log('\n[17] Codex rate_limits 规范化（#44：三窗口/0与缺失可区分/ms 时间戳/坏字段不抛穿）');
+{
+  const { normalizeRateLimits, collectCodexFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/codex.js')).href);
+  const T0 = Date.parse('2026-09-18T10:00:00Z');
+
+  // --- 纯函数：normalizeRateLimits ---
+  {
+    const n = normalizeRateLimits({
+      plan_type: 'pro',
+      primary: { used_percent: 0, window_minutes: 300, resets_at: '2026-09-18T15:00:00Z', credits: 12 },
+      secondary: { used_percent: 7, window_minutes: 10080, resets_at: '2026-09-25T00:00:00Z' },
+      monthly: { used_percent: 3, window_minutes: 43200, resets_at: '2026-10-01T00:00:00Z', capacity: 1_500_000, remaining: 1_455_000 },
+      duration_minutes: 300,
+    }, T0);
+    ok('#44 三窗口全部规范化', n.windows.map((w) => w.kind).join(',') === 'primary,secondary,monthly');
+    ok('#44 primary 字段精确（黄金数字：pct=0 保留、credits、ms 时间戳）',
+      n.windows[0].used_percent === 0 && n.windows[0].window_minutes === 300
+        && n.windows[0].resets_at === '2026-09-18T15:00:00Z'
+        && n.windows[0].resets_at_ms === Date.parse('2026-09-18T15:00:00Z')
+        && n.windows[0].credits === 12,
+      JSON.stringify(n.windows[0]));
+    ok('#44 monthly 的 capacity/remaining 解析',
+      n.windows[2].capacity === 1_500_000 && n.windows[2].remaining === 1_455_000);
+    ok('#44 plan_type/duration/collected_at',
+      n.plan_type === 'pro' && n.duration_minutes === 300 && n.collected_at === T0);
+    ok('#44 字段缺失 → null（不静默变 0）',
+      normalizeRateLimits({ primary: { used_percent: 42 } }, T0).windows[0].window_minutes === null);
+    ok('#44 空 window 对象不产出条目；三窗口全缺 → null',
+      normalizeRateLimits({ primary: {}, secondary: {} }, T0) === null);
+    ok('#44 raw 非对象/空 → null（来源级可诊断）',
+      normalizeRateLimits(null, T0) === null && normalizeRateLimits('x', T0) === null
+        && normalizeRateLimits({}, T0) === null);
+  }
+
+  // --- 端到端：合成 fixture（中文+空格路径）→ collect → 假 store 黄金数字 ---
+  {
+    const base = mkdtempSync(join(tmpdir(), 'codex44 会话 目录-'));
+    const file = join(base, 'rollout-2026-09-18T10-00-00-abc.jsonl');
+    const lines = [
+      JSON.stringify({ timestamp: '2026-09-18T10:00:00Z', type: 'session_meta', payload: { cwd: 'D:\\工作 项目\\demo' } }),
+      // 首个 token_count：只建基线，不产事件
+      JSON.stringify({ timestamp: '2026-09-18T10:01:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, cache_write_input_tokens: 5, output_tokens: 50, reasoning_output_tokens: 10, total_tokens: 150 } }, rate_limits: { plan_type: 'pro', primary: { used_percent: 42, window_minutes: 300, resets_at: '2026-09-18T15:00:00Z' } } } }),
+      // 第二个：差分产出事件（新输入 = input - cached = 50；total = input+output 口径）
+      JSON.stringify({ timestamp: '2026-09-18T10:05:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 200, cached_input_tokens: 60, cache_write_input_tokens: 5, output_tokens: 90, reasoning_output_tokens: 20, total_tokens: 290 } }, rate_limits: { plan_type: 'pro', primary: { used_percent: 44, window_minutes: 300, resets_at: '2026-09-18T15:00:00Z' }, secondary: { used_percent: 7, window_minutes: 10080, resets_at: '2026-09-25T00:00:00Z' } } } }),
+      // 坏 rate_limits：不抛穿
+      JSON.stringify({ timestamp: '2026-09-18T10:06:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 210, cached_input_tokens: 60, cache_write_input_tokens: 5, output_tokens: 90, reasoning_output_tokens: 20, total_tokens: 300 } }, rate_limits: 'garbage' } }),
+    ];
+    writeFileSync(file, lines.join('\n') + '\n');
+
+    const quotas = [];
+    const events = [];
+    const seenKeys = new Set();
+    const fakeStore = {
+      saveQuota: (tool, ts, data) => quotas.push({ tool, ts, data }),
+      insertEvent: (e) => {
+        if (seenKeys.has(e.dedup_key)) return 0;
+        seenKeys.add(e.dedup_key);
+        events.push(e);
+        return 1;
+      },
+      insertToolCall: () => 1,
+    };
+    const ctx = { path: file, fileId: 'abc', offset: 0, state: null, version: 3 };
+    const r1 = await collectCodexFile(fakeStore, ctx);
+    // 黄金数字（第 2 行差分）：新输入 = Δinput-Δcached = 100-40 = 60；total = Δinput+Δoutput = 140
+    //（第 3 行差分 input 210-200=10 → 另有一条 input=10 的小事件）
+    ok('#44 端到端：差分事件黄金数字（新输入=60/cached=40/output=40/total=140）',
+      events.length === 2 && events[0].input_tokens === 60 && events[0].cached_input === 40
+        && events[0].output_tokens === 40 && events[0].reasoning_tokens === 10 && events[0].total_tokens === 140,
+      JSON.stringify(events[0]));
+    ok('#44 端到端：最新配额快照含规范化窗口（primary+secondary）',
+      quotas.length === 2 && quotas[1].data.windows.length === 2
+        && quotas[1].data.windows[0].used_percent === 44
+        && quotas[1].data.windows[1].kind === 'secondary' && quotas[1].data.windows[1].used_percent === 7,
+      JSON.stringify(quotas.at(-1)));
+    ok('#44 兼容字段保留（used_percent/window_minutes/resets_at/plan_type 顶层）',
+      quotas[1].data.used_percent === 44 && quotas[1].data.plan_type === 'pro');
+    ok('#44 坏 rate_limits 不抛穿（事件照常产出）',
+      events.length === 2 && r1.state.cum.tt === 300, `cum=${r1.state.cum?.tt}`);
+    // 幂等：增量重扫（offset 从 newOffset 继续、state 恢复）→ 零新事件
+    const r2 = await collectCodexFile(fakeStore, { ...ctx, offset: r1.newOffset, state: r1.state });
+    ok('#44 增量重扫幂等（游标恢复，inserted=0）', r2.inserted === 0 && events.length === 2, `inserted=${r2.inserted}`);
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

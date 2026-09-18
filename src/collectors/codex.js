@@ -3,6 +3,52 @@ import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
 
 /**
+ * rate_limits 规范化（#44）：primary(5h)/secondary(weekly)/monthly 三窗口，
+ * 每窗口解析 window_minutes/used_percent/resets_at（ISO 原样 + ms 数值供 #45
+ * 历史存储与 #47 pace 使用）/credits/capacity/remaining。
+ * 显式 0 是合法值（used_percent=0 = 刚重置）；字段缺失一律 null，绝不静默变 0。
+ * raw 非对象或三窗口全缺 → 返回 null（来源级可诊断：调用方跳过配额写入，
+ * 不抛穿、不影响事件采集）。
+ */
+export function normalizeRateLimits(rl, ts) {
+  if (!rl || typeof rl !== 'object') return null;
+  const win = (w, kind) => {
+    if (!w || typeof w !== 'object') return null;
+    const hasWin = w.window_minutes !== undefined || w.used_percent !== undefined
+      || w.resets_at !== undefined || w.credits !== undefined
+      || w.capacity !== undefined || w.remaining !== undefined;
+    if (!hasWin) return null;
+    const iso = typeof w.resets_at === 'string' ? w.resets_at : null;
+    const ms = iso !== null ? Date.parse(iso)
+      : (Number.isFinite(w.resets_at) ? w.resets_at : null);
+    const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return {
+      kind,
+      window_minutes: num(w.window_minutes),
+      used_percent: num(w.used_percent),
+      resets_at: iso,
+      resets_at_ms: Number.isFinite(ms) ? ms : null,
+      credits: num(w.credits),
+      capacity: num(w.capacity),
+      remaining: num(w.remaining),
+    };
+  };
+  const windows = [
+    win(rl.primary, 'primary'),
+    win(rl.secondary, 'secondary'),
+    win(rl.monthly, 'monthly'),
+  ].filter(Boolean);
+  if (!windows.length) return null;
+  return {
+    plan_type: typeof rl.plan_type === 'string' ? rl.plan_type : null,
+    duration_minutes: (typeof rl.duration_minutes === 'number' && Number.isFinite(rl.duration_minutes))
+      ? rl.duration_minutes : null,
+    windows,
+    collected_at: Number.isFinite(ts) ? ts : null,
+  };
+}
+
+/**
  * Codex rollout 采集器（~/.codex/sessions 与 archived_sessions，2.4GB 量级）。
  *
  * - token_count.info.total_token_usage 是会话累计值：按相邻事件差分得到单次用量，
@@ -60,13 +106,21 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
       if (!info?.total_token_usage || !Number.isFinite(ts)) return;
 
       if (payload.rate_limits) {
-        const rl = payload.rate_limits;
-        store.saveQuota('codex', ts, {
-          used_percent: rl.primary?.used_percent ?? null,
-          window_minutes: rl.primary?.window_minutes ?? null,
-          resets_at: rl.primary?.resets_at ?? null,
-          plan_type: rl.plan_type ?? null,
-        });
+        const norm = normalizeRateLimits(payload.rate_limits, ts);
+        if (norm) {
+          // 兼容字段（既有面板/测试消费的顶层字段）取 primary 窗口；
+          // 规范化结果随快照携带全部窗口（#44：供 #45 历史存储与 #46 API）
+          const p = norm.windows.find((w) => w.kind === 'primary') ?? norm.windows[0];
+          store.saveQuota('codex', ts, {
+            used_percent: p.used_percent,
+            window_minutes: p.window_minutes,
+            resets_at: p.resets_at,
+            plan_type: norm.plan_type,
+            ...norm,
+          });
+        }
+        // norm 为 null（坏字段/空对象）：来源级可诊断结果——跳过配额写入，
+        // 不抛穿、不中断 token 事件采集
       }
 
       const t = info.total_token_usage;
