@@ -6,7 +6,7 @@ import { extname, join, resolve, dirname } from 'node:path';
 import { WEB_DIR, ECHARTS_PATH, DB_PATH, isOffline, SOURCES, SOURCE_ERRORS } from './config.js';
 import { TOOL_COLORS, TOOL_LABEL } from '../web/lib/theme.js';
 import { learnWorkbuddyRates } from './rates.js';
-import { loadPricing, computeCosts, computeRecon, isPriced } from './pricing.js';
+import { loadPricing, computeCosts, computeRecon, isPriced, priceOf } from './pricing.js';
 import { ensurePrices, setOnChange as onPricesLoaded } from './litellm.js';
 import { ensureFxRate, setOnChange as onFxLoaded } from './fx.js';
 import { diagnosePortConflict } from './platform/runtime.js';
@@ -490,7 +490,7 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       return json(res, 200, { now, sample_count: samples.length, pace: computePace(samples, now) });
     }
     if (p === '/api/codex/cost') {
-      const window = url.searchParams.get('window') === 'weekly' ? 'weekly' : 'weekly';
+      const window = 'weekly'; // #46 契约当前仅提供 weekly 窗口（#55：修掉原死三元）
       const since = Date.now() - 7 * 86_400_000;
       const rows = db_safe(store).prepare(`
         SELECT COALESCE(model, '(unknown)') model,
@@ -498,27 +498,31 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
                SUM(output_tokens) output, SUM(total_tokens) total, COUNT(*) requests
         FROM events WHERE tool = 'codex' AND ts >= ? GROUP BY model ORDER BY total DESC`).all(since);
       const pricing = await loadPricing();
+      // LiteLLM 兜底牌价预热（与 computeCosts 同款 1.5s race；离线/超时按 unpriced 降级）
+      await Promise.race([ensurePrices().catch(() => {}), new Promise((r) => setTimeout(r, 1500))]);
       const table = pricing?.models && typeof pricing.models === 'object' ? pricing.models : pricing;
+      const rate = typeof pricing?.usd_to_cny === 'number' ? pricing.usd_to_cny : 7.2;
       const models = [];
       const unpriced = [];
       let totalCny = 0;
       for (const r of rows) {
-        // 直查 pricing.json 价表（LiteLLM 兜底归 #37 的完整定价链路，此处不重复实现）；
-        // 表内无该模型 → 进 unpriced_models，金额不伪装为 0
-        const entry = table && typeof table === 'object' ? table[r.model] : null;
-        if (!entry || typeof entry !== 'object') {
+        // #55：计价一律走 pricing.js 的 priceOf（返回的 CNY 单价已含 USD×汇率 /
+        // CNY 直价语义），不再手工读价表字段——修前读 entry.input 等不存在的字段，
+        // SEED 模型（真实字段是 input_miss/input_hit/output）被算出 0 金额的假
+        // priced。cache_write 沿用 priceOf 的 cacheWCny 语义（本地直价表为 0）。
+        // 峰谷（off_peak）按 SQL 分组口径在 computeCosts/PEAK_SQL 中，此处为
+        // 纯 miss 价估算，响应以 disclaimer 声明。
+        const price = priceOf(r.model, table, rate);
+        if (!price) {
           unpriced.push(r.model);
           models.push({ ...r, cost_cny: null, priced: false });
           continue;
         }
-        const rate = typeof pricing?.usd_to_cny === 'number' ? pricing.usd_to_cny : 7.2;
-        const per = (tok, price) => (typeof price === 'number' && Number.isFinite(tok) ? (tok / 1e6) * price : 0);
-        const inUsd = entry.input ?? entry.input_tokens ?? null;
-        const outUsd = entry.output ?? entry.output_tokens ?? null;
-        const cny = (per(r.input - (r.cached_input ?? 0), inUsd)
-          + per(r.cached_input, entry.cache_read ?? inUsd)
-          + per(r.cache_write, entry.cache_write ?? inUsd)
-          + per(r.output, outUsd)) * rate;
+        const freshInput = Math.max(0, (r.input ?? 0) - (r.cached_input ?? 0));
+        const cny = (freshInput / 1e6) * price.inCny
+          + ((r.cached_input ?? 0) / 1e6) * price.cacheCny
+          + ((r.cache_write ?? 0) / 1e6) * price.cacheWCny
+          + ((r.output ?? 0) / 1e6) * price.outCny;
         totalCny += cny;
         models.push({ ...r, cost_cny: Math.round(cny * 100) / 100, priced: true });
       }

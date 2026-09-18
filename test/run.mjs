@@ -1627,6 +1627,7 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
   const now = Date.now();
   store.insertEvent({ ts: now - 3_600_000, tool: 'codex', model: 'glm-5.3-flash', session_id: 'sess-中文 1', project: '工作 项目A', dedup_key: 'c46-1', input_tokens: 1000, cached_input: 200, cache_write: 50, output_tokens: 300, reasoning_tokens: 80, total_tokens: 1300 });
   store.insertEvent({ ts: now - 60_000, tool: 'codex', model: null, session_id: 'sess-2', project: null, dedup_key: 'c46-2', input_tokens: 500, cached_input: 0, cache_write: 0, output_tokens: 100, reasoning_tokens: null, total_tokens: 600 });
+  store.insertEvent({ ts: now - 30_000, tool: 'codex', model: 'deepseek-v4-pro', session_id: 'sess-3', project: null, dedup_key: 'c46-3', input_tokens: 1000, cached_input: 200, cache_write: 0, output_tokens: 300, reasoning_tokens: 0, total_tokens: 1300 });
   store.saveQuota('codex', now - 30_000, {
     used_percent: 40, plan_type: 'pro',
     windows: [
@@ -1649,8 +1650,8 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
       JSON.stringify(sum.body).slice(0, 120));
     const thr = await get('/api/codex/throughput?days=7');
     ok('#46 throughput：breakdown + by_day/by_hour/by_model',
-      thr.status === 200 && thr.body.totals.requests === 2 && thr.body.totals.total === 1900
-        && thr.body.by_day.length >= 1 && thr.body.by_model.length >= 1,
+      thr.status === 200 && thr.body.totals.requests === 3 && thr.body.totals.total === 3200
+        && thr.body.by_day.length >= 1 && thr.body.by_model.length >= 2,
       JSON.stringify(thr.body.totals));
     const thr0 = await get('/api/codex/throughput?days=0');
     ok('#46 throughput days=0 全量（与 7 天等价或更大）',
@@ -1666,14 +1667,20 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
         && Array.isArray(cost.body.models) && Array.isArray(cost.body.unpriced_models)
         && 'usd_to_cny' in cost.body.fx,
       JSON.stringify(cost.body).slice(0, 140));
+    // #55 回归：SEED 表内模型（deepseek-v4-pro，input_miss 1.32 USD/M）必须算出正金额
+    //（修前 cost 路由读 entry.input 等不存在的字段 → 假 priced 真 0 金额）
+    const dsRow = (cost.body.models || []).find((m) => m.model === 'deepseek-v4-pro');
+    ok('#55 表内模型 cost_cny 为正数（不再 0 金额假 priced）',
+      !!dsRow && dsRow.priced === true && dsRow.cost_cny > 0,
+      JSON.stringify(dsRow));
     const ev = await get(`/api/codex/events?model=${encodeURIComponent('glm-5.3-flash')}`);
     ok('#46 events：按 model 筛选（中文 session/project 原样返回）',
       ev.status === 200 && ev.body.count === 1 && ev.body.events[0].session_id === 'sess-中文 1'
         && ev.body.events[0].project === '工作 项目A');
     const rep = await get('/api/codex/report');
     ok('#46 report：by_model + reasoning known/unknown coverage',
-      rep.status === 200 && rep.body.by_model.length === 2
-        && rep.body.reasoning_coverage.known === 1 && rep.body.reasoning_coverage.unknown === 1,
+      rep.status === 200 && rep.body.by_model.length === 3
+        && rep.body.reasoning_coverage.known === 1 && rep.body.reasoning_coverage.unknown === 2,
       JSON.stringify(rep.body.reasoning_coverage));
     const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv?day=${new Date(now).toLocaleDateString('sv-SE')}`);
     const csvBuf = await csvRes.arrayBuffer();
@@ -1683,7 +1690,7 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
       && new Uint8Array(csvBuf.slice(0, 3)).join(',') === '239,187,191';
     ok('#46 CSV：UTF-8 BOM + 中文/逗号转义可解析',
       csvRes.status === 200 && hasBom
-        && csvText.includes('sess-中文 1') && (csvText.match(/\n/g) || []).length === 3,
+        && csvText.includes('sess-中文 1') && (csvText.match(/\n/g) || []).length === 4,
       `bom=${hasBom} nl=${(csvText.match(/\n/g) || []).length}`);
     // 旧库降级：无快照的空库不 500
     const emptyStore = new Store(join(base, 'empty46.db'));

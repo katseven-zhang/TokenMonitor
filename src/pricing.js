@@ -94,7 +94,13 @@ function toCny(amount, currency, rate) {
  * ccmr 为按量实付；claude-code/codex/zcode/grok-build 等订阅制工具为 "API 等值成本"（假设性），
  * 前端需分开标注。窗口：0=全部。
  */
-function priceOf(model, table, rate) {
+/**
+ * 单模型计价（#55 导出为单一计价来源，/api/codex/cost 等消费方必须用它，
+ * 不得另写字段读取逻辑——pricing.json 条目的真实字段是
+ * input_miss/input_hit/output（+可选 off_peak、currency USD|CNY），
+ * LiteLLM 兜底条目则映射为同形 CNY 单价。返回 null = 未配价。
+ */
+export function priceOf(model, table, rate) {
   const local = table[model];
   // 谷时折扣是厂商的计费规则，不是单价。老用户的 pricing.json 里没有 off_peak 字段，
   // 若实现成"缺失即不打折"，峰谷价对他们就是个静默空操作，故缺失时回落种子表。
