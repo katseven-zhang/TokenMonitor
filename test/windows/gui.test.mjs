@@ -162,6 +162,26 @@ console.log('\n[#30] 探测非阻塞分级超时 ≤1.5s；锁中毒降级；未
       && /CTL_STATUS_HWND/.test(source) && /WM_DPICHANGED/.test(source));
 }
 
+// ---- #41 CI 纳入真实 cargo 构建 + --pumpcheck 消息泵存活断言 ----
+console.log('\n[#41] CI cargo 构建门 + --pumpcheck 消息泵存活（「活着但冻结」类缺陷的回归门）');
+{
+  ok('#41 --pumpcheck 无头模式存在', /--pumpcheck/.test(source) && /fn pumpcheck/.test(source));
+  ok('#41 探测点 t=3s/6s（t=3s 晚于首个 2s WM_TIMER tick，否则抓不到 tick 诱发的死锁）',
+    /3000u64, 6000u64/.test(source));
+  ok('#41 跨线程 SendMessageTimeoutW(WM_NULL, SMTO_ABORTIFHUNG)',
+    /SendMessageTimeoutW\(hwnd, 0/.test(source) && /SMTO_ABORTIFHUNG/.test(source));
+  ok('#41 探测结果输出 PUMP=OK / PUMP=DEADLOCK', /PUMP=OK/.test(source) && /PUMP=DEADLOCK/.test(source));
+  const wfPath = join(repo, '.github', 'workflows', 'windows.yml');
+  const yml = existsSync(wfPath) ? readFileSync(wfPath, 'utf8') : '';
+  ok('#41 windows.yml 有独立 windows-gui job（不拖慢 Node 侧 job）', /windows-gui:/.test(yml));
+  ok('#41 CI 真实跑 cargo build --release', /cargo build --release/.test(yml));
+  ok('#41 CI 构建产物后强制跑 gui.test.mjs', /gui\.test\.mjs/.test(yml));
+  ok('#41 cargo 缓存（Swatinem/rust-cache）', /rust-cache@v2/.test(yml));
+  const tcPath = join(repo, 'rust-toolchain.toml');
+  ok('#41 rust 工具链版本固定（rust-toolchain.toml）',
+    existsSync(tcPath) && /channel\s*=\s*["']?\d+\.\d+\.\d+/.test(readFileSync(tcPath, 'utf8')));
+}
+
 // ---- #54 WM_CTLCOLORSTATIC 取 APP 锁导致首个 2s tick 永久自锁死 ----
 console.log('\n[#54] WM_CTLCOLORSTATIC 不得进 APP 锁（静态控件重绘同步回父窗口）');
 {
@@ -176,10 +196,15 @@ console.log('\n[#54] WM_CTLCOLORSTATIC 不得进 APP 锁（静态控件重绘同
     /fn publish_ctl_snapshot/.test(source) && (source.match(/\.store\(/g) || []).length >= 4);
 }
 console.log('\n[behavioral] 已构建 exe 无头自检（中文+空格包布局）');
-if (!existsSync(exe)) {
-  console.log('  [skip] 未找到 windows/gui/publish/TokenMonitorGui.exe —— 先执行：');
-  console.log('         powershell -NoProfile -ExecutionPolicy Bypass -File windows/gui/build.ps1');
-  console.log('  gui behavioral: skipped (artifact not built)');
+if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
+  // 仅限本地无 Rust 工具链时的显式放行（#41）：CI 与默认本地环境不得借此跳绿
+  console.log('  [warn] SKIP_GUI_ARTIFACT=1 —— gui behavioral 显式放行跳过（无产物）');
+} else if (!existsSync(exe)) {
+  // #41：缺产物不再 skip 绿——754313c（#33）只改 GUI 且引入 P1 死锁时 CI 全绿的教训
+  failed++;
+  console.error('  ✗ 未找到 windows/gui/publish/TokenMonitorGui.exe —— 默认必须先构建产物：');
+  console.error('         powershell -NoProfile -ExecutionPolicy Bypass -File windows/gui/build.ps1');
+  console.error('         （仅限本地无 Rust 工具链时，可显式 SKIP_GUI_ARTIFACT=1 放行并视为跳过）');
 } else {
   const base = mkdtempSync(join(tmpdir(), 'gui-启动器 测试-'));
   try {
@@ -300,6 +325,13 @@ if (!existsSync(exe)) {
     } finally {
       server.close();
     }
+
+    // ---- #41: --pumpcheck 消息泵存活（约 6.5s：两次探测各晚于 2s tick；spawnSync 阻塞本进程无妨）----
+    console.log('\n[#41 pumpcheck] 消息泵存活（修前 #33 死锁：进程存活但完全不泵消息，旧断言抱不住）');
+    const pc = spawnSync(exe, ['--pumpcheck'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const pumpOk = (String(pc.stdout).match(/PUMP=OK/g) || []).length;
+    ok('#41 --pumpcheck exit 0 且两次 PUMP=OK',
+      pc.status === 0 && pumpOk === 2, `exit=${pc.status} out=${String(pc.stdout).slice(0, 90)}`);
   } finally {
     try { rmSync(base, { recursive: true, force: true }); } catch { /* Windows 句柄延迟时容忍 */ }
   }

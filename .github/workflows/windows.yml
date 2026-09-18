@@ -62,3 +62,30 @@ jobs:
       - name: npm test (failures reported as-is; no continue-on-error)
         run: npm test
         # Intentionally no continue-on-error. Baseline failures must fail the job.
+
+  windows-gui:
+    name: rust gui build + behavior (#41)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: 'Token Monitor'
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: 'Token Monitor'
+      # 工具链版本由仓库根 rust-toolchain.toml 固定（rustup 自动读取）
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache cargo registry and gui target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'Token Monitor/windows/gui'
+      - name: cargo build --release (zero-warning gate)
+        run: cargo build --release --manifest-path windows/gui/Cargo.toml
+      - name: Build publish artifact
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File windows/gui/build.ps1
+      - name: gui behavioral tests (artifact missing = hard fail; no skip-green)
+        env:
+          TOKENMONITOR_OFFLINE: '1'
+        run: node test/windows/gui.test.mjs

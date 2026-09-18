@@ -36,10 +36,11 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
-    ShowWindow, TranslateMessage, CW_USEDEFAULT, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING,
-    MB_OK, SWP_NOACTIVATE, SWP_NOZORDER, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DPICHANGED, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    PostQuitMessage, PostThreadMessageW, RegisterClassExW, SendMessageTimeoutW, SendMessageW,
+    SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, CW_USEDEFAULT,
+    MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, SMTO_ABORTIFHUNG, SWP_NOACTIVATE,
+    SWP_NOZORDER, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
+    WM_DPICHANGED, WM_QUIT, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
@@ -1259,7 +1260,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
     }
 }
 
-fn run_gui() {
+fn enable_dpi_awareness() {
     unsafe {
         // 启用 DPI 感知（支持 Per-Monitor v2 高分屏缩放）
         let user32 = GetModuleHandleW(wide("user32.dll").as_ptr());
@@ -1278,42 +1279,56 @@ fn run_gui() {
                 }
             }
         }
+    }
+}
 
-        // 初始化公共控件
+fn init_common_controls() {
+    unsafe {
         let icce = windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX>() as u32,
             dwICC: windows_sys::Win32::UI::Controls::ICC_STANDARD_CLASSES
                 | windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES,
         };
         windows_sys::Win32::UI::Controls::InitCommonControlsEx(&icce);
+    }
+}
 
-        let hinstance = GetModuleHandleW(std::ptr::null());
-        let class_name = wide("TokenMonitorGuiWnd");
-        let mut wc: WNDCLASSEXW = std::mem::zeroed();
-        wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
-        wc.lpfnWndProc = Some(wnd_proc);
-        wc.hInstance = hinstance;
-        wc.hCursor = LoadCursorW(std::ptr::null_mut(), 32512 as *const u16); // IDC_ARROW (MAKEINTRESOURCE)
-        wc.hbrBackground = CreateSolidBrush(COLOR_BG);
-        wc.lpszClassName = class_name.as_ptr();
-        if RegisterClassExW(&wc) == 0 {
-            return;
-        }
-        let title = wide("TokenMonitor 控制台");
-        let hwnd = CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            780,
-            560,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            hinstance,
-            std::ptr::null(),
-        );
+/// 注册窗口类并创建主窗口（run_gui 与 --pumpcheck 共用；调用方决定是否 ShowWindow）。
+unsafe fn create_main_window() -> HWND {
+    let hinstance = GetModuleHandleW(std::ptr::null());
+    let class_name = wide("TokenMonitorGuiWnd");
+    let mut wc: WNDCLASSEXW = std::mem::zeroed();
+    wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
+    wc.lpfnWndProc = Some(wnd_proc);
+    wc.hInstance = hinstance;
+    wc.hCursor = LoadCursorW(std::ptr::null_mut(), 32512 as *const u16); // IDC_ARROW (MAKEINTRESOURCE)
+    wc.hbrBackground = CreateSolidBrush(COLOR_BG);
+    wc.lpszClassName = class_name.as_ptr();
+    if RegisterClassExW(&wc) == 0 {
+        return std::ptr::null_mut();
+    }
+    let title = wide("TokenMonitor 控制台");
+    CreateWindowExW(
+        0,
+        class_name.as_ptr(),
+        title.as_ptr(),
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        780,
+        560,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        hinstance,
+        std::ptr::null(),
+    )
+}
+
+fn run_gui() {
+    unsafe {
+        enable_dpi_awareness();
+        init_common_controls();
+        let hwnd = create_main_window();
         if hwnd.is_null() {
             return;
         }
@@ -1322,6 +1337,61 @@ fn run_gui() {
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// 消息泵存活自检（#41）：正常创建窗口（不 ShowWindow）并进入消息循环；
+/// worker 线程在 t=3s 与 t=6s 各做一次跨线程 SendMessageTimeoutW(WM_NULL, SMTO_ABORTIFHUNG, 3000)。
+/// t=3s 必须晚于首个 2s WM_TIMER tick——tick 诱发的重入死锁（#39/#54 类缺陷）要过首个 tick 才现形；
+/// 而「进程存活但完全不泵消息」是「进程 4 秒仍存活」式断言天然抱不住的（#33 引入 P1 死锁时 CI 全绿应验）。
+/// 两次均快速应答 → PUMP=OK；超时 → PUMP=DEADLOCK。全 OK exit 0，任一超时 exit 1。
+fn pumpcheck() -> i32 {
+    unsafe {
+        enable_dpi_awareness();
+        init_common_controls();
+        let hwnd = create_main_window();
+        if hwnd.is_null() {
+            println!("PUMP-SUMMARY=CREATE-FAILED");
+            return 2;
+        }
+        let main_tid = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+        let hwnd_addr = hwnd as isize;
+        let worker = std::thread::spawn(move || {
+            let hwnd = hwnd_addr as HWND;
+            let started = std::time::Instant::now();
+            let mut all_ok = true;
+            for probe_at_ms in [3000u64, 6000u64] {
+                let target = std::time::Duration::from_millis(probe_at_ms);
+                let waited = started.elapsed();
+                if waited < target {
+                    std::thread::sleep(target - waited);
+                }
+                let mut result: usize = 0;
+                let responded =
+                    SendMessageTimeoutW(hwnd, 0 /* WM_NULL */, 0, 0, SMTO_ABORTIFHUNG, 3000, &mut result);
+                if responded != 0 {
+                    println!("PUMP=OK");
+                } else {
+                    println!("PUMP=DEADLOCK");
+                    all_ok = false;
+                }
+            }
+            // 通知 UI 线程的消息循环退出（PostQuitMessage 只作用于调用线程，这里必须走线程消息）
+            PostThreadMessageW(main_tid, WM_QUIT, 0, 0);
+            all_ok
+        });
+        let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if worker.join().unwrap_or(false) {
+            println!("PUMP-SUMMARY=OK");
+            0
+        } else {
+            println!("PUMP-SUMMARY=DEADLOCK");
+            1
         }
     }
 }
@@ -1349,6 +1419,10 @@ fn main() {
             .and_then(|s| parse_port(s))
             .unwrap_or(DEFAULT_PORT);
         std::process::exit(probe_headless(port as u16));
+    }
+    if args.iter().any(|a| a == "--pumpcheck") {
+        // --pumpcheck：无头消息泵存活自检（#41），exit 0 = 两次探测均快速应答
+        std::process::exit(pumpcheck());
     }
 
     // 单实例：判定只在入口这一处；绝不能在窗口构造里再创建同名互斥锁
