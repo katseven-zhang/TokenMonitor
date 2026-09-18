@@ -1711,6 +1711,44 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
   }
 }
 
+/* ---------- [20] 共享 CNY/USD 展示层（#38） ---------- */
+console.log('\n[20] 共享货币展示层（#38：唯一换算入口/USD=¥÷汇率/余额原币种）');
+{
+  const money = await import(pathToFileURL(join(ROOT, 'web/lib/money.js')).href);
+  const appSrc = read(join(ROOT, 'web/app.js'));
+  const htmlSrc = read(join(ROOT, 'web/index.html'));
+  money.initMoney({ usd_to_cny: 7.2, fx_source: 'cache', fx_ts: 1700000000000 });
+
+  ok('#38 默认 CNY 且 ¥ 两位小数', money.getCurrency() === 'CNY' && money.formatMoney(1.234) === '¥1.23');
+  money.setCurrency('USD');
+  ok('#38 USD=CNY÷同一份汇率（$ 前缀 2 位）', money.formatMoney(7.2) === '$1.00' && money.formatMoney(36) === '$5.00');
+  { // 模拟汇率从未就绪：cache-bust 重载一个全新模块实例（initMoney 合法值才覆盖，单例不可清空）
+    const fresh = await import(pathToFileURL(join(ROOT, 'web/lib/money.js')).href + '?fresh=1');
+    fresh.setCurrency('USD');
+    ok('#38 汇率未就绪时 USD 显示 —（不假装换算）', fresh.formatMoney(7.2) === '—', fresh.formatMoney(7.2));
+  }
+  money.initMoney({ usd_to_cny: 7.2 });
+  money.setCurrency('CNY');
+  ok('#38 非数值 → —（缺失不伪装成 0）；显式 0 保留',
+    money.formatMoney(null) === '—' && money.formatMoney(undefined) === '—' && money.formatMoney(0) === '¥0.00');
+  money.setCurrency('EUR');
+  ok('#38 非法货币值回 CNY', money.getCurrency() === 'CNY');
+  ok('#38 轴标签精简版存在（整数位）', money.formatMoneyAxis(36.7) === '¥37');
+  ok('#38 getFx 透传来源/时间（切换时说明仍可见的数据源）',
+    money.getFx().fx_source === 'cache' && money.getFx().usd_to_cny === 7.2 && money.getFx().fx_ts === 1700000000000);
+  money.initMoney({ usd_to_cny: -1 });
+  ok('#38 initMoney 拒绝非法汇率（<=0 不覆盖）', money.getFx().usd_to_cny === 7.2);
+
+  // 结构断言：全站金额走共享层
+  ok('#38 app.js 金额经 formatMoney（模板字符串硬编码 ¥ 已移除）',
+    /formatMoney/.test(appSrc) && !/`¥\$\{/.test(appSrc) && !/'¥' \+ v/.test(appSrc));
+  ok('#38 厂商余额卡与对账行保持原币种（不经 money.js）',
+    appSrc.includes('¥ ${Number(b.balance).toFixed(2)}') && appSrc.includes('余额 ${rc.delta.toFixed(2)} ¥'));
+  ok('#38 index.html 提供 CNY/USD 切换控件', /id="currency"/.test(htmlSrc) && htmlSrc.includes('value="USD"'));
+  ok('#38 切换经 setCurrency + load() 重渲染',
+    /setCurrency\(sel\.value\)/.test(appSrc) && /initMoney\(data\.costs \|\| data\)/.test(appSrc));
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

@@ -8,6 +8,7 @@ import {
 import { pickSeries, assignSlots, stackTipFormatter, dayAxis, fillDays } from './lib/series.js';
 import { chartTooltip as makeTooltip } from './lib/tooltip.js';
 import { mergeSourceMeta, fallbackColorFor } from './lib/sources.js';
+import { initMoney, setCurrency, getCurrency, formatMoney, formatMoneyAxis } from './lib/money.js';
 
 let days = 7;
 let heatMode = 'd';
@@ -71,6 +72,7 @@ async function load() {
     // 后端出错时返回的是 {error}，直接喂给 render() 会在 totals 上抛 TypeError
     if (!data?.totals) throw new Error(data?.error || '响应缺少 totals');
     lastSummary = data;
+    initMoney(data.costs || data); // #38：吃进同一次响应的 usd_to_cny/fx_source/fx_ts
     if (banner) banner.hidden = true;
     render();
   } catch (err) {
@@ -168,14 +170,14 @@ function renderStatus(quota, balances, rates, recon, costs) {
   // API 花费
   if (costs && (costs.today_cny > 0 || costs.all_cny > 0)) {
     const chips = esc((costs.by_tool || []).slice(0, 4)
-      .map(t => `${toolLabel(t.tool)} ¥${t.cost_cny.toFixed(2)}`).join(' · '));
+      .map(t => `${toolLabel(t.tool)} ${formatMoney(t.cost_cny)}`).join(' · '));
     const unpriced = costs.unpriced?.length ? `<div class="recon dim" title="${esc(costs.unpriced.join(', '))}">⚠ ${costs.unpriced.length} 个模型未配价</div>` : '';
     html += `<div class="quota-card">
       <div class="quota-head"><span class="q-title">API 花费（LiteLLM 牌价）</span>
         <span class="q-reset" title="${costs.fx_ts ? '汇率时间 ' + esc(new Date(costs.fx_ts).toLocaleString('zh-CN')) : ''}">USD×${esc(costs.usd_to_cny)}${costs.fx_source === 'manual' ? '' : ' ·实时'}</span></div>
       <div class="q-meta" style="margin-top:2px">
-        <span style="font-size:20px;font-weight:650">今日 ¥ ${costs.today_cny.toFixed(2)}</span>
-        <span class="dim">近7天 ¥ ${costs.last7d_cny.toFixed(2)}</span>
+        <span style="font-size:20px;font-weight:650">今日 ${formatMoney(costs.today_cny)}</span>
+        <span class="dim">近7天 ${formatMoney(costs.last7d_cny)}</span>
       </div>
       <div class="recon dim" title="${chips}">${chips}</div>
       <div class="recon dim" style="margin-top:2px">ccmr 为实付 · 订阅工具为 API 等值成本</div>
@@ -230,7 +232,7 @@ function renderCostDay(byDay) {
     tooltip: chartTooltip('costday', {
       trigger: 'axis',
       formatter: stackTipFormatter(
-        (v) => `¥${v.toFixed(2)}`, i => rows[i]?.models || {}, rest, otherName, 0.005),
+        formatMoney, i => rows[i]?.models || {}, rest, otherName, 0.005),
     }),
     // plain（默认）会换行铺开，保证每条系列都能直接看到，不用翻页
     legend: { textStyle: { color: '#8a8aa0', fontSize: 11 }, bottom: 0, itemWidth: 14, itemHeight: 9, itemGap: 10 },
@@ -239,7 +241,7 @@ function renderCostDay(byDay) {
       axisLabel: { color: '#8a8aa0', rotate: rows.length > 31 ? 45 : 0, fontSize: 11 },
       axisLine: { lineStyle: { color: '#262636' } },
     },
-    yAxis: { type: 'value', axisLabel: { color: '#8a8aa0', formatter: (v) => '¥' + v }, splitLine: { lineStyle: { color: '#1d1d2a' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#8a8aa0', formatter: formatMoneyAxis }, splitLine: { lineStyle: { color: '#1d1d2a' } } },
     series,
   }, true);
 }
@@ -480,6 +482,18 @@ document.getElementById('sess-date').addEventListener('change', () => loadSessio
 document.getElementById('export-btn').addEventListener('click', () => {
   window.open(`/api/export.csv?days=${days}`, '_blank');
 });
+
+// #38：CNY/USD 切换——只经共享 money.js 换算（USD=¥÷同一份汇率），切换后重渲染全部金额
+{
+  const sel = document.getElementById('currency');
+  if (sel) {
+    sel.value = getCurrency();
+    sel.addEventListener('change', () => {
+      setCurrency(sel.value);
+      load();
+    });
+  }
+}
 
 /**
  * 逐日总 token 消耗密度曲线：纯 Canvas 手绘（ECharts line 在此构建渲染不稳定，
