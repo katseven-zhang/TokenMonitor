@@ -17,22 +17,33 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND};
-use windows_sys::Win32::Graphics::Gdi::{GetStockObject, DEFAULT_GUI_FONT};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, RECT};
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC,
+    SetBkColor, SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HFONT, LOGPIXELSY,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
+};
 use windows_sys::Win32::Networking::WinSock as ws;
-use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleW, GetProcAddress, LoadLibraryW,
+};
 use windows_sys::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
     PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowTextLengthW,
-    GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassExW,
-    SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, CW_USEDEFAULT, MB_ICONERROR,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_SETFONT,
-    WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
+    GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostQuitMessage,
+    RegisterClassExW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, CW_USEDEFAULT, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+    SWP_NOACTIVATE, SWP_NOZORDER, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DPICHANGED, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
+
+
 
 const EM_SETSEL: u32 = 0x00B1;
 const EM_SCROLLCARET: u32 = 0x00B7;
@@ -319,11 +330,101 @@ const ID_LOG: isize = 106;
 const ID_STATUS: isize = 107;
 const TIMER_ID: usize = 1;
 
+// 现代化色彩方案（以 Slate / Emerald 为基调，消除系统默认灰底）
+const fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
+}
+
+const COLOR_BG: u32 = rgb(248, 250, 252);              // #F8FAFC - slate-50 现代平滑窗体底色
+const COLOR_CARD: u32 = rgb(255, 255, 255);            // #FFFFFF - 纯白输入与日志卡片
+const COLOR_TEXT_PRIMARY: u32 = rgb(15, 23, 42);       // #0F172A - slate-900 清晰深色正文
+const COLOR_TEXT_MUTED: u32 = rgb(71, 85, 105);        // #475569 - slate-600 标签辅助文字
+const COLOR_STATUS_RUNNING: u32 = rgb(22, 101, 52);     // #166534 - emerald-800 运行中高可读绿
+const COLOR_STATUS_STOPPED: u32 = rgb(100, 116, 139);   // #64748B - slate-500 停止中沉静灰
+
+fn get_window_dpi(hwnd: HWND) -> u32 {
+    unsafe {
+        let user32 = GetModuleHandleW(wide("user32.dll").as_ptr());
+        if !user32.is_null() {
+            type GetDpiForWindowFn = unsafe extern "system" fn(HWND) -> u32;
+            let p = GetProcAddress(user32, b"GetDpiForWindow\0".as_ptr());
+            if let Some(f) = p {
+                let get_dpi: GetDpiForWindowFn = std::mem::transmute(f);
+                let dpi = get_dpi(hwnd);
+                if dpi > 0 {
+                    return dpi;
+                }
+            }
+        }
+        let hdc = GetDC(hwnd);
+        let dpi = if !hdc.is_null() {
+            let d = GetDeviceCaps(hdc, LOGPIXELSY as i32) as u32;
+            ReleaseDC(hwnd, hdc);
+            d
+        } else {
+            96
+        };
+
+        if dpi == 0 { 96 } else { dpi }
+    }
+}
+
+fn scale(val: i32, dpi: u32) -> i32 {
+    ((val * dpi as i32) + 48) / 96
+}
+
+fn create_segoe_font(dpi: u32, size_pt: i32, weight: i32) -> HFONT {
+    let height = -((size_pt * dpi as i32 + 36) / 72);
+    unsafe {
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32, // ClearType 抗锯齿平滑渲染
+            DEFAULT_PITCH as u32 | FF_DONTCARE as u32,
+            wide("Segoe UI").as_ptr(),
+        )
+    }
+}
+
+fn apply_window_theme(hwnd: HWND, app_name: &str) {
+    unsafe {
+        let uxtheme = LoadLibraryW(wide("uxtheme.dll").as_ptr());
+        if !uxtheme.is_null() {
+            type SetWindowThemeFn = unsafe extern "system" fn(HWND, *const u16, *const u16) -> i32;
+            let p = GetProcAddress(uxtheme, b"SetWindowTheme\0".as_ptr());
+            if let Some(f) = p {
+                let set_theme: SetWindowThemeFn = std::mem::transmute(f);
+                set_theme(hwnd, wide(app_name).as_ptr(), std::ptr::null());
+            }
+        }
+    }
+}
+
 struct App {
     hwnd: HWND,
+    port_label: HWND,
     port_edit: HWND,
+    btn_save: HWND,
+    btn_start: HWND,
+    btn_stop: HWND,
+    btn_panel: HWND,
     status_label: HWND,
+    log_header: HWND,
     log_box: HWND,
+    font_ui: HFONT,
+    font_ui_bold: HFONT,
+    font_log: HFONT,
+    bg_brush: HBRUSH,
+    card_brush: HBRUSH,
     data_root: PathBuf,
     settings_path: PathBuf,
     log_path: PathBuf,
@@ -332,6 +433,7 @@ struct App {
     backend_script: Option<PathBuf>,
     external_online: bool,
 }
+
 
 // 单 GUI 线程；HWND 非 Send 只是保守标注，窗口句柄只在本线程使用
 unsafe impl Send for App {}
@@ -505,7 +607,11 @@ impl App {
                 self.data_root.display()
             ),
         );
+        unsafe {
+            InvalidateRect(self.status_label, std::ptr::null(), 1);
+        }
     }
+
 
     fn refresh_log(&mut self) {
         let lines = tail_file(&self.log_path, TAIL_LINES);
@@ -525,7 +631,143 @@ impl App {
     }
 }
 
-use windows_sys::Win32::UI::WindowsAndMessaging::SendMessageW;
+fn layout_controls(hwnd: HWND, app: &App) {
+    let mut rc: RECT = unsafe { std::mem::zeroed() };
+    unsafe { GetClientRect(hwnd, &mut rc) };
+    let client_w = rc.right - rc.left;
+    let client_h = rc.bottom - rc.top;
+    if client_w <= 0 || client_h <= 0 {
+        return;
+    }
+
+    let dpi = get_window_dpi(hwnd);
+    let pad_x = scale(18, dpi);
+    let pad_y = scale(16, dpi);
+    let row1_y = pad_y;
+    let btn_h = scale(30, dpi);
+    let edit_h = scale(28, dpi);
+
+    // 第一行：端口标签、输入框、保存按钮、启停面板按钮组
+    let mut cur_x = pad_x;
+    let label_w = scale(48, dpi);
+    unsafe {
+        SetWindowPos(
+            app.port_label,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y + scale(4, dpi),
+            label_w,
+            scale(22, dpi),
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        cur_x += label_w + scale(6, dpi);
+
+        let edit_w = scale(72, dpi);
+        SetWindowPos(
+            app.port_edit,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y + scale(1, dpi),
+            edit_w,
+            edit_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        cur_x += edit_w + scale(10, dpi);
+
+        let save_w = scale(82, dpi);
+        SetWindowPos(
+            app.btn_save,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y,
+            save_w,
+            btn_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        cur_x += save_w + scale(8, dpi);
+
+        let start_w = scale(68, dpi);
+        SetWindowPos(
+            app.btn_start,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y,
+            start_w,
+            btn_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        cur_x += start_w + scale(8, dpi);
+
+        let stop_w = scale(68, dpi);
+        SetWindowPos(
+            app.btn_stop,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y,
+            stop_w,
+            btn_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+        cur_x += stop_w + scale(8, dpi);
+
+        let panel_w = scale(92, dpi);
+        SetWindowPos(
+            app.btn_panel,
+            std::ptr::null_mut(),
+            cur_x,
+            row1_y,
+            panel_w,
+            btn_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+
+    // 第二行：运行状态信息栏
+    let row2_y = row1_y + btn_h + scale(14, dpi);
+    let content_w = (client_w - pad_x * 2).max(scale(200, dpi));
+    let status_h = scale(24, dpi);
+    unsafe {
+        SetWindowPos(
+            app.status_label,
+            std::ptr::null_mut(),
+            pad_x,
+            row2_y,
+            content_w,
+            status_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+
+    // 第三行：日志分区标题
+    let row3_y = row2_y + status_h + scale(12, dpi);
+    let header_h = scale(22, dpi);
+    unsafe {
+        SetWindowPos(
+            app.log_header,
+            std::ptr::null_mut(),
+            pad_x,
+            row3_y,
+            content_w,
+            header_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+
+    // 第四行：日志输出文本区（自适应铺满剩余高度与宽度）
+    let row4_y = row3_y + header_h + scale(6, dpi);
+    let log_h = (client_h - row4_y - pad_y).max(scale(100, dpi));
+    unsafe {
+        SetWindowPos(
+            app.log_box,
+            std::ptr::null_mut(),
+            pad_x,
+            row4_y,
+            content_w,
+            log_h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+}
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
     match msg {
@@ -542,11 +784,81 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             let settings_path = settings_path_for(&data_root);
             let log_path = log_path_for(&data_root);
             let resolved = resolve_backend(app_root.as_deref(), &exe_dir);
-            *APP.lock().unwrap() = Some(App {
+
+            let dpi = get_window_dpi(hwnd);
+            let font_ui = create_segoe_font(dpi, 10, FW_NORMAL as i32);
+            let font_ui_bold = create_segoe_font(dpi, 10, FW_SEMIBOLD as i32);
+            let font_log = create_segoe_font(dpi, 10, FW_NORMAL as i32);
+            let bg_brush = CreateSolidBrush(COLOR_BG);
+            let card_brush = CreateSolidBrush(COLOR_CARD);
+
+            let hinstance = GetModuleHandleW(std::ptr::null());
+            let edit: Vec<u16> = wide("EDIT");
+            let button: Vec<u16> = wide("BUTTON");
+            let class_static: Vec<u16> = wide("STATIC");
+            let mk = |id: isize, class: &[u16], text: &str, style: u32, x: i32, y: i32, w: i32, h: i32| -> HWND {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    wide(text).as_ptr(),
+                    style,
+                    x,
+                    y,
+                    w,
+                    h,
+                    hwnd,
+                    id as *mut core::ffi::c_void,
+                    hinstance,
+                    std::ptr::null(),
+                )
+            };
+            let child = WS_CHILD | WS_VISIBLE;
+            let port_label = mk(0, &class_static, "端口：", child, 18, 20, 48, 22);
+            let port_edit = mk(ID_PORT, &edit, "", child | WS_BORDER, 72, 17, 72, 28);
+            let btn_save = mk(ID_SAVE, &button, "保存端口", child, 154, 16, 82, 30);
+            let btn_start = mk(ID_START, &button, "启动", child, 244, 16, 68, 30);
+            let btn_stop = mk(ID_STOP, &button, "停止", child, 320, 16, 68, 30);
+            let btn_panel = mk(ID_PANEL, &button, "打开面板", child, 396, 16, 92, 30);
+            let status_label = mk(ID_STATUS, &class_static, "状态：检测中…", child, 18, 58, 720, 24);
+            let log_header = mk(0, &class_static, "输出日志（最近 400 行，自动刷新）：", child, 18, 92, 400, 22);
+            let log_box = mk(
+                ID_LOG,
+                &edit,
+                "",
+                child | WS_VSCROLL | WS_BORDER | ES_MULTILINE,
+                18,
+                120,
+                720,
+                380,
+            );
+
+            // 应用 Segoe UI 现代清晰字体到全部控件
+            for h in [port_label, port_edit, btn_save, btn_start, btn_stop, btn_panel, status_label] {
+                SendMessageW(h, WM_SETFONT, font_ui as usize, 1);
+            }
+            SendMessageW(log_header, WM_SETFONT, font_ui_bold as usize, 1);
+            SendMessageW(log_box, WM_SETFONT, font_log as usize, 1);
+
+            // 启用 uxtheme 视觉样式
+            apply_window_theme(port_edit, "Explorer");
+            apply_window_theme(log_box, "Explorer");
+
+            let app = App {
                 hwnd,
-                port_edit: std::ptr::null_mut(),
-                status_label: std::ptr::null_mut(),
-                log_box: std::ptr::null_mut(),
+                port_label,
+                port_edit,
+                btn_save,
+                btn_start,
+                btn_stop,
+                btn_panel,
+                status_label,
+                log_header,
+                log_box,
+                font_ui,
+                font_ui_bold,
+                font_log,
+                bg_brush,
+                card_brush,
                 data_root,
                 settings_path,
                 log_path,
@@ -554,58 +866,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 backend_exe: resolved.as_ref().map(|(e, _)| e.clone()),
                 backend_script: resolved.as_ref().map(|(_, s)| s.clone()),
                 external_online: false,
-            });
-
-            let hinstance = GetModuleHandleW(std::ptr::null());
-            let font = GetStockObject(DEFAULT_GUI_FONT);
-            let edit: Vec<u16> = wide("EDIT");
-            let button: Vec<u16> = wide("BUTTON");
-            let class_static: Vec<u16> = wide("STATIC");
-            let mut mk = |id: isize, class: &[u16], text: &str, style: u32, x: i32, y: i32, w: i32, h: i32| -> HWND {
-                unsafe {
-                    CreateWindowExW(
-                        0,
-                        class.as_ptr(),
-                        wide(text).as_ptr(),
-                        style,
-                        x,
-                        y,
-                        w,
-                        h,
-                        hwnd,
-                        id as *mut core::ffi::c_void,
-                        hinstance,
-                        std::ptr::null(),
-                    )
-                }
             };
-            let child = WS_CHILD | WS_VISIBLE;
-            let port_edit = mk(ID_PORT, &edit, "", child | WS_BORDER, 52, 9, 70, 24);
-            mk(ID_SAVE, &button, "保存端口", child, 130, 7, 80, 26);
-            mk(ID_START, &button, "启动", child, 220, 7, 66, 26);
-            mk(ID_STOP, &button, "停止", child, 292, 7, 66, 26);
-            mk(ID_PANEL, &button, "打开面板", child, 364, 7, 90, 26);
-            let status_label = mk(ID_STATUS, &class_static, "状态：检测中…", child, 12, 40, 720, 20);
-            mk(0, &class_static, "输出日志（最近 400 行，自动刷新）：", child, 12, 64, 400, 18);
-            let log_box = mk(
-                ID_LOG,
-                &edit,
-                "",
-                child | WS_VSCROLL | WS_BORDER | ES_MULTILINE,
-                12,
-                86,
-                720,
-                380,
-            );
-            for h in [port_edit, status_label, log_box] {
-                SendMessageW(h, WM_SETFONT, font as usize, 1);
-            }
-            if let Some(saved) = with_app(|a| {
-                a.port_edit = port_edit;
-                a.status_label = status_label;
-                a.log_box = log_box;
-                load_port(&a.settings_path).to_string()
-            }) {
+
+            layout_controls(hwnd, &app);
+            *APP.lock().unwrap() = Some(app);
+
+            if let Some(saved) = with_app(|a| load_port(&a.settings_path).to_string()) {
                 SetWindowTextW(port_edit, wide(&saved).as_ptr());
             }
             let backend_missing = with_app(|a| a.backend_exe.is_none()).unwrap_or(false);
@@ -615,6 +881,77 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             }
             SetTimer(hwnd, TIMER_ID, 2000, None);
             0
+        }
+        WM_SIZE => {
+            with_app(|a| {
+                layout_controls(hwnd, a);
+            });
+            0
+        }
+        WM_DPICHANGED => {
+            let new_dpi = (wparam >> 16) as u32;
+            with_app(|a| {
+                DeleteObject(a.font_ui as _);
+                DeleteObject(a.font_ui_bold as _);
+                DeleteObject(a.font_log as _);
+
+                let font_ui = create_segoe_font(new_dpi, 10, FW_NORMAL as i32);
+                let font_ui_bold = create_segoe_font(new_dpi, 10, FW_SEMIBOLD as i32);
+                let font_log = create_segoe_font(new_dpi, 10, FW_NORMAL as i32);
+                for h in [a.port_label, a.port_edit, a.btn_save, a.btn_start, a.btn_stop, a.btn_panel, a.status_label] {
+                    SendMessageW(h, WM_SETFONT, font_ui as usize, 1);
+                }
+                SendMessageW(a.log_header, WM_SETFONT, font_ui_bold as usize, 1);
+                SendMessageW(a.log_box, WM_SETFONT, font_log as usize, 1);
+                a.font_ui = font_ui;
+                a.font_ui_bold = font_ui_bold;
+                a.font_log = font_log;
+
+                let prc = lparam as *const RECT;
+                if !prc.is_null() {
+                    let r = *prc;
+                    SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                }
+                layout_controls(hwnd, a);
+            });
+            0
+        }
+        WM_CTLCOLORSTATIC => {
+            let hdc = wparam as HDC;
+            let child = lparam as HWND;
+            SetBkMode(hdc, TRANSPARENT as i32);
+            let (color, bg) = with_app(|a| {
+                if child == a.status_label {
+                    let text_color = if a.own_backend_alive() || a.external_online {
+                        COLOR_STATUS_RUNNING
+                    } else {
+                        COLOR_STATUS_STOPPED
+                    };
+                    (text_color, a.bg_brush)
+                } else if child == a.log_header {
+                    (COLOR_TEXT_PRIMARY, a.bg_brush)
+                } else {
+                    (COLOR_TEXT_MUTED, a.bg_brush)
+                }
+            })
+            .unwrap_or((COLOR_TEXT_MUTED, std::ptr::null_mut()));
+            SetTextColor(hdc, color);
+            bg as isize
+        }
+        WM_CTLCOLOREDIT => {
+            let hdc = wparam as HDC;
+            SetBkColor(hdc, COLOR_CARD);
+            SetTextColor(hdc, COLOR_TEXT_PRIMARY);
+            let brush = with_app(|a| a.card_brush).unwrap_or(std::ptr::null_mut());
+            brush as isize
         }
         WM_TIMER => {
             with_app(|a| {
@@ -635,7 +972,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             0
         }
         WM_DESTROY => {
-            with_app(|a| a.stop_own_backend(false)); // 与托盘一致：退出只停自己拉起的后台
+            with_app(|a| {
+                a.stop_own_backend(false); // 与托盘一致：退出只停自己拉起的后台
+                DeleteObject(a.font_ui as _);
+                DeleteObject(a.font_ui_bold as _);
+                DeleteObject(a.font_log as _);
+                DeleteObject(a.bg_brush as _);
+                DeleteObject(a.card_brush as _);
+            });
             KillTimer(hwnd, TIMER_ID);
             PostQuitMessage(0);
             0
@@ -646,6 +990,32 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
 
 fn run_gui() {
     unsafe {
+        // 启用 DPI 感知（支持 Per-Monitor v2 高分屏缩放）
+        let user32 = GetModuleHandleW(wide("user32.dll").as_ptr());
+        if !user32.is_null() {
+            type SetDpiContextFn = unsafe extern "system" fn(isize) -> i32;
+            let p = GetProcAddress(user32, b"SetProcessDpiAwarenessContext\0".as_ptr());
+            if let Some(set_dpi_context) = p {
+                let f: SetDpiContextFn = std::mem::transmute(set_dpi_context);
+                f(-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+            } else {
+                type SetDpiAwareFn = unsafe extern "system" fn() -> i32;
+                let p_old = GetProcAddress(user32, b"SetProcessDPIAware\0".as_ptr());
+                if let Some(set_dpi_aware) = p_old {
+                    let f: SetDpiAwareFn = std::mem::transmute(set_dpi_aware);
+                    f();
+                }
+            }
+        }
+
+        // 初始化公共控件
+        let icce = windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<windows_sys::Win32::UI::Controls::INITCOMMONCONTROLSEX>() as u32,
+            dwICC: windows_sys::Win32::UI::Controls::ICC_STANDARD_CLASSES
+                | windows_sys::Win32::UI::Controls::ICC_WIN95_CLASSES,
+        };
+        windows_sys::Win32::UI::Controls::InitCommonControlsEx(&icce);
+
         let hinstance = GetModuleHandleW(std::ptr::null());
         let class_name = wide("TokenMonitorGuiWnd");
         let mut wc: WNDCLASSEXW = std::mem::zeroed();
@@ -653,6 +1023,7 @@ fn run_gui() {
         wc.lpfnWndProc = Some(wnd_proc);
         wc.hInstance = hinstance;
         wc.hCursor = LoadCursorW(std::ptr::null_mut(), 32512 as *const u16); // IDC_ARROW (MAKEINTRESOURCE)
+        wc.hbrBackground = CreateSolidBrush(COLOR_BG);
         wc.lpszClassName = class_name.as_ptr();
         if RegisterClassExW(&wc) == 0 {
             return;
@@ -662,11 +1033,11 @@ fn run_gui() {
             0,
             class_name.as_ptr(),
             title.as_ptr(),
-            0x00CF_0000, // WS_OVERLAPPEDWINDOW
+            WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            760,
-            520,
+            780,
+            560,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             hinstance,
@@ -683,6 +1054,7 @@ fn run_gui() {
         }
     }
 }
+
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
