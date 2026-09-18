@@ -362,7 +362,7 @@ charts.trend.on('click', (params) => {
 /** 工具活动（Claude/ccmr tool_use + ZCode tool_usage；Codex 本地无记录） */
 async function renderToolActivity() {
   try {
-    const res = await fetch('/api/tool-activity?days=30');
+    const res = await fetch(`/api/tool-activity?days=${days}`);
     const { tools } = await res.json();
     if (!tools?.length || !charts.toolsAct) return;
     const rows = [...tools].reverse();

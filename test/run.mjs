@@ -1257,6 +1257,51 @@ console.log('\n[13] Scanner 事务缓冲代理（#40：事务不跨 await；并�
   }
 }
 
+/* ---------- [14] days=0 参数语义（#42） ---------- */
+console.log('\n[14] days 查询参数语义（#42：0=全量不再被当 30；非法值回落）');
+{
+  const { parseDays, buildSummary } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  // 解析语义固化（AC1）
+  ok('#42 未提供 → 30（默认窗口不变）', parseDays(null, 30) === 30 && parseDays(undefined, 30) === 30);
+  ok('#42 空串 → 30', parseDays('', 30) === 30);
+  ok('#42 显式 "0" → 0（全量；修前 Number("0")||30 塌成 30）', parseDays('0', 30) === 0);
+  ok('#42 正常数值 → 原值', parseDays('7', 30) === 7 && parseDays('3650', 30) === 3650);
+  ok('#42 非数字 → fallback', parseDays('abc', 30) === 30 && parseDays('1e999', 30) === 30);
+  ok('#42 负数 → fallback（不产生意外窗口）', parseDays('-5', 30) === 30);
+  ok('#42 超上限 clamp 到 3650', parseDays('99999', 30) === 3650);
+  ok('#42 小数截断为整数天', parseDays('7.9', 30) === 7);
+
+  // 行为级区分：40 天前的事件只在 days=0 出现（fixture 数据窗口不足 30 天时
+  // 「by_day 行数对比」无法区分 0 与 7/30，直接在受控库注入老事件）
+  const base = mkdtempSync(join(tmpdir(), 'days42-'));
+  const store = new Store(join(base, 't42.db'));
+  const now = Date.now();
+  const d40 = now - 40 * 86_400_000;
+  const ins = (ts, key) => store.insertEvent({ ts, tool: 'fake42', model: 'm', session_id: 's', project: null, dedup_key: key, input_tokens: 10, output_tokens: 5, total_tokens: 15 });
+  ins(now, 'now-1');
+  ins(d40, 'old-1');
+  ins(d40 + 60_000, 'old-2');
+  try {
+    const s0 = await buildSummary(store, {}, 0);
+    const s7 = await buildSummary(store, {}, 7);
+    const dayKeys = (s) => new Set(s.by_day.map((r) => r.day ?? r.d ?? r.date));
+    const sumByDay = (s) => s.by_day.reduce((a, r) => a + r.total, 0);
+    const oldKey = new Date(d40).toLocaleDateString('sv-SE');
+    ok('#42 days=0 覆盖 40 天前事件（by_day 总量含老事件）',
+      sumByDay(s0) > sumByDay(s7),
+      `all=${sumByDay(s0)} 7d=${sumByDay(s7)}`);
+    ok('#42 days=7 不含 40 天前事件（窗口语义未破坏）', !dayKeys(s7).has(oldKey));
+    ok('#42 days=0 的 by_day 覆盖老事件日期', dayKeys(s0).has(oldKey), JSON.stringify([...dayKeys(s0)]));
+    ok('#42 costs.by_day 同样随 days=0 扩到全量',
+      s0.costs.by_day.length >= s7.costs.by_day.length && s0.costs.all_cny >= s7.costs.all_cny,
+      `${s0.costs.by_day.length} vs ${s7.costs.by_day.length}`);
+  } finally {
+    try { store.db.close(); } catch { /* 句柄由进程回收 */ }
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

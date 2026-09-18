@@ -37,6 +37,20 @@ function startOfDay(d = new Date()) {
   return x.getTime();
 }
 
+/**
+ * 解析 days 查询参数（#42）：修前三处路由用 `Number(x) || 30`，把显式 0 当假值
+ * 塌成 30，「全部历史」永远表达不出来（前端 data-days=0 按钮实际只拿 30 天）。
+ * 语义固化：未提供/空串 → fallback；显式 "0" → 0（全量）；非数字/负数/NaN →
+ * fallback（非法输入不产生意外窗口，绝不 clamp 到 0 造成"负数=全量"）；超上限 →
+ * clamp 到 max。
+ */
+export function parseDays(raw, fallback, min = 0, max = 3650) {
+  if (raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
 /** 连续使用天数：从今天（或昨天）往前数有用量的连续自然日 */
 function computeStreak(daySet, todayKey, yesterdayKey) {
   let streak = 0;
@@ -337,7 +351,7 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     }
 
     if (p === '/api/summary') {
-      const days = Math.max(0, Math.min(3650, Number(url.searchParams.get('days')) || 30));
+      const days = parseDays(url.searchParams.get('days'), 30);
       try {
         return json(res, 200, await buildSummary(store, scanner.stats, days, {
           balanceStatus: balancePoller?.status?.() ?? [],
@@ -370,8 +384,9 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       return json(res, 200, { session_id: sid, events: rows });
     }
     if (p === '/api/tool-activity') {
-      const days = Math.max(1, Math.min(3650, Number(url.searchParams.get('days')) || 30));
-      const since = Date.now() - days * 86_400_000;
+      const days = parseDays(url.searchParams.get('days'), 30);
+      // days=0 = 全量：修前 min 钳到 1，0 表达不出来；窗口下界随之取消（#42）
+      const since = days > 0 ? Date.now() - days * 86_400_000 : 0;
       const rows = db_safe(store).prepare(`
         SELECT name, tool, COUNT(*) n FROM tool_calls WHERE ts >= ?
         GROUP BY name, tool ORDER BY n DESC LIMIT 60`).all(since);
@@ -385,7 +400,7 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       return json(res, 200, { days, tools: [...merged.values()].sort((a, b) => b.n - a.n).slice(0, 14) });
     }
     if (p === '/api/export.csv') {
-      const days = Math.max(0, Math.min(3650, Number(url.searchParams.get('days')) || 30));
+      const days = parseDays(url.searchParams.get('days'), 30);
       const since = days > 0 ? startOfDay() - (days - 1) * 86_400_000 : 0;
       const rows = db_safe(store).prepare(`
         SELECT date(ts/1000, 'unixepoch', 'localtime') d, tool,
