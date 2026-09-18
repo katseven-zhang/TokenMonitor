@@ -35,10 +35,10 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostQuitMessage,
-    RegisterClassExW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, CW_USEDEFAULT, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-    SWP_NOACTIVATE, SWP_NOZORDER, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, CW_USEDEFAULT, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING,
+    MB_OK, SWP_NOACTIVATE, SWP_NOZORDER, WM_COMMAND, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
     WM_DESTROY, WM_DPICHANGED, WM_SETFONT, WM_SIZE, WM_TIMER, WNDCLASSEXW, WS_BORDER, WS_CHILD,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
@@ -184,30 +184,69 @@ pub fn save_port(settings_path: &Path, port: u32) -> std::io::Result<()> {
     std::fs::write(settings_path, format!("{{\n  \"port\": {port}\n}}"))
 }
 
-/// 读取日志末尾若干行；文件被写入方占用也允许读（FILE_SHARE_READ|WRITE|DELETE）。
-pub fn tail_file(path: &Path, max_lines: usize) -> Vec<String> {
-    let Ok(mut f) = OpenOptions::new().read(true).share_mode(0x7).open(path) else {
-        return Vec::new();
+/// 增量刷新决策（纯逻辑，#34）：由上一轮游标与当前文件大小决定本轮动作。
+#[derive(Debug, PartialEq, Eq)]
+pub enum LogPlan {
+    /// 文件大小与上一轮一致：不重读、不重设文本（空闲期零 IO，卡顿主因）
+    Unchanged,
+    /// 文件变小：被 truncate / 轮转 / 删除重建，需清空缓冲从头读（保持 #39 的占位语义）
+    Truncated,
+    /// 正常追加（或首次读取）：从 start 读到当前大小
+    Append { start: u64 },
+}
+
+/// 阈值与单位契约（#34）：offset/prev_len/size 均为字节；单次增量超过
+/// MAX_BYTES 时只保留末尾 MAX_BYTES（起始残行被跳过）；行数窗口 TAIL_LINES。
+pub const LOG_DELTA_MAX_BYTES: u64 = 1_000_000;
+
+pub fn log_refresh_plan(offset: u64, prev_len: u64, size: u64) -> LogPlan {
+    if size == prev_len {
+        LogPlan::Unchanged
+    } else if size < prev_len {
+        LogPlan::Truncated
+    } else if prev_len == 0 {
+        // 首次读取或 truncate 清零后的重建：从文件头读起
+        LogPlan::Append { start: 0 }
+    } else {
+        // 正常追加：从上次消费到的位置继续（offset == prev_len；半行未消费时 offset < prev_len）
+        LogPlan::Append { start: offset }
+    }
+}
+
+/// 读取 [from, to) 区间的完整行；返回 (完整行, 已消费到的绝对偏移)。
+/// 末尾若无换行（写入方正在写半行），该半行本轮不消费、游标不推进（与采集侧半行语义一致）。
+/// 文件被写入方占用也允许读（FILE_SHARE_READ|WRITE|DELETE）。
+pub fn read_log_delta(path: &Path, from: u64, to: u64) -> Option<(Vec<String>, u64)> {
+    if to <= from {
+        return Some((Vec::new(), from));
+    }
+    let mut f = OpenOptions::new().read(true).share_mode(0x7).open(path).ok()?;
+    // 超长增量只取末尾 LOG_DELTA_MAX_BYTES，起始位置若不在行首则跳过首个残行
+    let delta = to - from;
+    let (start, skip_first_partial) = if delta > LOG_DELTA_MAX_BYTES {
+        (to - LOG_DELTA_MAX_BYTES, true)
+    } else {
+        (from, false)
     };
-    const MAX_BYTES: u64 = 1_000_000;
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let truncated = len > MAX_BYTES;
-    if truncated {
-        let _ = f.seek(SeekFrom::End(-(MAX_BYTES as i64)));
-    }
-    let mut buf = String::new();
-    if f.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-    let mut lines: Vec<String> = buf
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = vec![0u8; (to - start) as usize];
+    f.read_exact(&mut buf).ok()?;
+    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+        // 区间内还没有任何完整行（写入方正写到半行）：本轮不消费，游标不动
+        return Some((Vec::new(), from));
+    };
+    let complete = &buf[..=last_nl];
+    let consumed = start + complete.len() as u64;
+    let text = String::from_utf8_lossy(complete);
+    let mut lines: Vec<String> = text
         .lines()
-        .skip(if truncated { 1 } else { 0 })
+        .skip(if skip_first_partial { 1 } else { 0 })
         .map(|s| s.to_string())
         .collect();
-    if lines.len() > max_lines {
-        lines.drain(..lines.len() - max_lines);
+    if lines.len() > TAIL_LINES {
+        lines.drain(..lines.len() - TAIL_LINES);
     }
-    lines
+    Some((lines, consumed))
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +476,14 @@ struct App {
     /// 面板当前是否已在显示「（暂无日志）」占位行。用于只在状态翻转时改一次文本，
     /// 免得每 2s 定时都对空日志重设一次窗口文本（#39）。
     log_shows_placeholder: bool,
+    /// 增量读取游标：已消费到的字节偏移（#34）
+    log_offset: u64,
+    /// 上一轮看到的文件大小；本轮大小与它相等则什么都不做（#34）
+    log_len: u64,
+    /// 面板尾部行缓冲（上限 TAIL_LINES，#34）
+    log_buf: Vec<String>,
+    /// 停止流程已发起、分离线程正在等待后台退出；期间重复 Stop/Start 被忽略（#34）
+    stopping: bool,
 }
 
 
@@ -495,6 +542,11 @@ impl App {
     }
 
     fn start_backend(&mut self) {
+        if self.stopping {
+            // 停止流程仍在收尾（分离线程等待中）：忽略重复启动。
+            // apply_port 的自动重启由分离线程完成等待后 PostMessage 触发，彼时 stopping 已被 poll 解除。
+            return;
+        }
         if self.own_backend_alive() {
             self.update_status();
             return;
@@ -553,7 +605,14 @@ impl App {
     }
 
     /// 只停自己拉起的后台；外部启动的一律不碰。
-    fn stop_own_backend(&mut self, user_initiated: bool) {
+    /// 返回 Some(h) = 已发起 TerminateProcess，进程句柄所有权移交调用方，
+    /// 由 reap_backend_async 在分离线程等待退出并回收（#34：UI 线程绝不 WaitForSingleObject(5000)
+    /// 阻塞消息循环——修前 Stop 会冻结窗口最多 5 秒）。
+    fn stop_own_backend(&mut self, user_initiated: bool) -> Option<HANDLE> {
+        if self.stopping {
+            // 停止已在进行中：重复点击直接忽略
+            return None;
+        }
         if !self.own_backend_alive() {
             if user_initiated {
                 if self.external_online {
@@ -568,19 +627,34 @@ impl App {
                 }
                 self.update_status();
             }
-            return;
+            return None;
         }
-        if let Some((h, _)) = self.backend {
-            unsafe {
-                TerminateProcess(h, 1);
-                WaitForSingleObject(h, 5000);
-                CloseHandle(h);
-            }
+        let (h, _) = self.backend?;
+        unsafe {
+            TerminateProcess(h, 1);
         }
         self.backend = None;
-        if user_initiated {
-            self.update_status();
-        }
+        self.stopping = true;
+        // 立即反馈「停止中…」，不等进程退出（等待在分离线程）
+        self.update_status();
+        Some(h)
+    }
+
+    /// 在分离线程等待被终止的后台退出并回收句柄（#34）。
+    /// restart=true 时（apply_port 换端口重启），等待完成后通知 UI 线程重新启动后台；
+    /// PostMessageW 线程安全，真正的 CreateProcess 仍回到 UI 线程执行。
+    /// 句柄经 isize 跨线程传递（windows-sys 的 HANDLE/HWND 裸指针不实现 Send）。
+    fn reap_backend_async(h: HANDLE, hwnd: HWND, restart: bool) {
+        let h_addr = h as isize;
+        let hwnd_addr = hwnd as isize;
+        std::thread::spawn(move || unsafe {
+            let h = h_addr as HANDLE;
+            WaitForSingleObject(h, 5000);
+            CloseHandle(h);
+            if restart && hwnd_addr != 0 {
+                PostMessageW(hwnd_addr as HWND, WM_COMMAND, ID_START as usize, 0);
+            }
+        });
     }
 
     fn open_panel(&self) {
@@ -608,8 +682,10 @@ impl App {
             return;
         }
         if self.own_backend_alive() {
-            self.stop_own_backend(true);
-            self.start_backend(); // 自己拉起的后台直接按新端口重启
+            if let Some(h) = self.stop_own_backend(true) {
+                // 旧进程退出在分离线程等待（#34）；完成后 PostMessage 回 UI 线程按新端口重启
+                Self::reap_backend_async(h, self.hwnd, true);
+            }
         } else {
             self.update_status();
         }
@@ -621,7 +697,10 @@ impl App {
         // 先发布免锁快照，再改文本：改文本触发的重绘会同步回到 WM_CTLCOLORSTATIC，
         // 那个处理器只能读原子值，不能再进 APP 锁（本方法常在持锁时被调用）。
         publish_ctl_snapshot(self.status_label, self.log_header, self.bg_brush, running);
-        let state = if alive {
+        let state = if self.stopping {
+            // 停止流程已发起、分离线程等待中（#34）
+            "停止中…".to_string()
+        } else if alive {
             format!("运行中（本程序启动，PID {}）", self.backend.map(|(_, pid)| pid).unwrap_or(0))
         } else if self.external_online {
             "运行中（外部启动）".to_string()
@@ -642,20 +721,63 @@ impl App {
     }
 
 
+    /// 空日志占位：只在状态翻转时写一次文本（#39 语义，#34 保持）
+    fn show_log_placeholder(&mut self) {
+        self.log_buf.clear();
+        self.log_offset = 0;
+        self.log_len = 0;
+        if !self.log_shows_placeholder {
+            self.log_shows_placeholder = true;
+            self.set_text(self.log_box, EMPTY_LOG_TEXT);
+        }
+    }
+
+    /// 增量刷新日志面板（#34）：文件大小未变化时零 IO、不碰控件；
+    /// 有追加时只读新增字节；truncate/轮转时清空后重读并保持 #39 的占位语义。
     fn refresh_log(&mut self) {
-        let lines = tail_file(&self.log_path, TAIL_LINES);
-        if lines.is_empty() {
-            // 日志被 truncate / 轮转 / 删除重建后 tail 会变空。此时若直接 return，
-            // 面板会一直挂着上一轮的旧内容，用户以为旧错误还在发生（#39）。
-            // 只在状态翻转时改一次文本，避免每 2s 空转重设窗口文本。
-            if !self.log_shows_placeholder {
-                self.log_shows_placeholder = true;
-                self.set_text(self.log_box, EMPTY_LOG_TEXT);
+        let Ok(meta) = std::fs::metadata(&self.log_path) else {
+            // 文件不存在（尚未产生/被删除重建）：等同空日志占位语义
+            self.show_log_placeholder();
+            return;
+        };
+        let size = meta.len();
+        match log_refresh_plan(self.log_offset, self.log_len, size) {
+            // 无变化：不重读文件、不重设文本（修前每 2s 全量读 1MB + 重设 400 行，卡顿主因）
+            LogPlan::Unchanged => return,
+            LogPlan::Truncated => {
+                // truncate / 轮转 / 删除重建：清空缓冲与游标后按新内容重读
+                if size == 0 {
+                    self.show_log_placeholder();
+                    return;
+                }
+                self.log_buf.clear();
+                self.log_offset = 0;
+                self.log_len = 0;
             }
+            LogPlan::Append { start } => {
+                self.log_len = size;
+                let Some((mut new_lines, consumed)) = read_log_delta(&self.log_path, start, size)
+                else {
+                    return; // 读取失败（写方竞争等）：下轮按新状态重来
+                };
+                if consumed == start {
+                    // 区间内还没有完整行（半行挂着）：游标不推进、不重设文本
+                    return;
+                }
+                self.log_buf.extend(new_lines.drain(..));
+                if self.log_buf.len() > TAIL_LINES {
+                    let excess = self.log_buf.len() - TAIL_LINES;
+                    self.log_buf.drain(..excess);
+                }
+                self.log_offset = consumed;
+            }
+        }
+        if self.log_buf.is_empty() {
+            self.show_log_placeholder();
             return;
         }
         self.log_shows_placeholder = false;
-        self.set_text(self.log_box, &lines.join("\r\n"));
+        self.set_text(self.log_box, &self.log_buf.join("\r\n"));
         unsafe {
             SendMessageW(self.log_box, EM_SETSEL, u32::MAX as usize, 0);
             SendMessageW(self.log_box, EM_SCROLLCARET, 0, 0);
@@ -664,6 +786,10 @@ impl App {
 
     fn poll_status(&mut self) {
         self.external_online = http_status_ok(self.port() as u16);
+        if self.stopping && !self.own_backend_alive() && !self.external_online {
+            // 后台已终止且端口不再可达：停止流程完成，解除「停止中」（#34）
+            self.stopping = false;
+        }
         self.update_status();
     }
 }
@@ -905,6 +1031,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 external_online: false,
                 // 文本框初值为空而非占位行，故置 false：首轮空日志会写一次「（暂无日志）」
                 log_shows_placeholder: false,
+                log_offset: 0,
+                log_len: 0,
+                log_buf: Vec::new(),
+                stopping: false,
             };
 
             layout_controls(hwnd, &app);
@@ -1012,24 +1142,45 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
         }
         WM_COMMAND => {
             let id = (wparam & 0xffff) as isize;
-            with_app(|a| match id {
-                ID_SAVE => a.apply_port(),
-                ID_START => a.start_backend(),
+            // 停止只发起 TerminateProcess（#34）；句柄等待在分离线程，UI 线程不阻塞
+            let wait = with_app(|a| match id {
+                ID_SAVE => {
+                    a.apply_port();
+                    None
+                }
+                ID_START => {
+                    a.start_backend();
+                    None
+                }
                 ID_STOP => a.stop_own_backend(true),
-                ID_PANEL => a.open_panel(),
-                _ => {}
-            });
+                ID_PANEL => {
+                    a.open_panel();
+                    None
+                }
+                _ => None,
+            })
+            .flatten();
+            if let Some(h) = wait {
+                let hwnd = with_app(|a| a.hwnd).unwrap_or(std::ptr::null_mut());
+                App::reap_backend_async(h, hwnd, false);
+            }
             0
         }
         WM_DESTROY => {
-            with_app(|a| {
-                a.stop_own_backend(false); // 与托盘一致：退出只停自己拉起的后台
+            let wait = with_app(|a| {
+                let h = a.stop_own_backend(false); // 与托盘一致：退出只停自己拉起的后台
                 DeleteObject(a.font_ui as _);
                 DeleteObject(a.font_ui_bold as _);
                 DeleteObject(a.font_log as _);
                 DeleteObject(a.bg_brush as _);
                 DeleteObject(a.card_brush as _);
-            });
+                h
+            })
+            .flatten();
+            if let Some(h) = wait {
+                // 进程即将退出：等待移交分离线程即可（随进程消失无副作用，#34 不再阻塞销毁）
+                App::reap_backend_async(h, std::ptr::null_mut(), false);
+            }
             KillTimer(hwnd, TIMER_ID);
             PostQuitMessage(0);
             0

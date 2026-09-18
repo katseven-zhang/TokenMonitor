@@ -83,14 +83,49 @@ console.log('\n[#39] DPI 变更不持锁调窗口 API；日志清空后面板不
     /Some\(unsafe \{ \*prc \}\)/.test(arm) && !/let r = \*prc;/.test(arm));
   ok('#39 布局在解锁后单独取锁执行', /with_app\(\|a\| layout_controls\(hwnd, a\)\)/.test(arm));
 
-  const refresh = source.slice(source.indexOf('fn refresh_log'), source.indexOf('fn poll_status'));
+  // #34 起占位逻辑移入 show_log_placeholder 并由增量版 refresh_log 调用，切片覆盖两者
+  const refresh = source.slice(source.indexOf('fn show_log_placeholder'), source.indexOf('fn poll_status'));
   ok('#39 空 tail 不再直接 return 保留旧文本，而是写占位行',
-    /if lines\.is_empty\(\)/.test(refresh) && refresh.includes('EMPTY_LOG_TEXT'));
+    /show_log_placeholder\(\)/.test(refresh) && refresh.includes('EMPTY_LOG_TEXT'));
   ok('#39 占位行只在状态翻转时写一次（不每 2s 重设文本）',
     /log_shows_placeholder/.test(refresh) && /if !self\.log_shows_placeholder/.test(refresh));
   ok('#39 有内容时复位占位标记', /self\.log_shows_placeholder = false;/.test(refresh));
-  ok('#39 未越界改正常追加的 offset 算法（tail_file 仍按 TAIL_LINES 取尾部）',
-    /tail_file\(&self\.log_path, TAIL_LINES\)/.test(refresh));
+}
+
+// ---- #34 日志增量刷新 + 停止流程不阻塞 UI ----
+console.log('\n[#34] 空闲期零 IO 增量刷新；Stop 等待移交分离线程');
+{
+  ok('#34 App 持有增量游标与停止状态字段',
+    /log_offset: u64/.test(source) && /log_len: u64/.test(source)
+      && /log_buf: Vec<String>/.test(source) && /stopping: bool/.test(source));
+  ok('#34 增量决策为纯函数且覆盖 Unchanged/Truncated/Append 三态',
+    /pub fn log_refresh_plan/.test(source) && /LogPlan::Unchanged/.test(source)
+      && /LogPlan::Truncated/.test(source) && /Append \{ start/.test(source));
+  const refresh = source.slice(source.indexOf('fn show_log_placeholder'), source.indexOf('fn poll_status'));
+  ok('#34 文件大小未变化时零 IO 直接返回（修前每 2s 全量重读 1MB）',
+    /LogPlan::Unchanged => return/.test(refresh));
+  ok('#34 有追加时只读新增字节（tail_file 全量 tail 已移除）',
+    !/tail_file\(/.test(refresh) && /read_log_delta\(/.test(refresh));
+  ok('#34 truncate/轮转清空缓冲与游标，占位语义保持（#39）',
+    /LogPlan::Truncated/.test(refresh) && /log_buf\.clear\(\)/.test(refresh) && refresh.includes('EMPTY_LOG_TEXT'));
+  ok('#34 半行不消费、游标不推进（与采集侧半行语义一致）',
+    /rposition\(/.test(source) && /consumed == start/.test(refresh));
+  ok('#34 尾部窗口仍受 TAIL_LINES 约束',
+    /log_buf\.len\(\) > TAIL_LINES/.test(refresh));
+  const stopFn = source.slice(source.indexOf('fn stop_own_backend'), source.indexOf('fn reap_backend_async'));
+  ok('#34 stop_own_backend 只发起 TerminateProcess，调用线程不再等待退出（修前 UI 冻结最多 5s）',
+    /TerminateProcess/.test(stopFn) && !/WaitForSingleObject/.test(stopFn));
+  ok('#34 句柄等待与回收移交分离线程（reap_backend_async）',
+    /fn reap_backend_async/.test(source)
+      && /thread::spawn/.test(source.slice(source.indexOf('fn reap_backend_async'), source.indexOf('fn open_panel'))));
+  ok('#34 stopping 期间重复 Stop 被忽略', /if self\.stopping \{/.test(stopFn));
+  ok('#34 状态栏提供「停止中…」即时反馈', source.includes('停止中…'));
+  ok('#34 poll_status 在后台终止且端口不可达后解除 stopping',
+    /self\.stopping = false/.test(source.slice(source.indexOf('fn poll_status'), source.indexOf('fn layout_controls'))));
+  ok('#34 apply_port 换端口重启改为分离线程等待完成后 PostMessage 触发',
+    /reap_backend_async\(h, self\.hwnd, true\)/.test(source));
+  ok('#34 Start 在停止收尾期间被守卫（不产生重复拉起）',
+    /fn start_backend[\s\S]{0,200}if self\.stopping \{/.test(source));
 }
 
 // ---- #54 WM_CTLCOLORSTATIC 取 APP 锁导致首个 2s tick 永久自锁死 ----
@@ -174,6 +209,25 @@ if (!existsSync(exe)) {
     gui.kill();
     await sleep(800);
     ok('关闭第一实例后退出干净', !alive(gui.pid));
+
+    // ---- #34: 空闲期零文件 IO（日志无变化时不再每 2s 重读 1MB）----
+    console.log('\n[#34 idle-io] 日志无变化时 GUI 空闲期文件读取增量（AC5 取证）');
+    const idleDir = join(base, '空闲 IO 场景');
+    mkdirSync(join(idleDir, 'logs'), { recursive: true });
+    writeFileSync(join(idleDir, 'logs', 'tokenmonitor.log'), ('x'.repeat(120) + '\n').repeat(8700));
+    const idle = spawn(exe, [], { stdio: 'ignore', env: { ...process.env, TOKENMONITOR_DATA_DIR: idleDir } });
+    const readIO = (pid) => Number(
+      spawnSync('powershell', ['-NoProfile', '-Command',
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').ReadTransferCount`],
+        { encoding: 'utf8' }).stdout.trim() || 'NaN');
+    await sleep(4000);
+    const ioA = readIO(idle.pid);
+    await sleep(6000);
+    const ioB = readIO(idle.pid);
+    idle.kill();
+    const idleDelta = ioB - ioA;
+    ok('#34 空闲 6 秒文件读取增量 < 200KB（修前同法实测 3,000,000 字节）',
+      Number.isFinite(idleDelta) && idleDelta >= 0 && idleDelta < 200 * 1024, `delta=${idleDelta} bytes`);
   } finally {
     try { rmSync(base, { recursive: true, force: true }); } catch { /* Windows 句柄延迟时容忍 */ }
   }
