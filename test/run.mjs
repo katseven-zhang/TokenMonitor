@@ -1192,6 +1192,71 @@ console.log('\n[12] _inheritCodexModels 仅在真变化时写入（#52：连续�
   }
 }
 
+/* ---------- [13] Scanner 事务缓冲代理（#40） ---------- */
+console.log('\n[13] Scanner 事务缓冲代理（#40：事务不跨 await；并发写入不卷入；批内原子）');
+{
+  const { Scanner } = await import(pathToFileURL(join(ROOT, 'src/scanner.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'scanner40-'));
+  const logs = join(base, 'logs');
+  mkdirSync(logs, { recursive: true });
+  const logFile = join(logs, 's.jsonl');
+  writeFileSync(logFile, '{"a":1}\n{"b":2}\n{"c":3}\n');
+  const store = new Store(join(base, 'test40.db'));
+  let collectImpl = async (st, ctx) => ({ inserted: 0, newOffset: 0, state: {} });
+  const fakeSource = {
+    tool: 'fake40', label: 'fake40', kind: 'jsonl', version: 1, roots: [logs],
+    collect: (...a) => collectImpl(...a),
+  };
+  const scanner = new Scanner(store, { sources: [fakeSource] });
+  const countEvents = () => store.db.prepare("SELECT COUNT(*) AS n FROM events WHERE tool='fake40'").get().n;
+
+  try {
+    // 场景 1：collect 中途抛错（模拟多 chunk 解析失败）——零半批提交、游标不推进
+    collectImpl = async (st) => {
+      st.insertEvent({ ts: 1, tool: 'fake40', dedup_key: 'k1' });
+      st.insertEvent({ ts: 2, tool: 'fake40', dedup_key: 'k2' });
+      throw new Error('chunk-fail');
+    };
+    await scanner.scanAll({ quiet: true });
+    ok('#40 collect 抛错时本批事件零落库（无半批提交）', countEvents() === 0, `n=${countEvents()}`);
+    const row1 = store.getFile(logFile);
+    ok('#40 collect 抛错时游标不推进（下轮按旧游标重扫，dedup 兜底）', !row1 || row1.offset === 0, `offset=${row1?.offset}`);
+
+    // 场景 2：并发写者走真 store（模拟 BalancePoller.saveQuota）——不被卷入扫描事务
+    collectImpl = async (st) => {
+      store.saveQuota('balance:fake40', 1700000000000, { balance: 123.45 });
+      st.insertEvent({ ts: 1, tool: 'fake40', dedup_key: 'k1' });
+      st.insertEvent({ ts: 2, tool: 'fake40', dedup_key: 'k2' });
+      throw new Error('fail-after-concurrent-write');
+    };
+    appendFileSync(logFile, '{"d":4}\n');
+    await scanner.scanAll({ quiet: true });
+    const q = store.getQuota('balance:fake40');
+    ok('#40 并发写者（saveQuota 走真 store）不被卷入扫描事务、扫描失败也不丢它',
+      q && q.data.balance === 123.45, JSON.stringify(q));
+    ok('#40 失败批事件仍零落库', countEvents() === 0, `n=${countEvents()}`);
+
+    // 场景 3：成功批原子落库 + inserted 计数精确（含批内 dedup）+ 游标/状态同批推进
+    collectImpl = async (st) => {
+      const inserted = st.insertEvent({ ts: 1, tool: 'fake40', dedup_key: 'k1' })
+        + st.insertEvent({ ts: 2, tool: 'fake40', dedup_key: 'k2' })
+        + st.insertEvent({ ts: 3, tool: 'fake40', dedup_key: 'k1' }); // 批内重复 → 0
+      return { inserted, newOffset: 30, state: { m: 1 } };
+    };
+    appendFileSync(logFile, '{"e":5}\n');
+    const res = await scanner.scanAll({ quiet: true });
+    ok('#40 成功批原子落库（2 条新事件，批内 dedup 不重复）', countEvents() === 2, `n=${countEvents()}`);
+    ok('#40 缓冲代理 insertEvent 返回值语义保真（1+1+0 → inserted=2）', res.inserted === 2, `inserted=${res.inserted}`);
+    const row3 = store.getFile(logFile);
+    ok('#40 游标与状态随同一事务推进', row3 && row3.offset === 30 && JSON.parse(row3.state_json).m === 1,
+      JSON.stringify(row3));
+  } finally {
+    try { store.db.close(); } catch { /* 句柄由进程回收 */ }
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

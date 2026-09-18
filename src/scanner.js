@@ -10,6 +10,44 @@ function isInside(root, target) {
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
+/**
+ * collect 期间的缓冲代理 store（#40）：写调用入队不落库，collect 全部完成后再在
+ * 一个同步短事务里按序重放——修前事务按文件开在 await src.collect() 外层，
+ * BEGIN 与 COMMIT 之间跨越 await，并发的 saveQuota/HTTP 查询写入会被卷进扫描
+ * 事务，collector 抛错 ROLLBACK 时连它们的中途写入一起丢。
+ *
+ * 实测全部 collector 只调 insertEvent/insertToolCall/saveQuota 三个写方法、零读；
+ * saveRates 一并缓冲以防将来有 collector 用到。重放走真方法，insertEvent 内部的
+ * _supersedeEvent 补齐语义不受影响。insertEvent 的返回值（1=新插/0=dedup 命中）
+ * 被 collector 用作 inserted 计数，缓冲阶段用「本批 seen + 现库预查」精确模拟，
+ * 保证计数与同步落库版本一致。
+ */
+function makeBufferedStore(realStore, ops) {
+  const seenKeys = new Set();
+  const dedupProbe = realStore.db.prepare('SELECT 1 FROM events WHERE dedup_key = ? LIMIT 1');
+  return {
+    insertEvent(e) {
+      const fresh = !seenKeys.has(e.dedup_key) && !dedupProbe.get(e.dedup_key);
+      if (fresh) seenKeys.add(e.dedup_key);
+      ops.push(['insertEvent', [e]]);
+      return fresh ? 1 : 0;
+    },
+    insertToolCall(e) {
+      ops.push(['insertToolCall', [e]]);
+      return 1;
+    },
+    saveQuota(tool, ts, data) {
+      ops.push(['saveQuota', [tool, ts, data]]);
+    },
+    saveFile(rec) {
+      ops.push(['saveFile', [rec]]);
+    },
+    saveRates(model, fresh, cache, out, turns) {
+      ops.push(['saveRates', [model, fresh, cache, out, turns]]);
+    },
+  };
+}
+
 async function* walkByExt(root, match) {
   let entries;
   try { entries = await readdir(root, { withFileTypes: true }); }
@@ -132,16 +170,23 @@ export class Scanner extends EventEmitter {
           ? (needFull || s.size < cursor ? 0 : cursor)
           : 0;
 
-        this.store.db.exec('BEGIN');
+        // 缓冲代理（#40）：collect 全部完成（含超长文件多 chunk 解析）期间零落库，
+        // collect 抛错时缓冲直接丢弃——游标与事件写入同批原子，下轮按旧游标重扫
+        //（dedup_key 兜底重复解析，不丢写入、不产生半批提交）
+        const ops = [];
         try {
           if (typeof src.collect !== 'function') {
             throw new Error(`source ${src.tool} has no collector`);
           }
-          const r = await src.collect(this.store, {
+          const r = await src.collect(makeBufferedStore(this.store, ops), {
             tool: src.tool, path, fileId, offset, state, version: src.version,
           });
           inserted += r.inserted;
           const nextState = { ...(r.state || {}), _v: src.version };
+          // 短同步事务：BEGIN 与 COMMIT 之间零 await——并发写入者（BalancePoller 的
+          // saveQuota、HTTP 查询）走真 store，不会被卷入本事务；失败只回滚本批
+          this.store.db.exec('BEGIN');
+          for (const [method, args] of ops) this.store[method](...args);
           this.store.saveFile({
             path, tool: src.tool, session_id: fileId, size: s.size,
             mtime_ms: s.mtimeMs,
@@ -150,7 +195,8 @@ export class Scanner extends EventEmitter {
           });
           this.store.db.exec('COMMIT');
         } catch (err) {
-          this.store.db.exec('ROLLBACK');
+          // collect 阶段失败时事务尚未开启（零写入）；仅同步重放阶段失败需要回滚
+          try { this.store.db.exec('ROLLBACK'); } catch { /* 无活动事务：collect 阶段失败 */ }
           st.parse_errors++;
           st.last_error = `${new Date().toISOString()} ${err.message}`;
           this.log(`parse error ${path}: ${err.message}`);
