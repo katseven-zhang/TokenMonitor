@@ -103,7 +103,7 @@ function computeClaude5h(db, now = Date.now()) {
  * - empty：从未采集到事件
  * - ok：其余（含"只是没在用"——不误报）
  */
-function computeHealth(db, scannerStats) {
+export function computeHealth(db, scannerStats) {
   // 从注册表推导，不再另抄一份：手抄的清单在新增数据源时必漏，
   // 漏掉的源不会报错，只是从健康自检里静默消失——正是这类检查最不该有的失效方式。
   const tools = SOURCES.map(s => s.tool);

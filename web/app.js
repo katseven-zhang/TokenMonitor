@@ -281,9 +281,29 @@ function renderHealth(health) {
     return `${Math.floor(m / 1440)}天`;
   };
   const dot = { ok: '#39d353', empty: '#55556a', stale: '#e0b34c', error: '#e0655f' };
-  const label = { ok: '', empty: ' 无数据', stale: ' 疑似停更', error: ' 解析错误' };
+  // #36：「疑似停更」有歧义（像"你没在用它"），实义是"文件在写但解析不到新事件"；
+  // empty（从未采集）与 stale（疑似解析异常）必须一眼可分
+  const label = { ok: '', empty: ' 从未采集', stale: ' 疑似解析异常', error: ' 解析错误' };
+  // 诊断四要素（#36 AC2）：源文件最近写入 / 最后事件时间 / 事件总数 / last_error
+  const tip = (h) => {
+    const lines = [];
+    if (h.status === 'stale') {
+      lines.push('疑似解析异常：该来源的日志文件最近 30 分钟内有写入，但解析出的最后事件比文件写入旧 30 分钟以上——通常表示日志格式变化导致解析静默失败，需要更新采集器。');
+    } else if (h.status === 'empty') {
+      lines.push('从未采集：尚未发现该来源的任何会话记录（正常现象，不代表解析出错）。');
+    } else if (h.status === 'error') {
+      lines.push('解析出错：最近一轮扫描产生了解析错误（见下方最近错误）。');
+    } else {
+      lines.push('正常采集。');
+    }
+    lines.push(`事件总数：${h.events ?? '—'}`);
+    lines.push(`源文件最近写入：${h.last_file_mtime ? new Date(h.last_file_mtime).toLocaleString('zh-CN') : '—'}`);
+    lines.push(`最后事件时间：${h.last_event_ts ? new Date(h.last_event_ts).toLocaleString('zh-CN') : '—'}`);
+    if (h.last_error) lines.push(`最近错误：${h.last_error}`);
+    return lines.join('\n');
+  };
   let html = (health || []).map(h =>
-    `<span class="h-chip" title="${esc(h.last_error || (h.last_event_ts ? '最近事件 ' + new Date(h.last_event_ts).toLocaleString('zh-CN') : ''))}">
+    `<span class="h-chip" title="${esc(tip(h))}">
       <i style="background:${dot[h.status] || '#55556a'}"></i>${esc(toolLabel(h.tool))}
       <b>${ago(h.last_event_ts)}</b><em class="${h.status === 'ok' ? '' : 'warn'}">${label[h.status] || ''}</em>
     </span>`).join('');

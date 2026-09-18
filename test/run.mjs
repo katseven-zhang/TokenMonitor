@@ -1302,6 +1302,51 @@ console.log('\n[14] days 查询参数语义（#42：0=全量不再被当 30；�
   }
 }
 
+/* ---------- [15] computeHealth 健康语义（#36） ---------- */
+console.log('\n[15] computeHealth 单测（#36：stale/empty/error/ok 四态）');
+{
+  const { computeHealth } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'health36-'));
+  const tool = SOURCES[0].tool; // 从注册表取真实 tool，与 computeHealth 的 tools 推导一致
+  const now = Date.now();
+  const statusOf = (db, st) => computeHealth(db, st).find((h) => h.tool === tool)?.status;
+  const mkStore = () => new Store(join(base, `h-${Math.random().toString(36).slice(2)}.db`));
+  try {
+    // empty：从未采集
+    const sEmpty = mkStore();
+    ok('#36 无事件 → empty', statusOf(sEmpty.db, {}) === 'empty', statusOf(sEmpty.db, {}));
+    sEmpty.db.close();
+
+    // stale：文件在写（mtime 新）但最后事件旧 30 分钟以上
+    const sStale = mkStore();
+    sStale.insertEvent({ ts: now - 2 * 3_600_000, tool, dedup_key: 'h-stale' });
+    sStale.saveFile({ path: '/x/y.jsonl', tool, session_id: 's', size: 1, mtime_ms: now, offset: 0, state_json: '{}' });
+    ok('#36 mtime 新但无新事件 → stale', statusOf(sStale.db, {}) === 'stale', statusOf(sStale.db, {}));
+    sStale.db.close();
+
+    // error：本轮有解析错误
+    const sErr = mkStore();
+    sErr.insertEvent({ ts: now, tool, dedup_key: 'h-err' });
+    ok('#36 parse_errors>0 → error', statusOf(sErr.db, { [tool]: { parse_errors: 2 } }) === 'error', statusOf(sErr.db, { [tool]: { parse_errors: 2 } }));
+    sErr.db.close();
+
+    // ok：正常使用间隔（最后事件 10 分钟前）
+    const sOk = mkStore();
+    sOk.insertEvent({ ts: now - 10 * 60_000, tool, dedup_key: 'h-ok' });
+    ok('#36 正常使用间隔 → ok', statusOf(sOk.db, {}) === 'ok', statusOf(sOk.db, {}));
+    sOk.db.close();
+
+    const sField = mkStore();
+    ok('#36 返回字段名保持 last_file_mtime（SQL 别名 max_mtime 不外泄）',
+      computeHealth(sField.db, {}).every((h) => 'last_file_mtime' in h && !('max_mtime' in h)));
+    sField.db.close();
+  } finally {
+    // Windows 上 WAL/-shm 句柄释放可能有延迟：重试并容忍清理失败（临时目录由系统回收）
+    try { rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* 延迟句柄 */ }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
