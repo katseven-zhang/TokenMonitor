@@ -15,6 +15,7 @@
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/gui.test.mjs
  */
 import { spawn, spawnSync } from 'node:child_process';
+import http from 'node:http';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -128,6 +129,39 @@ console.log('\n[#34] 空闲期零 IO 增量刷新；Stop 等待移交分离线�
     /fn start_backend[\s\S]{0,200}if self\.stopping \{/.test(source));
 }
 
+// ---- #30 探测超时 + APP 锁中毒降级 + saved_port 语义 ----
+console.log('\n[#30] 探测非阻塞分级超时 ≤1.5s；锁中毒降级；未保存端口不改变探测目标');
+{
+  ok('#30 connect/读写分级超时常量且总量 ≤1.5s',
+    /PROBE_CONNECT_TIMEOUT_MS: u32 = 300/.test(source) && /PROBE_IO_TIMEOUT_MS: u32 = 1200/.test(source));
+  ok('#30 connect 改非阻塞（ioctlsocket FIONBIO，修前无界阻塞最长 ~21s）',
+    /ioctlsocket\(sock, ws::FIONBIO/.test(source));
+  ok('#30 connect 结果用 select 等待并同监听 exceptfds（RST 快速失败）',
+    /FD_SET/.test(source) && /select\(0, std::ptr::null_mut\(\), &mut wfd, &mut efd/.test(source)
+      && /efd\.fd_count > 0/.test(source));
+  ok('#30 已连接后设置 SO_RCVTIMEO/SO_SNDTIMEO 读写兜底',
+    /SO_RCVTIMEO/.test(source) && /SO_SNDTIMEO/.test(source));
+  ok('#30 任何超时/错误按不可达处理（不 panic 不无限等）',
+    /n <= 0 \|\| efd\.fd_count > 0 \|\| wfd\.fd_count == 0/.test(source));
+  ok('#30 WSAStartup 只做一次（OnceLock，修前每 2s startup/cleanup）',
+    /OnceLock<bool>/.test(source) && (source.match(/WSAStartup\(/g) || []).length === 1
+      && !source.includes('WSACleanup'));
+  ok('#30 APP 锁中毒降级（unwrap_or_else into_inner，不再 .ok() 静默哑掉）',
+    /APP\.lock\(\)\s*\n?\s*\.unwrap_or_else\(\|e\| e\.into_inner\(\)\)/.test(source)
+      && !/APP\.lock\(\)\.ok\(\)/.test(source));
+  ok('#30 App 持有 saved_port 生效端口字段',
+    /saved_port: u32/.test(source) && /let saved_port = load_port\(&settings_path\);/.test(source));
+  ok('#30 探测使用已保存端口（不再读输入框当前文本）',
+    /http_status_ok\(self\.saved_port as u16\)/.test(source) && !/fn port\(&self\)/.test(source));
+  ok('#30 apply_port 保存成功后才切换生效端口',
+    /self\.saved_port = port;/.test(source));
+  ok('#30 --probe 无头模式（打印 ok/elapsedMs 供行为测试）',
+    /--probe/.test(source) && /fn probe_headless/.test(source));
+  ok('#30 未越界：日志增量/空 tail/WM_DPICHANGED/WM_CTLCOLORSTATIC 不改动',
+    /LogPlan::Unchanged => return/.test(source) && /fn probe_headless/.test(source)
+      && /CTL_STATUS_HWND/.test(source) && /WM_DPICHANGED/.test(source));
+}
+
 // ---- #54 WM_CTLCOLORSTATIC 取 APP 锁导致首个 2s tick 永久自锁死 ----
 console.log('\n[#54] WM_CTLCOLORSTATIC 不得进 APP 锁（静态控件重绘同步回父窗口）');
 {
@@ -228,6 +262,44 @@ if (!existsSync(exe)) {
     const idleDelta = ioB - ioA;
     ok('#34 空闲 6 秒文件读取增量 < 200KB（修前同法实测 3,000,000 字节）',
       Number.isFinite(idleDelta) && idleDelta >= 0 && idleDelta < 200 * 1024, `delta=${idleDelta} bytes`);
+
+    // ---- #30: --probe 无头探测（死端口按不可达快速退出；活端口 200 快速可达）----
+    // 注意：活端口探测必须用 spawn 异步收集——spawnSync 会冻结本测试进程的事件循环，
+    // 内建 http 服务器无法应答，造成"假超时"误判（#30 任务备注记录的实现期踩坑）。
+    console.log('\n[#30 probe] 探测总耗时 ≤1.5s；死端口不冻结、活端口返回 ok=true');
+    const probeRunAsync = (port) => new Promise((resolve) => {
+      const started = Date.now();
+      const p = spawn(exe, ['--probe', String(port)], { windowsHide: true });
+      let out = '';
+      p.stdout.on('data', (d) => { out += d; });
+      p.stderr.on('data', (d) => { out += d; });
+      const timer = setTimeout(() => { try { p.kill(); } catch { /* already gone */ } resolve({ status: null, out, ms: Date.now() - started }); }, 15000);
+      p.on('exit', (code) => { clearTimeout(timer); resolve({ status: code, out, ms: Date.now() - started }); });
+    });
+    const parseProbe = (out) => {
+      const m = /ok=(true|false) elapsed_ms=(\d+)/.exec(String(out));
+      return m ? { ok: m[1] === 'true', ms: Number(m[2]) } : null;
+    };
+
+    const deadPort = 59999; // 无监听端口：select 300ms 预算内按不可达退出（本机安全软件对未知 exe 的 SYN 静默 DROP，超时兜底正是正确语义）
+    const dead = await probeRunAsync(deadPort);
+    const deadInfo = parseProbe(dead.out);
+    ok('#30 死端口探测 exit 1 且快速返回（≤1.5s 预算）',
+      dead.status === 1 && deadInfo && !deadInfo.ok && deadInfo.ms <= 1500,
+      `exit=${dead.status} ms=${dead.ms} out=${String(dead.out).slice(0, 60)}`);
+
+    const livePort = 41000 + Math.floor(Math.random() * 10000);
+    const server = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); });
+    await new Promise((r) => server.listen(livePort, '127.0.0.1', r));
+    try {
+      const live = await probeRunAsync(livePort);
+      const liveInfo = parseProbe(live.out);
+      ok('#30 活端口探测 exit 0、ok=true 且快速返回（≤1.5s 预算）',
+        live.status === 0 && liveInfo && liveInfo.ok && liveInfo.ms <= 1500,
+        `exit=${live.status} ms=${live.ms} out=${String(live.out).slice(0, 60)}`);
+    } finally {
+      server.close();
+    }
   } finally {
     try { rmSync(base, { recursive: true, force: true }); } catch { /* Windows 句柄延迟时容忍 */ }
   }

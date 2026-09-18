@@ -306,17 +306,28 @@ fn from_wide(buf: &[u16]) -> String {
     String::from_utf16_lossy(buf)
 }
 
-/// 对 127.0.0.1:port 发最小 GET /api/status，返回是否拿到 200。
-fn http_status_ok(port: u16) -> bool {
-    unsafe {
+/// 探测分级超时预算（#30）：非阻塞 connect 300ms + 读写 1200ms，总量 ≤1.5s。
+/// 任何超时/错误一律按不可达处理，绝不在 UI 线程无界阻塞。
+pub const PROBE_CONNECT_TIMEOUT_MS: u32 = 300;
+pub const PROBE_IO_TIMEOUT_MS: u32 = 1200;
+
+/// WSAStartup 只做一次（修前每 2s 轮询都 startup/cleanup 一遍，#30）。
+static WSA_STARTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn ensure_wsa_started() -> bool {
+    *WSA_STARTED.get_or_init(|| unsafe {
         let mut wsa: ws::WSADATA = std::mem::zeroed();
-        if ws::WSAStartup(0x202, &mut wsa) != 0 {
-            return false;
-        }
-        let ok = probe_once(port);
-        ws::WSACleanup();
-        ok
+        ws::WSAStartup(0x202, &mut wsa) == 0
+    })
+}
+
+/// 对 127.0.0.1:port 发最小 GET /api/status，返回是否拿到 200。
+/// 总耗时 ≤ PROBE_CONNECT_TIMEOUT_MS + PROBE_IO_TIMEOUT_MS ≤ 1.5s（#30）。
+fn http_status_ok(port: u16) -> bool {
+    if !ensure_wsa_started() {
+        return false;
     }
+    unsafe { probe_once(port) }
 }
 
 unsafe fn probe_once(port: u16) -> bool {
@@ -324,25 +335,76 @@ unsafe fn probe_once(port: u16) -> bool {
     if sock == ws::INVALID_SOCKET {
         return false;
     }
+    let ok = probe_once_inner(sock, port);
+    ws::closesocket(sock);
+    ok
+}
+
+unsafe fn probe_once_inner(sock: usize, port: u16) -> bool {
+    // 非阻塞 connect：修前的阻塞 connect 在特定网络状态下会冻结 UI 最长 ~21s（#30）
+    let mut nonblocking: u32 = 1;
+    if ws::ioctlsocket(sock, ws::FIONBIO, &mut nonblocking) != 0 {
+        return false;
+    }
     let mut addr: ws::SOCKADDR_IN = std::mem::zeroed();
     addr.sin_family = ws::AF_INET;
     addr.sin_port = ws::htons(port);
     addr.sin_addr.S_un.S_addr = ws::htonl(0x7F00_0001); // 127.0.0.1
-    let ok = ws::connect(
+    let rc = ws::connect(
         sock,
         &addr as *const ws::SOCKADDR_IN as *const ws::SOCKADDR,
         std::mem::size_of::<ws::SOCKADDR_IN>() as i32,
-    ) == 0
-        && {
-            let req = format!("GET /api/status HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-            ws::send(sock, req.as_ptr(), req.len() as i32, 0) > 0 && {
-                let mut buf = [0u8; 64];
-                let n = ws::recv(sock, buf.as_mut_ptr(), buf.len() as i32, 0);
-                n > 0 && String::from_utf8_lossy(&buf[..n as usize]).contains(" 200 ")
-            }
+    );
+    if rc != 0 {
+        let err = ws::WSAGetLastError();
+        if err != ws::WSAEWOULDBLOCK {
+            return false; // 立即被拒（端口未监听等）
+        }
+        // select 等连接结果：同时监听 write（成功）与 except（被拒，RST 走 exceptfds 可快速失败）
+        let mut wfd: ws::FD_SET = std::mem::zeroed();
+        let mut efd: ws::FD_SET = std::mem::zeroed();
+        wfd.fd_count = 1;
+        wfd.fd_array[0] = sock;
+        efd.fd_count = 1;
+        efd.fd_array[0] = sock;
+        let mut tv = ws::TIMEVAL {
+            tv_sec: (PROBE_CONNECT_TIMEOUT_MS / 1000) as i32,
+            tv_usec: ((PROBE_CONNECT_TIMEOUT_MS % 1000) * 1000) as i32,
         };
-    ws::closesocket(sock);
-    ok
+        let n = ws::select(0, std::ptr::null_mut(), &mut wfd, &mut efd, &mut tv);
+        if n <= 0 || efd.fd_count > 0 || wfd.fd_count == 0 {
+            return false; // 超时 / 连接被拒 / select 错误：一律按不可达
+        }
+        let mut serr: i32 = 0;
+        let mut slen = std::mem::size_of::<i32>() as i32;
+        if ws::getsockopt(sock, ws::SOL_SOCKET as i32, ws::SO_ERROR as i32, &mut serr as *mut i32 as *mut u8, &mut slen) != 0
+            || serr != 0
+        {
+            return false;
+        }
+    }
+    // 连接已建立：切回阻塞模式——SO_RCVTIMEO/SO_SNDTIMEO 只对阻塞 socket 生效，
+    // 非阻塞 socket 上 recv 会立即返回 WSAEWOULDBLOCK 而不是等待（#30 实测踩坑）
+    let mut blocking: u32 = 0;
+    if ws::ioctlsocket(sock, ws::FIONBIO, &mut blocking) != 0 {
+        return false;
+    }
+    // 读写超时兜底（Windows 上 SO_SNDTIMEO/SO_RCVTIMEO 为毫秒 DWORD；
+    // SO_SNDTIMEO 不作用于 connect，所以 connect 阶段必须靠上面的 select）
+    let io_ms: u32 = PROBE_IO_TIMEOUT_MS;
+    if ws::setsockopt(sock, ws::SOL_SOCKET as i32, ws::SO_RCVTIMEO as i32, &io_ms as *const u32 as *const u8, 4) != 0
+        || ws::setsockopt(sock, ws::SOL_SOCKET as i32, ws::SO_SNDTIMEO as i32, &io_ms as *const u32 as *const u8, 4) != 0
+    {
+        return false;
+    }
+    let req = format!("GET /api/status HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let sent = ws::send(sock, req.as_ptr(), req.len() as i32, 0);
+    if sent <= 0 {
+        return false;
+    }
+    let mut buf = [0u8; 64];
+    let n = ws::recv(sock, buf.as_mut_ptr(), buf.len() as i32, 0);
+    n > 0 && String::from_utf8_lossy(&buf[..n as usize]).contains(" 200 ")
 }
 
 fn msg_box(hwnd: HWND, text: &str, icon: u32) {
@@ -469,6 +531,9 @@ struct App {
     data_root: PathBuf,
     settings_path: PathBuf,
     log_path: PathBuf,
+    /// 已保存/已生效端口（#30）：探测、启动、打开面板一律用它；
+    /// 端口输入框的未保存文本不改变任何后台交互目标。
+    saved_port: u32,
     backend: Option<(HANDLE, u32)>, // 只管理自己拉起的进程
     backend_exe: Option<PathBuf>,
     backend_script: Option<PathBuf>,
@@ -512,15 +577,15 @@ fn publish_ctl_snapshot(status_hwnd: HWND, log_header: HWND, bg_brush: HBRUSH, r
 }
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
-    APP.lock().ok().and_then(|mut g| g.as_mut().map(f))
+    // 锁中毒降级（#30）：任一持锁线程 panic 后不再让后续每次 with_app 都 panic
+    //（修前 .ok() 会静默返回 None，全部 GUI 功能哑掉且无任何报错，比 panic 更难查）
+    APP.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+        .map(f)
 }
 
 impl App {
-    fn port(&self) -> u32 {
-        let text = self.get_text(self.port_edit);
-        parse_port(&text).unwrap_or_else(|| load_port(&self.settings_path))
-    }
-
     fn get_text(&self, hwnd: HWND) -> String {
         unsafe {
             let len = GetWindowTextLengthW(hwnd);
@@ -556,7 +621,7 @@ impl App {
                 self.hwnd,
                 &format!(
                     "端口 {} 已有后台在运行（非本程序启动）。为免误杀外部进程，这里不重复启动；如需换端口请先停止那个后台。",
-                    self.port()
+                    self.saved_port
                 ),
                 MB_ICONINFORMATION,
             );
@@ -565,7 +630,7 @@ impl App {
         let (Some(exe), Some(script)) = (self.backend_exe.clone(), self.backend_script.clone()) else {
             return;
         };
-        let args = format!("\"{}\" serve --port {}", script.display(), self.port());
+        let args = format!("\"{}\" serve --port {}", script.display(), self.saved_port);
         let cwd = exe.parent().map(|p| p.to_path_buf()).unwrap_or_else(current_exe_dir);
         let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
@@ -593,7 +658,7 @@ impl App {
                 self.hwnd,
                 &format!(
                     "启动后台失败（错误 {err}）\n（需要 runtime\\node.exe 与 runtime\\bin\\tokenmonitor.js；面板地址 http://127.0.0.1:{}）",
-                    self.port()
+                    self.saved_port
                 ),
                 MB_ICONERROR,
             );
@@ -620,7 +685,7 @@ impl App {
                         self.hwnd,
                         &format!(
                             "当前后台不是本程序启动的（端口 {}），为免误杀外部进程这里不停止。",
-                            self.port()
+                            self.saved_port
                         ),
                         MB_ICONINFORMATION,
                     );
@@ -662,7 +727,7 @@ impl App {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 wide("open").as_ptr(),
-                wide(&format!("http://127.0.0.1:{}", self.port())).as_ptr(),
+                wide(&format!("http://127.0.0.1:{}", self.saved_port)).as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
                 1, // SW_SHOWNORMAL
@@ -674,13 +739,16 @@ impl App {
         let text = self.get_text(self.port_edit);
         let Some(port) = parse_port(&text) else {
             msg_box(self.hwnd, "端口必须是 1-65535 的整数。", MB_ICONWARNING);
-            self.set_text(self.port_edit, &self.port().to_string());
+            self.set_text(self.port_edit, &self.saved_port.to_string());
             return;
         };
         if let Err(e) = save_port(&self.settings_path, port) {
             msg_box(self.hwnd, &format!("保存设置失败：{e}"), MB_ICONERROR);
             return;
         }
+        // 保存成功后才切换生效端口（#30）：探测/启动/面板立即使用新端口；
+        // 输入框里改了但没保存的文本不影响任何后台交互目标
+        self.saved_port = port;
         if self.own_backend_alive() {
             if let Some(h) = self.stop_own_backend(true) {
                 // 旧进程退出在分离线程等待（#34）；完成后 PostMessage 回 UI 线程按新端口重启
@@ -711,7 +779,7 @@ impl App {
             self.status_label,
             &format!(
                 "状态：{state}    面板：http://127.0.0.1:{}    数据：{}",
-                self.port(),
+                self.saved_port,
                 self.data_root.display()
             ),
         );
@@ -785,7 +853,7 @@ impl App {
     }
 
     fn poll_status(&mut self) {
-        self.external_online = http_status_ok(self.port() as u16);
+        self.external_online = http_status_ok(self.saved_port as u16);
         if self.stopping && !self.own_backend_alive() && !self.external_online {
             // 后台已终止且端口不再可达：停止流程完成，解除「停止中」（#34）
             self.stopping = false;
@@ -947,6 +1015,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             let settings_path = settings_path_for(&data_root);
             let log_path = log_path_for(&data_root);
             let resolved = resolve_backend(app_root.as_deref(), &exe_dir);
+            let saved_port = load_port(&settings_path);
 
             let dpi = get_window_dpi(hwnd);
             let font_ui = create_segoe_font(dpi, 10, FW_NORMAL as i32);
@@ -1025,6 +1094,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 data_root,
                 settings_path,
                 log_path,
+                saved_port,
                 backend: None,
                 backend_exe: resolved.as_ref().map(|(e, _)| e.clone()),
                 backend_script: resolved.as_ref().map(|(_, s)| s.clone()),
@@ -1257,10 +1327,28 @@ fn run_gui() {
 }
 
 
+/// 无头探测（#30）：对指定端口跑一次带超时的状态探测，打印 ok/elapsedMs 供行为测试。
+fn probe_headless(port: u16) -> i32 {
+    let start = std::time::Instant::now();
+    let ok = http_status_ok(port);
+    println!("ok={} elapsed_ms={}", ok, start.elapsed().as_millis());
+    if ok { 0 } else { 1 }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--selfcheck" || a == "-selfcheck") {
         std::process::exit(selfcheck(args.get(2).map(|s| s.as_str())));
+    }
+    if args.iter().any(|a| a == "--probe") {
+        // --probe [port]：无头探测，exit 0 = 可达 / 1 = 不可达或超时（总预算 ≤1.5s）
+        let port = args
+            .iter()
+            .position(|a| a == "--probe")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| parse_port(s))
+            .unwrap_or(DEFAULT_PORT);
+        std::process::exit(probe_headless(port as u16));
     }
 
     // 单实例：判定只在入口这一处；绝不能在窗口构造里再创建同名互斥锁
