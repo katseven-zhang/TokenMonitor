@@ -114,6 +114,24 @@ function render() {
   safe('feed', () => renderFeed(s.recent));
   safe('toolsAct', () => renderToolActivity());
   safe('sessions', () => loadSessions());
+  fillUnpriced(); // #37：未配价明细异步填充（点开后可见）
+}
+
+/** 未配价模型明细（#37）：tokens 降序；无未配价时给明确空态 */
+async function fillUnpriced() {
+  const box = document.getElementById('unpriced-box');
+  if (!box) return;
+  try {
+    const res = await fetch(`/api/unpriced?days=${days}`);
+    const data = await res.json();
+    const tbody = box.querySelector('tbody');
+    if (!tbody) return;
+    const rows = data.models || [];
+    tbody.innerHTML = rows.length ? rows.map((m) => `<tr>
+      <td>${esc(m.model)}</td><td>${fmt(m.tokens)}</td><td>${m.calls}</td>
+      <td class="dim">${new Date(m.last_ts).toLocaleString('zh-CN')}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="dim">当前窗口内没有未配价模型</td></tr>';
+  } catch { /* 拉取失败保持「加载中」，不阻塞面板 */ }
 }
 
 function renderStatus(quota, balances, rates, recon, costs) {
@@ -171,7 +189,14 @@ function renderStatus(quota, balances, rates, recon, costs) {
   if (costs && (costs.today_cny > 0 || costs.all_cny > 0)) {
     const chips = esc((costs.by_tool || []).slice(0, 4)
       .map(t => `${toolLabel(t.tool)} ${formatMoney(t.cost_cny)}`).join(' · '));
-    const unpriced = costs.unpriced?.length ? `<div class="recon dim" title="${esc(costs.unpriced.join(', '))}">⚠ ${costs.unpriced.length} 个模型未配价</div>` : '';
+    // #37：未配价从一句折叠提示升级为可点开明细 + 一键模板下载（配价位置=数据目录 pricing.json）
+    const unpriced = costs.unpriced?.length ? `<details class="recon" id="unpriced-box">
+        <summary class="dim" style="cursor:pointer">⚠ ${costs.unpriced.length} 个模型未配价（点开明细与配价方法）</summary>
+        <table class="rates-table"><thead><tr><th>模型</th><th>Tokens</th><th>次数</th><th>最近使用</th></tr></thead>
+        <tbody><tr><td colspan="4" class="dim">加载中…</td></tr></tbody></table>
+        <div class="recon dim" style="margin-top:4px">配价位置：数据目录 pricing.json（编辑保存后即时生效，无需重启）。
+          <a href="/api/unpriced/template" download="pricing-template.json">下载 pricing.json 模板</a></div>
+      </details>` : '';
     html += `<div class="quota-card">
       <div class="quota-head"><span class="q-title">API 花费（LiteLLM 牌价）</span>
         <span class="q-reset" title="${costs.fx_ts ? '汇率时间 ' + esc(new Date(costs.fx_ts).toLocaleString('zh-CN')) : ''}">USD×${esc(costs.usd_to_cny)}${costs.fx_source === 'manual' ? '' : ' ·实时'}</span></div>

@@ -101,6 +101,8 @@ console.log('\n[2] 静态断言');
   const ids = new Set([...app.matchAll(/getElementById\('([\w-]+)'\)/g)].map(m => m[1]));
   const chartIds = new Set([...app.matchAll(/\['\w+',\s*'([\w-]+)'\]/g)].map(m => m[1]));
   const htmlIds = new Set([...html.matchAll(/id="([\w-]+)"/g)].map(m => m[1]));
+  // app.js 模板字符串里动态生成的 id 同样合法（#37 的 unpriced-box 明细容器等）
+  for (const m of app.matchAll(/\sid="([\w-]+)"/g)) htmlIds.add(m[1]);
   for (const id of [...ids, ...chartIds]) {
     ok(`HTML 有 id=${id}`, htmlIds.has(id));
   }
@@ -1747,6 +1749,90 @@ console.log('\n[20] 共享货币展示层（#38：唯一换算入口/USD=¥÷汇
   ok('#38 index.html 提供 CNY/USD 切换控件', /id="currency"/.test(htmlSrc) && htmlSrc.includes('value="USD"'));
   ok('#38 切换经 setCurrency + load() 重渲染',
     /setCurrency\(sel\.value\)/.test(appSrc) && /initMoney\(data\.costs \|\| data\)/.test(appSrc));
+}
+
+/* ---------- [21] 未配价可操作 + 改价即时生效（#37） ---------- */
+console.log('\n[21] 未配价明细/模板 + loadPricing mtime 失效（#37）');
+{
+  const { loadPricing, isPriced } = await import(pathToFileURL(join(ROOT, 'src/pricing.js')).href);
+  const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { utimesSync, copyFileSync } = await import('node:fs');
+  const appSrc = read(join(ROOT, 'web/app.js'));
+  const pricingSrc = read(join(ROOT, 'src/pricing.js'));
+
+  // --- loadPricing mtime/size 失效（临时路径注入，不碰真实 pricing.json） ---
+  {
+    const base = mkdtempSync(join(tmpdir(), 'pricing37 中文-'));
+    const pf = join(base, 'pricing.json');
+    writeFileSync(pf, JSON.stringify({ _note: 'v1', models: { 'model-a': { currency: 'USD', input_miss: 1, input_hit: 0.1, output: 2 } } }));
+    const p1 = await loadPricing(pf);
+    ok('#37 初次加载读到 model-a', p1.models['model-a']?.input_miss === 1);
+    // 改文件：内容不同（size 变化）+ utimes 强制 mtime 变化
+    writeFileSync(pf, JSON.stringify({ _note: 'v2', models: { 'model-a': { currency: 'USD', input_miss: 9, input_hit: 0.1, output: 2 } } }));
+    const now = new Date();
+    utimesSync(pf, now, new Date(now.getTime() - 5_000));
+    const p2 = await loadPricing(pf);
+    ok('#37 修改后不重启即生效（mtime/size 失效缓存）', p2.models['model-a']?.input_miss === 9, String(p2.models['model-a']?.input_miss));
+    // 未变化：缓存命中（mtime/size 相同时不再读盘——行为一致即可，不监测 IO 次数）
+    const p3 = await loadPricing(pf);
+    ok('#37 未变化时返回缓存（内容一致）', p3.models['model-a']?.input_miss === 9);
+    rmSync(base, { recursive: true, force: true });
+  }
+
+  // --- isPriced：与 priceOf 同源 ---
+  {
+    const table = { 'm-local': { currency: 'USD', input_miss: 1, input_hit: 0, output: 1 } };
+    ok('#37 isPriced：本地表命中 true / 表外 null false', isPriced('m-local', table) === true && isPriced('no-such-model-xyz', table) === false);
+  }
+
+  // --- /api/unpriced 与模板路由（端到端） ---
+  {
+    const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+    const base = mkdtempSync(join(tmpdir(), 'unpriced37-'));
+    const store = new Store(join(base, 't37.db'));
+    const now = Date.now();
+    // 一个未配价模型 + 一个 seed 表内模型（deepseek-v4-pro）
+    store.insertEvent({ ts: now - 60_000, tool: 'fake37', model: 'totally-unpriced-model-xyz', dedup_key: 'u1', input_tokens: 100, output_tokens: 50, total_tokens: 150 });
+    store.insertEvent({ ts: now - 30_000, tool: 'fake37', model: 'deepseek-v4-pro', dedup_key: 'u2', input_tokens: 10, output_tokens: 5, total_tokens: 15 });
+    const fakeScanner = Object.assign(new (await import('node:events')).EventEmitter(), { stats: {} });
+    const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+    const server = await startServer({ store, scanner: fakeScanner, port, log: () => {} });
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/unpriced`);
+      const body = await res.json();
+      ok('#37 /api/unpriced 只列未配价（tokens 降序，配价模型被过滤）',
+        res.status === 200 && body.count === 1 && body.models[0].model === 'totally-unpriced-model-xyz'
+          && body.models[0].tokens === 150 && body.models[0].calls === 1 && Number.isFinite(body.models[0].last_ts),
+        JSON.stringify(body));
+      const tpl = await fetch(`http://127.0.0.1:${port}/api/unpriced/template`);
+      const tplText = await tpl.text();
+      const tplJson = JSON.parse(tplText);
+      ok('#37 模板：含 _readme 说明 + 全部未配价模型名 + 待填字段',
+        tpl.status === 200 && typeof tplJson._readme === 'string' && tplJson._readme.includes('每百万')
+          && tplJson.models['totally-unpriced-model-xyz']?.input_miss === 0
+          && !tplJson.models['deepseek-v4-pro'],
+        tplText.slice(0, 120));
+      ok('#37 模板响应带 attachment 头',
+        (tpl.headers.get('content-disposition') || '').includes('pricing-template.json'));
+    } finally {
+      server.close();
+      try { store.db.close(); } catch { /* 句柄 */ }
+      try { rmSync(base, { recursive: true, force: true }); } catch { /* 延迟 */ }
+    }
+  }
+
+  // --- 结构断言 ---
+  ok('#37 _note 与真实行为一致（保存即自动重载）',
+    pricingSrc.includes('保存即自动重载') && !cachedNoteStale(pricingSrc));
+  ok('#37 app.js：未配价提示可点开（details + 明细表 + 模板下载链接）',
+    appSrc.includes('id="unpriced-box"') && appSrc.includes('/api/unpriced/template')
+      && appSrc.includes('fillUnpriced'));
+}
+
+function cachedNoteStale(src) {
+  // 旧文案「编辑后即时生效」且无「自动重载」说明视为未修正
+  return !src.includes('自动重载');
 }
 
 /* ---------- 清理 ---------- */

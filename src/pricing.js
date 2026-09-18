@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DATA_DIR, SOURCES } from './config.js';
 import { ensurePrices, lookupPrice } from './litellm.js';
@@ -15,7 +15,7 @@ const PRICING_PATH = join(DATA_DIR, 'pricing.json');
 
 const SEED = {
   // 汇率默认实时拉取；如需固定：设 usd_to_cny 数字并加 usd_to_cny_manual: true
-  _note: '单价为每百万 token；DeepSeek 记峰时价，off_peak 为谷时折扣系数；编辑后即时生效',
+  _note: '单价为每百万 token；DeepSeek 记峰时价，off_peak 为谷时折扣系数；编辑后即时生效（保存即自动重载，无需重启；既有文件的旧 _note 不会自动改写，以行为为准）',
   models: {
     'deepseek-v4.1-flash': { currency: 'USD', input_miss: 0.30, input_hit: 0.006, output: 1.20, off_peak: 0.5 },
     'deepseek-v4-flash': { currency: 'USD', input_miss: 0.30, input_hit: 0.006, output: 1.20, off_peak: 0.5 }, // 官方已路由至 V4.1 Flash 同价
@@ -40,17 +40,43 @@ export const PEAK_SQL = `(
     OR CAST(strftime('%H', ts / 1000, 'unixepoch') AS INTEGER) BETWEEN 6 AND 9)
 )`;
 
-let cached = null;
+let cached = null; // { data, mtimeMs, size }
 
-export async function loadPricing() {
-  if (cached) return cached;
-  try {
-    cached = JSON.parse(await readFile(PRICING_PATH, 'utf8'));
-  } catch {
-    await writeFile(PRICING_PATH, JSON.stringify(SEED, null, 2) + '\n', { mode: 0o600 }).catch(() => {});
-    cached = SEED;
+/**
+ * 加载价表（#37 修复：按文件 mtime+size 失效缓存）。
+ * 修前模块级 `if (cached) return cached` 永不失效，改完 pricing.json 必须重启后端，
+ * 与 _note「编辑后即时生效」的承诺相反。现在每次调用一次 stat（代价可忽略），
+ * mtimeMs 或 size 变化即重读——保存后无需重启即反映到成本计算。
+ * path 参数仅供测试注入（默认真实数据目录文件）。
+ */
+export async function loadPricing(path = PRICING_PATH) {
+  const s = await stat(path).catch(() => null);
+  if (cached && s && s.mtimeMs === cached.mtimeMs && s.size === cached.size) return cached.data;
+  if (!s) {
+    await writeFile(path, JSON.stringify(SEED, null, 2) + '\n', { mode: 0o600 }).catch(() => {});
+    const s2 = await stat(path).catch(() => null);
+    cached = { data: SEED, mtimeMs: s2?.mtimeMs ?? 0, size: s2?.size ?? 0 };
+    return SEED;
   }
-  return cached;
+  try {
+    const data = JSON.parse(await readFile(path, 'utf8'));
+    cached = { data, mtimeMs: s.mtimeMs, size: s.size };
+    return data;
+  } catch {
+    // 文件存在但损坏：回落种子并落盘修复（与既有行为一致），不抛穿
+    await writeFile(path, JSON.stringify(SEED, null, 2) + '\n', { mode: 0o600 }).catch(() => {});
+    cached = { data: SEED, mtimeMs: s.mtimeMs, size: s.size };
+    return SEED;
+  }
+}
+
+/**
+ * 模型是否可计价（#37）：pricing.json 直配或 LiteLLM 兜底命中任一即算有价。
+ * 判定与 priceOf 同源（priceOf 返回 null 即未配价），不另造第二套判定。
+ * rate 参数只为满足 priceOf 签名，金额在此无关。
+ */
+export function isPriced(model, table, rate = 1) {
+  return priceOf(model, table || {}, rate) !== null;
 }
 
 function modelCostCny(p, m) {

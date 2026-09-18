@@ -6,7 +6,7 @@ import { extname, join, resolve, dirname } from 'node:path';
 import { WEB_DIR, ECHARTS_PATH, DB_PATH, isOffline, SOURCES, SOURCE_ERRORS } from './config.js';
 import { TOOL_COLORS, TOOL_LABEL } from '../web/lib/theme.js';
 import { learnWorkbuddyRates } from './rates.js';
-import { loadPricing, computeCosts, computeRecon } from './pricing.js';
+import { loadPricing, computeCosts, computeRecon, isPriced } from './pricing.js';
 import { ensurePrices, setOnChange as onPricesLoaded } from './litellm.js';
 import { ensureFxRate, setOnChange as onFxLoaded } from './fx.js';
 import { diagnosePortConflict } from './platform/runtime.js';
@@ -583,6 +583,49 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
         'content-disposition': `attachment; filename="codex-${day || 'all'}.csv"`,
       });
       res.end(`\uFEFF${header}\n${body}\n`);
+      return undefined;
+    }
+    // ---- 未配价模型可操作（#37）：明细列表 + pricing.json 模板下载。只读，无敏感字段。 ----
+    if (p === '/api/unpriced') {
+      const days = parseDays(url.searchParams.get('days'), 30);
+      const since = days > 0 ? Date.now() - days * 86_400_000 : 0;
+      const pricing = await loadPricing();
+      const rate = typeof pricing?.usd_to_cny === 'number' ? pricing.usd_to_cny : 7.2;
+      const rows = db_safe(store).prepare(`
+        SELECT model, SUM(total_tokens) tokens, COUNT(*) calls, MAX(ts) last_ts
+        FROM events WHERE ts >= ? AND model IS NOT NULL AND model != ''
+        GROUP BY model ORDER BY tokens DESC`).all(since);
+      const unpriced = rows.filter((r) => !isPriced(r.model, pricing.models, rate));
+      return json(res, 200, {
+        days, count: unpriced.length,
+        models: unpriced.map((r) => ({
+          model: r.model, tokens: r.tokens, calls: r.calls, last_ts: r.last_ts,
+        })),
+      });
+    }
+    if (p === '/api/unpriced/template') {
+      // 一键生成 pricing.json 模板片段：全部未配价模型 + 待填字段说明，
+      // 用户/agent 填好单价后可直接合入数据目录的 pricing.json
+      const pricing = await loadPricing();
+      const rate = typeof pricing?.usd_to_cny === 'number' ? pricing.usd_to_cny : 7.2;
+      const rows = db_safe(store).prepare(`
+        SELECT model, SUM(total_tokens) tokens FROM events
+        WHERE model IS NOT NULL AND model != '' GROUP BY model ORDER BY tokens DESC`).all();
+      const unpriced = rows.filter((r) => !isPriced(r.model, pricing.models, rate));
+      const models = {};
+      for (const r of unpriced) {
+        models[r.model] = { currency: 'USD', input_miss: 0, input_hit: 0, output: 0 };
+      }
+      const tpl = {
+        _readme: '把需要配价的模型填入下方 models，单价单位为「每百万 token」。currency 取 USD 或 CNY；USD 条目金额会按 usd_to_cny 折算。字段：input_miss=新输入、input_hit=缓存命中、output=输出（DeepSeek 系可加 off_peak 谷时折扣系数）。填好后把 models 合并进数据目录的 pricing.json，保存后即时生效（#37）。列表按历史用量降序，仅含当前未配价模型。',
+        models,
+      };
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-disposition': `attachment; filename="pricing-template.json"`,
+        'cache-control': 'no-store',
+      });
+      res.end(JSON.stringify(tpl, null, 2) + '\n');
       return undefined;
     }
     if (p === '/api/export.csv') {
