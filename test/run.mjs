@@ -1505,6 +1505,20 @@ console.log('\n[17] Codex rate_limits 规范化（#44：三窗口/0与缺失可�
     ok('#44 raw 非对象/空 → null（来源级可诊断）',
       normalizeRateLimits(null, T0) === null && normalizeRateLimits('x', T0) === null
         && normalizeRateLimits({}, T0) === null);
+    // #58：resets_at 秒级 Unix 时间戳（真实日志形态）归一为毫秒 + ISO
+    const nSec = normalizeRateLimits({ primary: { used_percent: 94, window_minutes: 10080, resets_at: 1789806718 } }, T0);
+    ok('#58 数字秒 resets_at ×1000 归一（1789806718 → 2026-09-19T08:31:58Z）',
+      nSec.windows[0].resets_at_ms === 1789806718000
+        && nSec.windows[0].resets_at === '2026-09-19T08:31:58.000Z',
+      JSON.stringify(nSec.windows[0]));
+    // 毫秒数字直通（≥1e11 不再乘）
+    const nMs = normalizeRateLimits({ primary: { resets_at: 1789806718000 } }, T0);
+    ok('#58 毫秒数字直通不重复放大', nMs.windows[0].resets_at_ms === 1789806718000
+      && nMs.windows[0].resets_at === '2026-09-19T08:31:58.000Z');
+    // ISO 字符串行为不变
+    const nIso = normalizeRateLimits({ primary: { resets_at: '2026-09-25T00:00:00Z' } }, T0);
+    ok('#58 ISO 字符串输入行为不变', nIso.windows[0].resets_at === '2026-09-25T00:00:00Z'
+      && nIso.windows[0].resets_at_ms === Date.parse('2026-09-25T00:00:00Z'));
   }
 
   // --- 端到端：合成 fixture（中文+空格路径）→ collect → 假 store 黄金数字 ---
@@ -1588,6 +1602,11 @@ console.log('\n[18] Codex 配额历史（#45：幂等迁移/去重/0 与 NULL/ge
     // 同一采集点重复写入不产生重复样本
     s1.saveQuota('codex', t2, snap(t2, 44, reset1).data);
     ok('#45 同点重复写入去重（仍 4 行）', s1.getCodexQuotaHistory().length === 4);
+    // #58：同 ts 但 data 变化（解析修正后的重扫重放）允许覆盖错值快照
+    s1.saveQuota('codex', t2, snap(t2, 45, reset1).data);
+    const qFixed = s1.getQuota('codex');
+    ok('#58 同 ts 且 data 变化时覆盖更新（45→45 变体，getQuota 反映新内容）',
+      qFixed.data.used_percent === 45 && qFixed.ts === t2, JSON.stringify(qFixed.data.used_percent));
     // used 推导：capacity 未知 → NULL（不伪造）；显式 0 保留
     const rowUsed = s1.getCodexQuotaHistory({ windowKind: 'primary', limit: 1 })[0];
     ok('#45 capacity 缺失时 used=NULL（绝不伪造样本）', rowUsed.used === null && rowUsed.used_percent === 44);

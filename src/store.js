@@ -173,7 +173,11 @@ export class Store {
     this._upsertQuota = this.db.prepare(`
       INSERT INTO quota (tool, ts, data) VALUES (?, ?, ?)
       ON CONFLICT(tool) DO UPDATE SET ts = excluded.ts, data = excluded.data
-      WHERE excluded.ts > quota.ts`); // 只接受更新的快照，扫描顺序无关
+      WHERE excluded.ts > quota.ts
+         OR (excluded.ts = quota.ts AND excluded.data <> quota.data)`);
+    // 只接受更新的快照（扫描顺序无关）；#58 放宽：同 ts 但内容变化（解析修正后
+    // 的全量重扫重放同一条 rate_limits 事件）也允许覆盖旧错快照；
+    // 同 ts 同 data 仍幂等不写。
     // Codex 配额历史（#45）：同 (window_kind, ts) 重复写入由主键去重
     this._insertCodexQuotaHistory = this.db.prepare(`
       INSERT OR IGNORE INTO codex_quota_history

@@ -3,10 +3,14 @@ import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
 
 /**
- * rate_limits 规范化（#44）：primary(5h)/secondary(weekly)/monthly 三窗口，
- * 每窗口解析 window_minutes/used_percent/resets_at（ISO 原样 + ms 数值供 #45
- * 历史存储与 #47 pace 使用）/credits/capacity/remaining。
- * 显式 0 是合法值（used_percent=0 = 刚重置）；字段缺失一律 null，绝不静默变 0。
+ * rate_limits 规范化（#44；#58 修正 resets_at 形态）：
+ * primary(5h/周)/secondary(weekly)/monthly 三窗口，每窗口解析
+ * window_minutes/used_percent/resets_at/credits/capacity/remaining。
+ * resets_at 实测存在多种形态（#58 真实日志为秒级 Unix 时间戳数字）：
+ *   - ISO 字符串 → 原样保留，resets_at_ms = Date.parse
+ *   - 数字 < 1e11 → 视为秒级时间戳，×1000 归一为毫秒，resets_at 输出对应 ISO
+ *   - 数字 ≥ 1e11 → 视为毫秒直通，resets_at 输出对应 ISO
+ *   - 其他/缺失 → null（显式 0 与缺失可区分的契约不变）
  * raw 非对象或三窗口全缺 → 返回 null（来源级可诊断：调用方跳过配额写入，
  * 不抛穿、不影响事件采集）。
  */
@@ -18,16 +22,26 @@ export function normalizeRateLimits(rl, ts) {
       || w.resets_at !== undefined || w.credits !== undefined
       || w.capacity !== undefined || w.remaining !== undefined;
     if (!hasWin) return null;
-    const iso = typeof w.resets_at === 'string' ? w.resets_at : null;
-    const ms = iso !== null ? Date.parse(iso)
-      : (Number.isFinite(w.resets_at) ? w.resets_at : null);
     const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    let resetsIso = null;
+    let resetsMs = null;
+    if (typeof w.resets_at === 'string' && w.resets_at) {
+      const parsed = Date.parse(w.resets_at);
+      if (Number.isFinite(parsed)) {
+        resetsIso = w.resets_at;
+        resetsMs = parsed;
+      }
+    } else if (typeof w.resets_at === 'number' && Number.isFinite(w.resets_at)) {
+      // 秒级（10 位，<1e11）×1000 归一为毫秒；≥1e11 已是毫秒直通（#58）
+      resetsMs = w.resets_at < 1e11 ? w.resets_at * 1000 : w.resets_at;
+      resetsIso = new Date(resetsMs).toISOString();
+    }
     return {
       kind,
       window_minutes: num(w.window_minutes),
       used_percent: num(w.used_percent),
-      resets_at: iso,
-      resets_at_ms: Number.isFinite(ms) ? ms : null,
+      resets_at: resetsIso,
+      resets_at_ms: resetsMs,
       credits: num(w.credits),
       capacity: num(w.capacity),
       remaining: num(w.remaining),
