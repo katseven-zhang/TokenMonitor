@@ -585,6 +585,20 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       res.end(`\uFEFF${header}\n${body}\n`);
       return undefined;
     }
+    // ---- 通用 source×model 聚合（#35）：单应用×每模型 tokens/调用数/最近使用。
+    // 选项注册表来自 /api/sources，前端新增来源无需改映射；不碰全局 by_model/by_tool。 ----
+    if (p === '/api/source-model') {
+      const tool = url.searchParams.get('tool') || '';
+      const days = parseDays(url.searchParams.get('days'), 30);
+      if (!tool) return json(res, 200, { tool: '', days, models: [] });
+      const since = days > 0 ? startOfDay() - (days - 1) * 86_400_000 : 0;
+      const rows = db_safe(store).prepare(`
+        SELECT model, SUM(total_tokens) tokens, COUNT(*) calls, MAX(ts) last_ts
+        FROM events WHERE tool = ? AND ts >= ? AND model IS NOT NULL AND model != ''
+        GROUP BY model ORDER BY tokens DESC LIMIT 50`).all(tool, since);
+      return json(res, 200, { tool, days, models: rows });
+    }
+
     // ---- 未配价模型可操作（#37）：明细列表 + pricing.json 模板下载。只读，无敏感字段。 ----
     if (p === '/api/unpriced') {
       const days = parseDays(url.searchParams.get('days'), 30);

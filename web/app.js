@@ -117,6 +117,30 @@ function render() {
   fillUnpriced(); // #37：未配价明细异步填充（点开后可见）
 }
 
+/** #35：应用选择器选项——来自 /api/sources 注册表，新增来源无需改前端映射 */
+function buildModelSourceFilter() {
+  const sel = document.getElementById('model-source');
+  if (!sel || !SOURCE_META.labels) return;
+  const current = sel.value;
+  const options = Object.entries(SOURCE_META.labels)
+    .map(([tool, label]) => `<option value="${esc(tool)}">${esc(label)}</option>`).join('');
+  sel.innerHTML = `<option value="">全部应用</option>${options}`;
+  if (current && [...sel.options].some((o) => o.value === current)) sel.value = current;
+}
+
+/** #35：选中应用后拉取该来源的每模型明细并渲染进模型图；「全部应用」恢复全局 by_model */
+async function loadSourceModelDetail() {
+  const sel = document.getElementById('model-source');
+  if (!sel || !lastSummary) return;
+  const tool = sel.value;
+  if (!tool) { renderModel(lastSummary.by_model); return; }
+  try {
+    const res = await fetch(`/api/source-model?tool=${encodeURIComponent(tool)}&days=${days}`);
+    const data = await res.json();
+    renderModel((data.models || []).map((m) => ({ model: m.model, total: m.tokens, n: m.calls })));
+  } catch { /* 拉取失败保留当前视图 */ }
+}
+
 /** 未配价模型明细（#37）：tokens 降序；无未配价时给明确空态 */
 async function fillUnpriced() {
   const box = document.getElementById('unpriced-box');
@@ -508,6 +532,12 @@ document.getElementById('export-btn').addEventListener('click', () => {
   window.open(`/api/export.csv?days=${days}`, '_blank');
 });
 
+// #35：应用选择器——选中来源后模型图切换为该来源的每模型明细
+{
+  const sel = document.getElementById('model-source');
+  if (sel) sel.addEventListener('change', () => loadSourceModelDetail());
+}
+
 // #38：CNY/USD 切换——只经共享 money.js 换算（USD=¥÷同一份汇率），切换后重渲染全部金额
 {
   const sel = document.getElementById('currency');
@@ -869,6 +899,7 @@ async function loadSourceMeta() {
     SOURCE_META.billed = merged.billed;
     sourceErrors = merged.errors;
     buildSourceFilter();
+    buildModelSourceFilter(); // #35：模型视图的应用选择器（选项来自注册表）
     load(); // 元数据已变，立即按新颜色/标签重渲染
   } catch { /* 端点不存在或网络失败：内建表照常工作 */ }
 }

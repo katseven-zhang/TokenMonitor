@@ -1835,6 +1835,51 @@ function cachedNoteStale(src) {
   return !src.includes('自动重载');
 }
 
+/* ---------- [22] 单应用×每模型明细（#35） ---------- */
+console.log('\n[22] source×model 聚合与应用选择器（#35）');
+{
+  const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const { EventEmitter } = await import('node:events');
+  const base = mkdtempSync(join(tmpdir(), 'sm35-'));
+  const store = new Store(join(base, 't35.db'));
+  const now = Date.now();
+  store.insertEvent({ ts: now - 60_000, tool: 'srcA', model: 'glm-5.3-flash', dedup_key: 's35-1', input_tokens: 100, output_tokens: 50, total_tokens: 150 });
+  store.insertEvent({ ts: now - 50_000, tool: 'srcA', model: 'kimi-k3', dedup_key: 's35-2', input_tokens: 200, output_tokens: 20, total_tokens: 220 });
+  store.insertEvent({ ts: now - 40_000, tool: 'srcB', model: 'glm-5.3-flash', dedup_key: 's35-3', input_tokens: 5, output_tokens: 5, total_tokens: 10 });
+  const fakeScanner = Object.assign(new EventEmitter(), { stats: {} });
+  const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+  const server = await startServer({ store, scanner: fakeScanner, port, log: () => {} });
+  await new Promise((r) => setTimeout(r, 500));
+  try {
+    const a = await (await fetch(`http://127.0.0.1:${port}/api/source-model?tool=srcA&days=30`)).json();
+    ok('#35 srcA 明细 tokens 降序（kimi 220 > glm 150）',
+      a.models.length === 2 && a.models[0].model === 'kimi-k3' && a.models[0].tokens === 220
+        && a.models[0].calls === 1 && Number.isFinite(a.models[0].last_ts),
+      JSON.stringify(a));
+    const b = await (await fetch(`http://127.0.0.1:${port}/api/source-model?tool=srcB&days=0`)).json();
+    ok('#35 srcB 只含自己的模型（days=0 全量）', b.models.length === 1 && b.models[0].tokens === 10);
+    const empty = await (await fetch(`http://127.0.0.1:${port}/api/source-model`)).json();
+    ok('#35 未指定 tool → 空列表（不 500）', empty.models.length === 0);
+    // 全局聚合不受影响
+    const sum = await (await fetch(`http://127.0.0.1:${port}/api/summary?days=30`)).json();
+    ok('#35 全局 by_model/by_tool 不被新路由破坏',
+      Array.isArray(sum.by_model) && sum.by_model.length === 2 && Array.isArray(sum.by_tool));
+    // 前端结构：选择器来自注册表，无硬编码来源名单
+    const appSrc = read(join(ROOT, 'web/app.js'));
+    const htmlSrc = read(join(ROOT, 'web/index.html'));
+    ok('#35 前端有应用选择器且选项来自 /api/sources（无硬编码名单）',
+      /id="model-source"/.test(htmlSrc) && appSrc.includes('buildModelSourceFilter')
+        && appSrc.includes('SOURCE_META.labels') && /\/api\/source-model/.test(appSrc));
+    ok('#35 切换逻辑：空值恢复全局 by_model，选中拉明细',
+      appSrc.includes('renderModel(lastSummary.by_model)'));
+  } finally {
+    server.close();
+    try { store.db.close(); } catch { /* 句柄 */ }
+    try { rmSync(base, { recursive: true, force: true }); } catch { /* 延迟 */ }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
