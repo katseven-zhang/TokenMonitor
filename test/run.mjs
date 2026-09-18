@@ -1614,6 +1614,103 @@ console.log('\n[18] Codex 配额历史（#45：幂等迁移/去重/0 与 NULL/ge
   }
 }
 
+/* ---------- [19] /api/codex/* 只读契约（#46） ---------- */
+console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/日报/CSV；降级不 500）');
+{
+  const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'codex46-'));
+  const store = new Store(join(base, 't46.db'));
+  // 种子：codex 事件（含中文项目名）+ 配额快照（带历史）
+  const now = Date.now();
+  store.insertEvent({ ts: now - 3_600_000, tool: 'codex', model: 'glm-5.3-flash', session_id: 'sess-中文 1', project: '工作 项目A', dedup_key: 'c46-1', input_tokens: 1000, cached_input: 200, cache_write: 50, output_tokens: 300, reasoning_tokens: 80, total_tokens: 1300 });
+  store.insertEvent({ ts: now - 60_000, tool: 'codex', model: null, session_id: 'sess-2', project: null, dedup_key: 'c46-2', input_tokens: 500, cached_input: 0, cache_write: 0, output_tokens: 100, reasoning_tokens: null, total_tokens: 600 });
+  store.saveQuota('codex', now - 30_000, {
+    used_percent: 40, plan_type: 'pro',
+    windows: [
+      { kind: 'primary', used_percent: 40, window_minutes: 300, resets_at_ms: now + 3_600_000, resets_at: new Date(now + 3_600_000).toISOString() },
+      { kind: 'secondary', used_percent: 10, window_minutes: 10080, resets_at_ms: now + 5 * 86_400_000, resets_at: new Date(now + 5 * 86_400_000).toISOString(), capacity: 1_000_000, remaining: 900_000 },
+    ],
+  });
+  const { EventEmitter } = await import('node:events');
+  const fakeScanner = Object.assign(new EventEmitter(), { stats: {} });
+  const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+  const server = await startServer({ store, scanner: fakeScanner, port, log: () => {} });
+  await new Promise((r) => setTimeout(r, 600)); // listen 就绪
+  const get = async (path) => { const res = await fetch(`http://127.0.0.1:${port}${path}`); return { status: res.status, body: await res.json(), res }; };
+
+  try {
+    const sum = await get('/api/codex/summary');
+    ok('#46 summary：两窗口 + plan + freshness（不 500）',
+      sum.status === 200 && sum.body.windows.length === 2 && sum.body.plan_type === 'pro'
+        && sum.body.freshness?.stale === false && sum.body.state === 'ok',
+      JSON.stringify(sum.body).slice(0, 120));
+    const thr = await get('/api/codex/throughput?days=7');
+    ok('#46 throughput：breakdown + by_day/by_hour/by_model',
+      thr.status === 200 && thr.body.totals.requests === 2 && thr.body.totals.total === 1900
+        && thr.body.by_day.length >= 1 && thr.body.by_model.length >= 1,
+      JSON.stringify(thr.body.totals));
+    const thr0 = await get('/api/codex/throughput?days=0');
+    ok('#46 throughput days=0 全量（与 7 天等价或更大）',
+      thr0.status === 200 && thr0.body.totals.total >= thr.body.totals.total);
+    const pace = await get('/api/codex/pace');
+    ok('#46 pace：序列化 #47 computePace 输出（单样本历史 → unknown 优雅降级）',
+      pace.status === 200 && pace.body.pace && typeof pace.body.pace.state === 'string'
+        && pace.body.pace.state === 'unknown' && pace.body.sample_count === 1,
+      JSON.stringify(pace.body.pace).slice(0, 120));
+    const cost = await get('/api/codex/cost?window=weekly');
+    ok('#46 cost：disclaimer/models/unpriced_models/fx 字段齐备',
+      cost.status === 200 && typeof cost.body.disclaimer === 'string'
+        && Array.isArray(cost.body.models) && Array.isArray(cost.body.unpriced_models)
+        && 'usd_to_cny' in cost.body.fx,
+      JSON.stringify(cost.body).slice(0, 140));
+    const ev = await get(`/api/codex/events?model=${encodeURIComponent('glm-5.3-flash')}`);
+    ok('#46 events：按 model 筛选（中文 session/project 原样返回）',
+      ev.status === 200 && ev.body.count === 1 && ev.body.events[0].session_id === 'sess-中文 1'
+        && ev.body.events[0].project === '工作 项目A');
+    const rep = await get('/api/codex/report');
+    ok('#46 report：by_model + reasoning known/unknown coverage',
+      rep.status === 200 && rep.body.by_model.length === 2
+        && rep.body.reasoning_coverage.known === 1 && rep.body.reasoning_coverage.unknown === 1,
+      JSON.stringify(rep.body.reasoning_coverage));
+    const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv?day=${new Date(now).toLocaleDateString('sv-SE')}`);
+    const csvBuf = await csvRes.arrayBuffer();
+    const csvText = new TextDecoder('utf-8').decode(csvBuf);
+    // WHATWG text() 会剥 BOM，故检查原始字节 EF BB BF（Excel 兼容的 UTF-8 BOM 契约）
+    const hasBom = csvBuf.byteLength >= 3
+      && new Uint8Array(csvBuf.slice(0, 3)).join(',') === '239,187,191';
+    ok('#46 CSV：UTF-8 BOM + 中文/逗号转义可解析',
+      csvRes.status === 200 && hasBom
+        && csvText.includes('sess-中文 1') && (csvText.match(/\n/g) || []).length === 3,
+      `bom=${hasBom} nl=${(csvText.match(/\n/g) || []).length}`);
+    // 旧库降级：无快照的空库不 500
+    const emptyStore = new Store(join(base, 'empty46.db'));
+    const port2 = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+    const server2 = await startServer({ store: emptyStore, scanner: Object.assign(new EventEmitter(), { stats: {} }), port: port2, log: () => {} });
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const e1 = await fetch(`http://127.0.0.1:${port2}/api/codex/summary`);
+      const e1b = await e1.json();
+      ok('#46 空库 summary 优雅降级（200 + unknown_reason）',
+        e1.status === 200 && e1b.state === 'unknown' && e1b.unknown_reason === 'no_quota_snapshot');
+      const e2 = await fetch(`http://127.0.0.1:${port2}/api/codex/pace`);
+      ok('#46 空库 pace 优雅降级（no_samples）',
+        e2.status === 200 && (await e2.json()).pace.unknown_reason === 'no_samples');
+    } finally {
+      server2.close();
+      try { emptyStore.db.close(); } catch { /* 句柄 */ }
+    }
+    // 隐私：响应不含 token/OAuth/代理凭据样式
+    const all = JSON.stringify([sum.body, thr.body, pace.body, cost.body, ev.body, rep.body]);
+    ok('#46 无凭据泄漏（sk-/Bearer/oauth 字样零出现）',
+      !/sk-[A-Za-z0-9]|Bearer\s|oauth/i.test(all));
+  } finally {
+    server.close();
+    try { store.db.close(); } catch { /* 句柄 */ }
+    try { rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* 延迟句柄 */ }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

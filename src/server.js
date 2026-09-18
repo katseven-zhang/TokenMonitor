@@ -10,6 +10,7 @@ import { loadPricing, computeCosts, computeRecon } from './pricing.js';
 import { ensurePrices, setOnChange as onPricesLoaded } from './litellm.js';
 import { ensureFxRate, setOnChange as onFxLoaded } from './fx.js';
 import { diagnosePortConflict } from './platform/runtime.js';
+import { computePace } from './codex-pace.js';
 
 const DB_DIRPATH = dirname(DB_PATH);
 
@@ -398,6 +399,191 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
         m.tools[r.tool] = (m.tools[r.tool] || 0) + r.n;
       }
       return json(res, 200, { days, tools: [...merged.values()].sort((a, b) => b.n - a.n).slice(0, 14) });
+    }
+
+    // ---- /api/codex/* 只读契约（#46）：供 Codex 独立页消费；空数据/旧库优雅降级
+    // 为 null+unknown_reason（不 500）；days 参数沿用 #42 的 parseDays 语义。 ----
+    if (p === '/api/codex/summary') {
+      const q = store.getQuota('codex');
+      if (!q || !Array.isArray(q.data?.windows)) {
+        return json(res, 200, {
+          state: 'unknown', unknown_reason: 'no_quota_snapshot',
+          windows: [], plan_type: null, freshness: null,
+        });
+      }
+      const now = Date.now();
+      return json(res, 200, {
+        state: 'ok', unknown_reason: null,
+        plan_type: q.data.plan_type ?? null,
+        windows: q.data.windows.map((w) => ({
+          kind: w.kind ?? null,
+          window_minutes: w.window_minutes ?? null,
+          used_percent: w.used_percent ?? null,
+          capacity: w.capacity ?? null,
+          remaining: w.remaining ?? null,
+          credits: w.credits ?? null,
+          resets_at: w.resets_at ?? null,
+          resets_at_ms: w.resets_at_ms ?? null,
+        })),
+        // freshness：快照距今毫秒数；超过 2h 视为陈旧（前端可显示 unknown 原因）
+        freshness: { ts: q.ts, age_ms: Math.max(0, now - q.ts), stale: now - q.ts > 2 * 3_600_000 },
+      });
+    }
+    if (p === '/api/codex/throughput') {
+      const days = parseDays(url.searchParams.get('days'), 7);
+      const since = days > 0 ? startOfDay() - (days - 1) * 86_400_000 : 0;
+      const totals = db_safe(store).prepare(`
+        SELECT COUNT(*) requests, COUNT(DISTINCT session_id) sessions,
+               SUM(input_tokens) input, SUM(cached_input) cached_input, SUM(cache_write) cache_write,
+               SUM(output_tokens) output, SUM(reasoning_tokens) reasoning, SUM(total_tokens) total
+        FROM events WHERE tool = 'codex' AND ts >= ?`).get(since) ?? {};
+      const byDay = db_safe(store).prepare(`
+        SELECT date(ts/1000, 'unixepoch', 'localtime') day,
+               SUM(input_tokens) input, SUM(cached_input) cached_input, SUM(output_tokens) output,
+               SUM(reasoning_tokens) reasoning, SUM(total_tokens) total, COUNT(*) requests
+        FROM events WHERE tool = 'codex' AND ts >= ? GROUP BY day ORDER BY day`).all(since);
+      const byHour = db_safe(store).prepare(`
+        SELECT strftime('%Y-%m-%dT%H:00', ts/1000, 'unixepoch', 'localtime') hour,
+               SUM(total_tokens) total, COUNT(*) requests
+        FROM events WHERE tool = 'codex' AND ts >= ? GROUP BY hour ORDER BY hour LIMIT 168`).all(since);
+      const byModel = db_safe(store).prepare(`
+        SELECT COALESCE(model, '(unknown)') model, SUM(total_tokens) total, COUNT(*) requests,
+               MAX(ts) last_ts
+        FROM events WHERE tool = 'codex' AND ts >= ? GROUP BY model ORDER BY total DESC LIMIT 20`).all(since);
+      return json(res, 200, {
+        days, totals: { ...totals, input: totals.input ?? 0 },
+        by_day: byDay, by_hour: byHour, by_model: byModel,
+      });
+    }
+    if (p === '/api/codex/pace') {
+      // 直接序列化 #47 computePace 的输出（一个字段不重算——全仓唯一 burn 算法）
+      const now = Date.now();
+      const rows = store.getCodexQuotaHistory
+        ? store.getCodexQuotaHistory({ windowKind: 'primary', limit: 200 })
+        : [];
+      const samples = rows
+        .map((r) => ({
+          ts: r.ts,
+          windowId: r.window_id,
+          used: r.used,
+          capacity: r.capacity,
+          resetsAt: r.resets_at_ms,
+        }))
+        .sort((a, b) => a.ts - b.ts);
+      return json(res, 200, { now, sample_count: samples.length, pace: computePace(samples, now) });
+    }
+    if (p === '/api/codex/cost') {
+      const window = url.searchParams.get('window') === 'weekly' ? 'weekly' : 'weekly';
+      const since = Date.now() - 7 * 86_400_000;
+      const rows = db_safe(store).prepare(`
+        SELECT COALESCE(model, '(unknown)') model,
+               SUM(input_tokens) input, SUM(cached_input) cached_input, SUM(cache_write) cache_write,
+               SUM(output_tokens) output, SUM(total_tokens) total, COUNT(*) requests
+        FROM events WHERE tool = 'codex' AND ts >= ? GROUP BY model ORDER BY total DESC`).all(since);
+      const pricing = await loadPricing();
+      const table = pricing?.models && typeof pricing.models === 'object' ? pricing.models : pricing;
+      const models = [];
+      const unpriced = [];
+      let totalCny = 0;
+      for (const r of rows) {
+        // 直查 pricing.json 价表（LiteLLM 兜底归 #37 的完整定价链路，此处不重复实现）；
+        // 表内无该模型 → 进 unpriced_models，金额不伪装为 0
+        const entry = table && typeof table === 'object' ? table[r.model] : null;
+        if (!entry || typeof entry !== 'object') {
+          unpriced.push(r.model);
+          models.push({ ...r, cost_cny: null, priced: false });
+          continue;
+        }
+        const rate = typeof pricing?.usd_to_cny === 'number' ? pricing.usd_to_cny : 7.2;
+        const per = (tok, price) => (typeof price === 'number' && Number.isFinite(tok) ? (tok / 1e6) * price : 0);
+        const inUsd = entry.input ?? entry.input_tokens ?? null;
+        const outUsd = entry.output ?? entry.output_tokens ?? null;
+        const cny = (per(r.input - (r.cached_input ?? 0), inUsd)
+          + per(r.cached_input, entry.cache_read ?? inUsd)
+          + per(r.cache_write, entry.cache_write ?? inUsd)
+          + per(r.output, outUsd)) * rate;
+        totalCny += cny;
+        models.push({ ...r, cost_cny: Math.round(cny * 100) / 100, priced: true });
+      }
+      return json(res, 200, {
+        window,
+        // 语义声明：API 等值估算，不是订阅真实账单（#48 页面必须展示此说明）
+        disclaimer: 'API-equivalent estimate, not the real subscription bill',
+        models, unpriced_models: unpriced,
+        total_cny: Math.round(totalCny * 100) / 100,
+        fx: { usd_to_cny: pricing?.usd_to_cny ?? null, source: pricing?._fx_source ?? null, ts: pricing?._fx_ts ?? null },
+      });
+    }
+    if (p === '/api/codex/events') {
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') || '')
+        ? url.searchParams.get('day') : null;
+      const model = url.searchParams.get('model') || '';
+      const session = url.searchParams.get('session') || '';
+      const limit = Math.max(1, Math.min(500, Number(url.searchParams.get('limit')) || 100));
+      const conds = ["tool = 'codex'"];
+      const args = [];
+      if (day) { conds.push("date(ts/1000, 'unixepoch', 'localtime') = ?"); args.push(day); }
+      if (model) { conds.push('model = ?'); args.push(model); }
+      if (session) { conds.push('session_id = ?'); args.push(session); }
+      const rows = db_safe(store).prepare(`
+        SELECT ts, model, session_id, project, input_tokens input, cached_input,
+               cache_write, output_tokens output, reasoning_tokens reasoning,
+               total_tokens total
+        FROM events WHERE ${conds.join(' AND ')} ORDER BY ts DESC LIMIT ?`).all(...args, limit);
+      return json(res, 200, { events: rows, count: rows.length });
+    }
+    if (p === '/api/codex/report') {
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') || '')
+        ? url.searchParams.get('day')
+        : new Date().toLocaleDateString('sv-SE');
+      const agg = db_safe(store).prepare(`
+        SELECT COALESCE(model, '(unknown)') model,
+               SUM(input_tokens) input, SUM(cached_input) cached_input, SUM(cache_write) cache_write,
+               SUM(output_tokens) output, SUM(reasoning_tokens) reasoning, SUM(total_tokens) total,
+               COUNT(*) requests
+        FROM events WHERE tool = 'codex'
+          AND date(ts/1000, 'unixepoch', 'localtime') = ?
+        GROUP BY model`).all(day);
+      const cov = db_safe(store).prepare(`
+        SELECT SUM(CASE WHEN reasoning_tokens > 0 THEN 1 ELSE 0 END) known,
+               SUM(CASE WHEN reasoning_tokens IS NULL OR reasoning_tokens = 0 THEN 1 ELSE 0 END) unknown_reasoning
+        FROM events WHERE tool = 'codex'
+          AND date(ts/1000, 'unixepoch', 'localtime') = ?`).get(day) ?? {};
+      const unpriced = db_safe(store).prepare(`
+        SELECT DISTINCT model FROM events
+        WHERE tool = 'codex' AND date(ts/1000, 'unixepoch', 'localtime') = ?`).all(day)
+        .map((r) => r.model).filter(Boolean);
+      return json(res, 200, {
+        day,
+        by_model: agg,
+        reasoning_coverage: {
+          known: cov.known ?? 0, unknown: cov.unknown_reasoning ?? 0,
+        },
+        models_seen: unpriced,
+      });
+    }
+    if (p === '/api/codex/export.csv') {
+      const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') || '')
+        ? url.searchParams.get('day') : null;
+      const conds = ["tool = 'codex'"];
+      const args = [];
+      if (day) { conds.push("date(ts/1000, 'unixepoch', 'localtime') = ?"); args.push(day); }
+      const rows = db_safe(store).prepare(`
+        SELECT ts, model, session_id, project, input_tokens, cached_input, cache_write,
+               output_tokens, reasoning_tokens, total_tokens
+        FROM events WHERE ${conds.join(' AND ')} ORDER BY ts DESC LIMIT 5000`).all(...args);
+      const esc = (v) => (/[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : (v ?? ''));
+      const header = 'timestamp,model,session_id,project,input,cached_input,cache_write,output,reasoning,total';
+      const body = rows.map((r) => [new Date(r.ts).toISOString(), r.model, r.session_id, r.project,
+        r.input_tokens, r.cached_input, r.cache_write, r.output_tokens, r.reasoning_tokens, r.total_tokens]
+        .map(esc).join(',')).join('\n');
+      // UTF-8 BOM：Excel 直接打开中文不乱码（#49 CSV 契约）
+      res.writeHead(200, {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="codex-${day || 'all'}.csv"`,
+      });
+      res.end(`\uFEFF${header}\n${body}\n`);
+      return undefined;
     }
     if (p === '/api/export.csv') {
       const days = parseDays(url.searchParams.get('days'), 30);
