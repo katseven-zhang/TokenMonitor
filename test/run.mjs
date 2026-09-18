@@ -1347,6 +1347,120 @@ console.log('\n[15] computeHealth 单测（#36：stale/empty/error/ok 四态）'
   }
 }
 
+/* ---------- [16] codex-pace 纯逻辑（#47） ---------- */
+console.log('\n[16] codex-pace 消耗节奏与耗尽风险（#47：burn/EWMA/safe line/risk/ETA 契约）');
+{
+  const pace = await import(pathToFileURL(join(ROOT, 'src/codex-pace.js')).href);
+  const H = 3_600_000;
+  const s = (ts, windowId, used, capacity, resetsAt = null) => ({ ts, windowId, used, capacity, resetsAt });
+  const W1 = 'w-5h-2026-09-18T10', W2 = 'w-5h-2026-09-18T15';
+
+  // --- 固定序列精确验证（AC1） ---
+  {
+    // 单段：burn = 1000/h
+    const r1 = pace.computePace([s(0, W1, 0, 10_000), s(H, W1, 1_000, 10_000)], H);
+    ok('#47 两样本差商 → burn_rate=1000/h', r1.burn_rate_per_hour === 1000, String(r1.burn_rate_per_hour));
+    ok('#47 ETA = 剩余/速率 = 9h', r1.eta_to_exhaust_ms === 9 * H, String(r1.eta_to_exhaust_ms));
+    ok('#47 state ok 且 samples_used=2', r1.state === 'ok' && r1.samples_used === 2);
+    // 三段 EWMA(α=0.5)：1000 → 1000+0.5*(2000-1000)=1500 → 1500+0.5*(3000-1500)=2250
+    const r2 = pace.computePace([
+      s(0, W1, 0, 100_000), s(H, W1, 1_000, 100_000), s(2 * H, W1, 3_000, 100_000), s(3 * H, W1, 6_000, 100_000),
+    ], 3 * H);
+    ok('#47 EWMA α=0.5 三段收敛于 2250/h', r2.burn_rate_per_hour === 2250, String(r2.burn_rate_per_hour));
+    // safe line：cap 10000，窗口剩 1h，burn 1000/h → 预算 1250 → line 8750
+    const r3 = pace.computePace([
+      s(0, W1, 0, 10_000, 2 * H), s(H, W1, 1_000, 10_000, 2 * H),
+    ], H);
+    ok('#47 safe_usage_line = capacity - burn*剩余/0.8 = 8750', r3.safe_usage_line === 8750, String(r3.safe_usage_line));
+  }
+
+  // --- risk 分级（规则 7）：真实 5h 窗口（resetsAt = 5h），burn 1000/h ---
+  {
+    const mk = (used, cap = 1_000_000) => pace.computePace([s(0, W1, 0, cap), s(H, W1, used, cap, 5 * H)], H);
+    ok('#47 risk low（10% 且外推不会在重置前耗尽）', mk(100_000).risk === 'low');
+    // medium：used 70%（690k→700k，burn 10k/h），eta=30h > 重置剩余 4h → 不判 high
+    const med = pace.computePace([s(0, W1, 690_000, 1_000_000), s(H, W1, 700_000, 1_000_000, 5 * H)], H);
+    ok('#47 risk medium（70% 且外推不会在重置前耗尽）', med.risk === 'medium', `${med.risk} burn=${med.burn_rate_per_hour}`);
+    ok('#47 risk high（≥85%）', mk(900_000).risk === 'high');
+    // 70% 但外推将在重置前耗尽 → high（burn 70000/h，eta≈0.43h < 重置剩余 1h）
+    const r = pace.computePace([s(0, W1, 0, 100_000, 2 * H), s(H, W1, 70_000, 100_000, 2 * H)], H);
+    ok('#47 risk high（外推窗口内耗尽）', r.risk === 'high', `${r.risk} eta=${r.eta_to_exhaust_ms}`);
+  }
+
+  // --- reset relief（规则 8） ---
+  {
+    const near = pace.computePace([s(0, W1, 0, 10_000, H + 30 * 60_000), s(H, W1, 1_000, 10_000, H + 30 * 60_000)], H);
+    ok('#47 reset_relief=true（重置临近 <2h）', near.reset_relief === true);
+    const far = pace.computePace([s(0, W1, 0, 10_000, 100 * H), s(H, W1, 1_000, 10_000, 100 * H)], H);
+    ok('#47 reset_relief=false（重置尚远）', far.reset_relief === false);
+    const none = pace.computePace([s(0, W1, 0, 10_000), s(H, W1, 1_000, 10_000)], H);
+    ok('#47 reset_relief=null（resetsAt 未知）', none.reset_relief === null);
+  }
+
+  // --- 窗口 reset / windowId 变化（AC2） ---
+  {
+    const r = pace.computePace([
+      s(0, W1, 5_000, 10_000), s(H, W1, 8_000, 10_000),
+      s(10 * H, W2, 100, 10_000),
+    ], 10 * H);
+    ok('#47 窗口 reset 后旧窗口样本弃用（used 取新窗口）', r.used === 100 && r.state === 'unknown');
+    ok('#47 新窗口单样本 → unknown single_sample', r.unknown_reason === 'single_sample', r.unknown_reason);
+  }
+
+  // --- 时间倒退 / 用量回落 / 非法值（AC2/AC3） ---
+  {
+    // 时间倒退：时间序差商为负被丢弃 → 无可信速率段 → invalid_values
+    const back = pace.computePace([s(2 * H, W1, 1_000, 10_000), s(H, W1, 2_000, 10_000)], 1.1 * H);
+    ok('#47 时间倒退差商被丢弃 → unknown',
+      back.state === 'unknown' && back.unknown_reason === 'invalid_values',
+      back.unknown_reason);
+    // 回落段（5k→2k，负差商）跳过不进 EWMA；后续段继续递归：
+    // 段1 rate=5000 → ewma=5000；段2 丢弃；段3 rate=1000 → 5000+0.5*(-4000)=3000
+    //（若回落段未被丢弃，ewma 会是 5000+0.5*(-3000-5000)=1000——断言值即证明）
+    const drop = pace.computePace([s(0, W1, 0, 100_000), s(H, W1, 5_000, 100_000), s(2 * H, W1, 2_000, 100_000), s(3 * H, W1, 3_000, 100_000)], 3 * H);
+    ok('#47 回落段不计入 burn（负差商丢弃，EWMA 跨段连续递归）',
+      drop.burn_rate_per_hour === 3000, String(drop.burn_rate_per_hour));
+    const bad = pace.computePace([s(0, W1, NaN, 10_000), s(H, W1, -5, 10_000)], H);
+    ok('#47 NaN/负值全无效 → invalid_values 且无假 ETA',
+      bad.state === 'unknown' && bad.unknown_reason === 'invalid_values' && bad.eta_to_exhaust_ms === null);
+  }
+
+  // --- 陈旧样本 / 容量缺失 / 空输入（AC3） ---
+  {
+    const stale = pace.computePace([s(0, W1, 1_000, 10_000), s(H, W1, 2_000, 10_000)], H + pace.STALE_SAMPLE_MS + 1);
+    ok('#47 陈旧样本 → stale_samples（事实字段保留）',
+      stale.unknown_reason === 'stale_samples' && stale.used === 2_000 && stale.capacity === 10_000);
+    const noCap = pace.computePace([s(0, W1, 100, null), s(H, W1, 500, null)], H);
+    ok('#47 容量缺失 → no_capacity（burn 照给，remaining/risk/ETA 为 null）',
+      noCap.unknown_reason === 'no_capacity' && noCap.burn_rate_per_hour === 400 && noCap.remaining === null
+        && noCap.risk === 'unknown' && noCap.eta_to_exhaust_ms === null,
+      JSON.stringify(noCap));
+    const empty = pace.computePace([], Date.now());
+    ok('#47 空输入 → no_samples', empty.unknown_reason === 'no_samples');
+  }
+
+  // --- 显式 0 与缺失可区分（AC3 规则 6） ---
+  {
+    const zero = pace.computePace([s(0, W1, 0, 10_000), s(H, W1, 0, 10_000)], H);
+    ok('#47 used=0 是合法值（刚重置）：state ok、percent=0、burn=0、无假 ETA',
+      zero.state === 'ok' && zero.used === 0 && zero.used_percent === 0
+        && zero.burn_rate_per_hour === 0 && zero.eta_to_exhaust_ms === null,
+      JSON.stringify(zero));
+    const missing = pace.computePace([s(0, W1, null, 10_000), s(H, W1, null, 10_000)], H);
+    ok('#47 used 缺失为 null 而非 0', missing.used === null && missing.used_percent === null);
+    const cap0 = pace.computePace([s(0, W1, 0, 0), s(H, W1, 0, 0)], H);
+    ok('#47 capacity=0（容量为零）→ 直接 high', cap0.risk === 'high');
+  }
+
+  // --- 纯逻辑边界（AC4）：模块不 import 任何 IO/执行面 ---
+  {
+    const src47 = readFileSync(join(ROOT, 'src/codex-pace.js'), 'utf8');
+    ok('#47 纯逻辑：无 node:fs/net/http/sqlite/child_process import',
+      !/from ['"]node:(fs|net|http|sqlite|child_process)|from ['"]\.\//.test(src47));
+    ok('#47 无网络请求/进程执行调用面', !/fetch\(|http\.request|exec\(|spawn\(/.test(src47));
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
