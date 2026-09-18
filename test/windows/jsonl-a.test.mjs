@@ -1,14 +1,14 @@
 /**
  * Win-JSONL-A：Claude / ccmr / Codex 在 Windows 路径、CRLF、半行、归档搬移下的黄金数字。
  *
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/jsonl-a.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/jsonl-a.test.mjs
  */
 import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { readLinesFrom } = await import(pathToFileURL(join(ROOT, 'src/collectors/lines.js')).href);

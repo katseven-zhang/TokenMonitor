@@ -8,7 +8,7 @@
  * portable data at <install>\data. The scheduled-task step is skipped so the
  * real Task Scheduler is never involved.
  *
- * Run: TOKENMETER_OFFLINE=1 node test/windows/installer.test.mjs
+ * Run: TOKENMONITOR_OFFLINE=1 node test/windows/installer.test.mjs
  */
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -57,16 +57,16 @@ function makeCandidate(root, version) {
   writeFileSync(join(cand, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', version, os: 'windows', arch: 'x64', layout: 2 }));
   writeFileSync(join(cand, 'TokenMonitor.exe'), 'fake-gui-exe-stand-in');
   cpSync(process.execPath, join(cand, 'runtime', 'node.exe'));
-  copyFileSync(join(repo, 'bin', 'tokenwatcher.js'), join(cand, 'runtime', 'bin', 'tokenwatcher.js'));
+  copyFileSync(join(repo, 'bin', 'tokenmonitor.js'), join(cand, 'runtime', 'bin', 'tokenmonitor.js'));
   copyTree(join(repo, 'src'), join(cand, 'runtime', 'src'));
   copyTree(join(repo, 'web'), join(cand, 'runtime', 'web'));
-  writeFileSync(join(cand, 'runtime', 'package.json'), JSON.stringify({ name: 'token-watcher', version, type: 'module' }));
+  writeFileSync(join(cand, 'runtime', 'package.json'), JSON.stringify({ name: 'tokenmonitor', version, type: 'module' }));
   return cand;
 }
 
 function installedVersion(installDir) {
   const r = spawnSync(join(installDir, 'runtime', 'node.exe'),
-    [join(installDir, 'runtime', 'bin', 'tokenwatcher.js'), '--version'], { encoding: 'utf8' });
+    [join(installDir, 'runtime', 'bin', 'tokenmonitor.js'), '--version'], { encoding: 'utf8' });
   return r.status === 0 ? (r.stdout || '').trim() : 'exit=' + r.status;
 }
 
@@ -88,7 +88,7 @@ try {
   {
     const r = runPs(INSTALL_PS1, ['-Source', cand1, ...dryRunArgs]);
     ok(r.code === 0, 'install exit 0');
-    ok(existsSync(join(installDir, 'runtime', 'node.exe')) && existsSync(join(installDir, 'runtime', 'bin', 'tokenwatcher.js')), '运行库落到 runtime\\');
+    ok(existsSync(join(installDir, 'runtime', 'node.exe')) && existsSync(join(installDir, 'runtime', 'bin', 'tokenmonitor.js')), '运行库落到 runtime\\');
     ok(existsSync(join(installDir, 'TokenMonitor.exe')) && existsSync(join(installDir, 'manifest.json')), '根目录有 GUI exe 与 manifest.json');
     ok(installedVersion(installDir) === '1.0.0-test', '安装后 --version=1.0.0-test');
     ok(existsSync(join(menuRoot, 'TokenMonitor.lnk')), '开始菜单快捷方式已创建');
@@ -123,8 +123,8 @@ try {
     const badCand = join(base, 'cand-broken');
     mkdirSync(join(badCand, 'runtime', 'bin'), { recursive: true });
     writeFileSync(join(badCand, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', os: 'windows' }));
-    cpSync(join(repo, 'bin', 'tokenwatcher.js'), join(badCand, 'runtime', 'bin', 'tokenwatcher.js'));
-    writeFileSync(join(badCand, 'runtime', 'package.json'), JSON.stringify({ name: 'token-watcher', version: '3.0.0-broken' }));
+    cpSync(join(repo, 'bin', 'tokenmonitor.js'), join(badCand, 'runtime', 'bin', 'tokenmonitor.js'));
+    writeFileSync(join(badCand, 'runtime', 'package.json'), JSON.stringify({ name: 'tokenmonitor', version: '3.0.0-broken' }));
     const r = runPs(INSTALL_PS1, ['-Source', badCand, ...dryRunArgs]);
     ok(r.code !== 0, '坏候选安装失败非零退出');
     ok(installedVersion(installDir) === '2.0.0-test', '回滚后仍是 2.0.0-test（旧安装完好）');

@@ -1,7 +1,7 @@
 /**
  * Win-SQLite：ZCode / OpenCode 只读 WAL、BUSY 跳过、rowid 复用、Windows 路径黄金数字。
  *
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/sqlite-sources.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/sqlite-sources.test.mjs
  * 临时库建在 os.tmpdir()，测完关闭句柄再删。
  */
 import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { collectZcodeDb } = await import(pathToFileURL(join(ROOT, 'src/collectors/zcode.js')).href);

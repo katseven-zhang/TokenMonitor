@@ -1,8 +1,8 @@
-# Token Watcher
+# TokenMonitor
 
 **Mac 本地多源 AI Agent 用量与配额实时面板。** 一个常驻进程解析你机器上各 AI 编码工具留下的本地会话记录，统一归一化为 token 事件流，提供 Codex 风格的统计面板、实时配额卡、厂商余额轮询、费用估算与菜单栏胶囊。零框架依赖、纯本地运行。
 
-![Token Watcher](https://raw.githubusercontent.com/katseven-zhang/TokenMonitor/main/docs/screenshot.png)
+![TokenMonitor](https://raw.githubusercontent.com/katseven-zhang/TokenMonitor/main/docs/screenshot.png)
 
 > 截图为真实运行数据（厂商余额与项目名已脱敏为 ••••）。
 
@@ -29,7 +29,7 @@
 ### 方式一：npx 试用（什么都不装）
 
 ```bash
-npx --yes token-watcher@latest serve
+npx --yes tokenmonitor@latest serve
 open http://127.0.0.1:8787
 ```
 
@@ -42,32 +42,32 @@ open http://127.0.0.1:8787
 ### 方式二：npm 全局安装（长期使用，推荐）
 
 ```bash
-npm install -g token-watcher
-token-watcher serve
+npm install -g tokenmonitor
+tokenmonitor serve
 ```
 
 装完除了 `serve`，还多出两个只有全局安装才方便用的能力：
 
 ```bash
 # 常驻 + 开机自启（macOS，崩溃自动拉起）
-token-watcher install-agent
-token-watcher install-agent --port 9000
-token-watcher uninstall-agent
+tokenmonitor install-agent
+tokenmonitor install-agent --port 9000
+tokenmonitor uninstall-agent
 
 # 菜单栏胶囊（macOS）
-token-watcher bar
-token-watcher bar --port 9000   # 服务不在默认端口时
+tokenmonitor bar
+tokenmonitor bar --port 9000   # 服务不在默认端口时
 ```
 
 `install-agent` 会把 node 与入口脚本的**绝对路径**固化进 LaunchAgent——launchd 的
 PATH 是系统默认，既不含 npm 全局 bin（前缀还可能被改过），也不保证含 homebrew，
-靠命令名会起不来。日志在 `~/.tokenmeter/logs/`。停用请用 `uninstall-agent` 或
+靠命令名会起不来。日志在 `~/.tokenmonitor/logs/`。停用请用 `uninstall-agent` 或
 `launchctl bootout`，`launchctl stop` 会被 KeepAlive 立刻拉起。
 
 菜单栏 app 以 universal 二进制随包发布（arm64 + x86_64，约 340KB），不需要 Xcode
 工具链；从菜单里选「退出」可关闭。
 
-三个命令名等价：`token-watcher` / `tokenwatcher` / `tokenmeter`（后者是旧名别名）。
+CLI 命令统一为 `tokenmonitor`，不再发布旧命令别名。
 
 ### 方式三：克隆仓库（想改代码）
 
@@ -92,7 +92,7 @@ npm run build-bar    # 重新编译菜单栏 app（需 Xcode CLT；发版时 pre
 | 面板 / 采集 | ✓ | ✓ | ✓ |
 | 菜单栏胶囊 | ✓ | ✓ | 需先 `npm run build-bar` |
 | 开机自启 | 不建议 | ✓ | ✓（指向仓库路径）|
-| 升级 | 每次拉最新 | `npm i -g token-watcher` | `git pull` |
+| 升级 | 每次拉最新 | `npm i -g tokenmonitor` | `git pull` |
 
 npx 下不建议装开机自启：生成的 LaunchAgent 会指向 npx 的缓存目录，而那个目录随时
 可能被 npm 清理，届时服务会静默起不来。要常驻就用全局安装。
@@ -100,9 +100,9 @@ npx 下不建议装开机自启：生成的 LaunchAgent 会指向 npx 的缓存�
 ### 其他命令
 
 ```bash
-token-watcher today              # 终端速览今日消耗
-token-watcher scan               # 只扫描一次
-token-watcher serve --port 9000
+tokenmonitor today              # 终端速览今日消耗
+tokenmonitor scan               # 只扫描一次
+tokenmonitor serve --port 9000
 ```
 
 ## 运行要求
@@ -126,7 +126,7 @@ token-watcher serve --port 9000
 - **会话钻取**：点击趋势图任意一天 → 会话列表（峰值上下文估算）→ 单会话逐请求 token 曲线
 - **工具活动**：四源工具调用频次榜
 - **配额**：Codex 官方配额直读（百分比/重置倒计时）、Claude 订阅 5h 窗口推算（session-blocks 法）
-- **余额与费用**：DeepSeek/Kimi 余额轮询（读 `~/.ccmr/.env` 的 key，密钥不出后端）；ccmr 侧按官方牌价折算（`~/.tokenmeter/pricing.json` 可编辑）+ 余额对账
+- **余额与费用**：DeepSeek/Kimi 余额轮询（读 `~/.ccmr/.env` 的 key，密钥不出后端）；ccmr 侧按官方牌价折算（`~/.tokenmonitor/pricing.json` 可编辑）+ 余额对账
 - **阈值通知**（菜单栏 App）：Codex ≥80%/95%、余额 <¥10/¥2 弹 macOS 通知，级别上升只提醒一次
 - **数据源健康自检**：解析错误标红、"文件在写但无新事件"标黄——私有格式漂移不再静默失败
 - **导出与备份**：CSV 导出、每日 `VACUUM INTO` 备份保留 7 份
@@ -145,13 +145,13 @@ token-watcher serve --port 9000
 | 模型牌价 | `raw.githubusercontent.com`（LiteLLM 价格表） | 24 小时，本地缓存兜底 |
 | 厂商余额 | DeepSeek / Kimi 官方接口（带你的 key） | 30 分钟，连续失败自动熔断 |
 
-要完全断网运行，设 `TOKENMETER_OFFLINE=1`：三类请求全部跳过，改用本地缓存与
-`~/.tokenmeter/pricing.json`（可设 `usd_to_cny` + `usd_to_cny_manual: true` 固定汇率）。
+要完全断网运行，设 `TOKENMONITOR_OFFLINE=1`：三类请求全部跳过，改用本地缓存与
+`~/.tokenmonitor/pricing.json`（可设 `usd_to_cny` + `usd_to_cny_manual: true` 固定汇率）。
 回归测试即以此模式运行，不依赖公网。
 
 ## 免责声明
 
-Token Watcher 是**非官方**工具，解析的均为各产品留在本地的**私有格式**（无稳定性承诺），上游版本升级可能导致个别源解析中断——健康面板会标出，欢迎提 issue。各产品版权归其厂商所有。
+TokenMonitor 是**非官方**工具，解析的均为各产品留在本地的**私有格式**（无稳定性承诺），上游版本升级可能导致个别源解析中断——健康面板会标出，欢迎提 issue。各产品版权归其厂商所有。
 
 ## 架构
 
@@ -188,14 +188,14 @@ Token Watcher 是**非官方**工具，解析的均为各产品留在本地的**
   仅在确认文件只含单帧时才回落内置实现，多帧又无外部 zstd 时大声报错而非静默少算。
   **使用 dsh 源的用户请从 1.4.1 升级。**
 
-- 新增 `token-watcher install-agent` / `uninstall-agent`，把服务装成 macOS 开机自启项。
+- 新增 `tokenmonitor install-agent` / `uninstall-agent`，把服务装成 macOS 开机自启项。
   此前 README 指向 `npm run install-agent`，但 npm scripts 对全局安装的用户不可见，
   且那条命令只负责 `launchctl bootstrap`、从不生成 plist，plist 也不随包发布——
   全局安装的用户实际没有可用的常驻方案
 - 生成的 plist 固化 node 与入口脚本的绝对路径。launchd 的 PATH 不含 npm 全局 bin 与
   homebrew，而入口脚本的 shebang 是 `#!/usr/bin/env node`，靠命令名无法启动
-- 检测到旧 `com.tokenmeter.server` 仍在运行时拒绝安装（两者抢同一端口），可用 `--force` 覆盖
-- 新增 `token-watcher bar`，菜单栏胶囊随包发布。此前 `.app` 只存在于仓库、也不在
+- 检测到已有 `com.tokenmonitor.server` 仍在运行时拒绝安装（两者抢同一端口），可用 `--force` 覆盖
+- 新增 `tokenmonitor bar`，菜单栏胶囊随包发布。此前 `.app` 只存在于仓库、也不在
   发布白名单里，全局安装的用户拿不到，而指引用的 `npm run bar` 同样不可见
 - 菜单栏 app 改为 universal 二进制（arm64 + x86_64）。此前产物只有 arm64，Intel Mac
   上无法运行；`prepack` 会在发版前自动重新编译，避免发出陈旧或缺失的产物
@@ -238,8 +238,7 @@ Token Watcher 是**非官方**工具，解析的均为各产品留在本地的**
 
 ### 1.3.0（2026-09-15，未发布）
 
-- 补上与包名同名的 `token-watcher` 命令入口。改名后 bin 有多个条目且都不叫包名，
-  `npx token-watcher` 失去确定的解析依据
+- 补上与包名同名的 `tokenmonitor` 命令入口，确保 `npx tokenmonitor` 直接解析到唯一 CLI。
 
 ### 1.2.0（2026-09-15）
 

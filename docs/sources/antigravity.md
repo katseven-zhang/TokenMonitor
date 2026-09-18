@@ -118,7 +118,7 @@ summaries `workspace_uris` 的第一个 `file://` 路径末段。
 
 ## 测试
 
-`TOKENMETER_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs`
+`TOKENMONITOR_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs`
 （39 项断言：manifest 契约与大小写去重、行解码黄金数、collector 黄金数、
 增量/幂等/版本重扫、EXCLUSIVE 锁跳过与水位保护、锚点缺失降级、注册表自动
 发现）。

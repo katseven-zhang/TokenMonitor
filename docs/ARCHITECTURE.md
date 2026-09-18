@@ -1,11 +1,11 @@
-# Token Watcher 架构与数据源调研
+# TokenMonitor 架构与数据源调研
 
 > 本文档源自真实环境的逆向调研（2026-09），记录各数据源的本地格式、口径差异与设计决策。不含任何个人数据。
 
 ## 总体架构
 
 ```
-bin/tokenwatcher.js      CLI（scan / serve / today）+ 一次性目录迁移
+bin/tokenmonitor.js      CLI（scan / serve / today）
 src/
   config.js              数据源注册表（kind + collector + version）
   store.js               SQLite（node:sqlite）：events / files游标 / quota / rates / tool_calls / balance_history
@@ -18,7 +18,7 @@ src/
   collectors/            每源一个适配器（claude / codex / zcode / dsh / workbuddy / grok / pi / opencode）
 web/                     零构建前端（vanilla JS + ECharts UMD）
 menubar/                 macOS 菜单栏 App（Swift/AppKit，需 .app bundle）
-~/.tokenmeter/           运行时数据（库 / 备份 / pricing.json / 日志）
+~/.tokenmonitor/         运行时数据（库 / 备份 / pricing.json / 日志）
 ```
 
 ## 归一化事件模型
@@ -122,7 +122,7 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 
 ## 计价：DeepSeek 的峰谷价
 
-单价表 `~/.tokenmeter/pricing.json` 记的是**峰时价**，`off_peak` 为谷时折扣系数（DeepSeek 为 0.5）。
+单价表 `~/.tokenmonitor/pricing.json` 记的是**峰时价**，`off_peak` 为谷时折扣系数（DeepSeek 为 0.5）。
 
 峰时的官方定义（api-docs.deepseek.com/quick_start/pricing，2026-09-16 核对）是 **UTC 周一至周五 01:00-04:00 与 06:00-10:00**，其余一切时段按谷时价。三处反直觉，实现时都踩得到：
 

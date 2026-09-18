@@ -90,7 +90,7 @@ launchd 拉起，其 PATH 是系统默认、不含 `/opt/homebrew/bin`，而 zst
 
 - [x] 三个 commit 各自独立通过全部测试（detached worktree 逐个验证）
 - [x] 正式库全量重扫（ccmr v3 / dsh v2 触发），补正存量数据。重扫前已备份至
-      `~/.tokenmeter/backup-before-rescan-*`（确认无误后可删）
+      `~/.tokenmonitor/backup-before-rescan-*`（确认无误后可删）
 - [x] 对账验收：
       - ccmr 今日输出 64,828 → **1,169,337**，合计 **85,488,178**，与独立解析原始
         transcript 的预测值完全一致

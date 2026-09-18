@@ -1,7 +1,7 @@
 /**
  * Win-JSONL-B：Grok / WorkBuddy / Pi 在 Windows 路径、CRLF、半行、增量幂等下的黄金数字。
  *
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/jsonl-b.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/jsonl-b.test.mjs
  * 不改中央注册 / README / 前端；不读取真实用户会话。
  */
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync } from 'node:fs';
@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { collectGrokFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/grok.js')).href);

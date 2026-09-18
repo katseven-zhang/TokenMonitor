@@ -6,7 +6,7 @@
  * 重复字段取最后）、collector 黄金数、增量水位、重扫幂等（dedup）、文件锁
  * 跳过、锚点缺失降级、注册表自动发现。
  *
- * 运行：TOKENMETER_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs
  */
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, mkdirSync, existsSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..', '..', '..');

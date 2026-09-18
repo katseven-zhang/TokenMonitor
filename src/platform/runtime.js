@@ -1,56 +1,16 @@
-import { openSync, closeSync, writeFileSync, readFileSync, copyFileSync, unlinkSync, existsSync, mkdirSync, statSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { openSync, closeSync, writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { DATA_DIR, RUNTIME_DATA_DIR, DEFAULT_PORT } from '../config.js';
+import { RUNTIME_DATA_DIR, DEFAULT_PORT } from '../config.js';
 
 /**
  * Windows 平台默认数据目录与日志目录
  *
  * 数据位置由 src/config.js 的 resolveDataLocations 统一解析（#23）：
- * TOKENMETER_DATA_DIR > 打包形态 <应用根>\data > 源码默认 %LOCALAPPDATA%\TokenMonitor。
+ * TOKENMONITOR_DATA_DIR > 打包形态 <应用根>\data > 源码默认 %LOCALAPPDATA%\TokenMonitor。
  */
 export function getDefaultDataDir() {
   return RUNTIME_DATA_DIR;
-}
-
-/**
- * 便携/强制数据目录的首跑迁移：老默认位置（~/.tokenmeter）已有数据库而目标
- * data\ 还没有对应文件时，把清单内文件复制过去（复制而非移动，旧文件保留
- * 不删——架构契约要求迁移默认不删旧数据）。目标已存在时跳过，幂等；经
- * <目标>.<pid>.tmp 临时名落盘再改名，中断不会留下半截正式文件。
- */
-export function migratePortableData({
-  dataDir = RUNTIME_DATA_DIR,
-  legacyDir = join(homedir(), '.tokenmeter'),
-  files = ['tokenmeter.db', 'pricing.json'],
-  exists = existsSync,
-  copy = copyFileSync,
-  rename = renameSync,
-  mkdir = mkdirSync,
-  unlink = unlinkSync,
-  pid = process.pid,
-  log = () => {},
-} = {}) {
-  if (!dataDir || dataDir === legacyDir) return [];
-  mkdir(dataDir, { recursive: true });
-  const moved = [];
-  for (const name of files) {
-    const target = join(dataDir, name);
-    const source = join(legacyDir, name);
-    if (!exists(source) || exists(target)) continue;
-    const staging = `${target}.${pid}.tmp`;
-    try {
-      copy(source, staging);
-      rename(staging, target);
-      moved.push(name);
-      log(`migrated ${name} from ${legacyDir} to ${dataDir}`);
-    } catch (err) {
-      try { unlink(staging); } catch { /* 清理失败不影响主流程 */ }
-      log(`migrate ${name} failed: ${err?.message || err}`);
-    }
-  }
-  return moved;
 }
 
 export function getDefaultLogDir(dataDir = getDefaultDataDir()) {
@@ -385,8 +345,8 @@ export class RuntimeLogger {
     } catch {}
 
     if (this.consoleOutput) {
-      if (level === 'error') console.error(`[token-watcher] ${sanitized}`);
-      else console.log(`[token-watcher] ${sanitized}`);
+      if (level === 'error') console.error(`[tokenmonitor] ${sanitized}`);
+      else console.log(`[tokenmonitor] ${sanitized}`);
     }
   }
 

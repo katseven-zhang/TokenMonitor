@@ -1,5 +1,5 @@
 {
-  "name": "token-watcher",
+  "name": "tokenmonitor",
   "version": "1.4.3",
   "description": "Local real-time token usage & quota dashboard for AI coding agents (Claude Code, ccmr, Codex, ZCode, dsh, WorkBuddy, Grok Build, Pi, OpenCode)",
   "keywords": [
@@ -28,19 +28,17 @@
   "author": "louwill",
   "type": "module",
   "bin": {
-    "token-watcher": "bin/tokenwatcher.js",
-    "tokenwatcher": "bin/tokenwatcher.js",
-    "tokenmeter": "bin/tokenwatcher.js"
+    "tokenmonitor": "bin/tokenmonitor.js"
   },
   "main": "src/server.js",
   "scripts": {
-    "scan": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js scan",
-    "serve": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js serve",
-    "today": "node --disable-warning=ExperimentalWarning bin/tokenwatcher.js today",
-    "bar": "open bin/token-watcher.app",
+    "scan": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js scan",
+    "serve": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js serve",
+    "today": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js today",
+    "bar": "open bin/tokenmonitor.app",
     "build-bar": "bash menubar/build.sh",
-    "install-agent": "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
-    "uninstall-agent": "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tokenmeter.server.plist",
+    "install-agent": "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tokenmonitor.server.plist",
+    "uninstall-agent": "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tokenmonitor.server.plist",
     "test": "node --disable-warning=ExperimentalWarning test/run.mjs",
     "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "prepack": "bash menubar/build.sh"
@@ -53,8 +51,8 @@
     "fzstd": "^0.1.1"
   },
   "files": [
-    "bin/tokenwatcher.js",
-    "bin/token-watcher.app/",
+    "bin/tokenmonitor.js",
+    "bin/tokenmonitor.app/",
     "src/",
     "web/",
     "README.md",

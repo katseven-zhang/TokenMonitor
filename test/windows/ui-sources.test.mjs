@@ -6,7 +6,7 @@
  * isolated HOME and asserts the /api/sources contract (no local paths leak,
  * Host guard still applies) offline.
  *
- * Run: TOKENMETER_OFFLINE=1 node test/windows/ui-sources.test.mjs
+ * Run: TOKENMONITOR_OFFLINE=1 node test/windows/ui-sources.test.mjs
  */
 import { spawnSync, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -98,9 +98,9 @@ function get(port, path, host) {
 {
   const home = mkdtempSync(join(tmpdir(), 'ui-sources-home-'));
   const port = 18901;
-  const child = spawn(process.execPath, [join(repo, 'bin', 'tokenwatcher.js'), 'serve', '--port', String(port)], {
+  const child = spawn(process.execPath, [join(repo, 'bin', 'tokenmonitor.js'), 'serve', '--port', String(port)], {
     cwd: repo,
-    env: { ...process.env, HOME: home, USERPROFILE: home, TOKENMETER_OFFLINE: '1' },
+    env: { ...process.env, HOME: home, USERPROFILE: home, TOKENMONITOR_OFFLINE: '1' },
     stdio: 'ignore',
   });
   try {

@@ -1,31 +1,27 @@
 #!/usr/bin/env node
 /**
- * Token Watcher — 本地多源 token 用量与配额面板
+ * TokenMonitor — 本地多源 token 用量与配额面板
  *
  * 用法：
- *   tokenwatcher scan
- *   tokenwatcher serve [--port 8787]
- *   tokenwatcher today
- *   tokenwatcher status [--port 8787]
- *   tokenwatcher install-agent [--port 8787]
- *   tokenwatcher uninstall-agent
- *   tokenwatcher bar [--port 8787]
- *
- * tokenmeter 为旧命令名，仍作为别名保留（1.2 及更早版本装的是这个名字）。
+ *   tokenmonitor scan
+ *   tokenmonitor serve [--port 8787]
+ *   tokenmonitor today
+ *   tokenmonitor status [--port 8787]
+ *   tokenmonitor install-agent [--port 8787]
+ *   tokenmonitor uninstall-agent
+ *   tokenmonitor bar [--port 8787]
  */
-import { existsSync, renameSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import http from 'node:http';
 import { Store } from '../src/store.js';
 import { Scanner } from '../src/scanner.js';
 import { startServer } from '../src/server.js';
 import { BalancePoller } from '../src/balance.js';
-import { DB_PATH, DEFAULT_PORT, DATA_DIR, DATA_LOCATIONS } from '../src/config.js';
-import { migratePortableData } from '../src/platform/runtime.js';
+import { DB_PATH, DEFAULT_PORT, DATA_DIR } from '../src/config.js';
 
-const log = (msg) => console.log(`[token-watcher] ${msg}`);
-const err = (msg) => console.error(`[token-watcher] ${msg}`);
+const log = (msg) => console.log(`[tokenmonitor] ${msg}`);
+const err = (msg) => console.error(`[tokenmonitor] ${msg}`);
 
 const COMMANDS = ['scan', 'serve', 'today', 'install-agent', 'uninstall-agent', 'bar', 'status'];
 const PKG = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
@@ -45,10 +41,10 @@ function helpText() {
   const bar = win
     ? `  bar [--port N]             Launch the Windows system tray (connects to 127.0.0.1:<port>).`
     : `  bar [--port N]             Open the macOS menu-bar capsule (connects to 127.0.0.1:<port>).`;
-  return `Token Watcher ${PKG.version}
+  return `TokenMonitor ${PKG.version}
 
 Usage:
-  token-watcher <command> [options]
+  tokenmonitor <command> [options]
 
 Commands:
   scan                       Incremental scan once, then exit
@@ -62,7 +58,7 @@ Options:
   --port, -p N               Loopback port (1-65535). Default ${DEFAULT_PORT}. Invalid values error; they do not fall back.
   --help, -h                 Show this help (does not create a database)
   --version, -v              Print version (does not create a database)
-  --force                    install-agent: replace a conflicting legacy agent
+  --force                    install-agent: replace a conflicting TokenMonitor agent
 
 Exit codes:
   0  success / controlled shutdown (Ctrl+C, SIGTERM)
@@ -73,7 +69,7 @@ Exit codes:
 
 function usageExit(msg) {
   err(msg);
-  err('Run token-watcher --help for usage.');
+  err('Run tokenmonitor --help for usage.');
   process.exit(2);
 }
 
@@ -116,14 +112,6 @@ function parseArgs(argv) {
   };
 }
 
-function migrateLegacyHome() {
-  const LEGACY = join(homedir(), '.token-stats');
-  const NEWDIR = join(homedir(), '.tokenmeter');
-  if (existsSync(LEGACY) && !existsSync(NEWDIR)) renameSync(LEGACY, NEWDIR);
-  const LEGACY_DB = join(NEWDIR, 'token-stats.db');
-  if (existsSync(LEGACY_DB) && !existsSync(DB_PATH)) renameSync(LEGACY_DB, DB_PATH);
-}
-
 async function probeBackend(port) {
   return new Promise((resolve) => {
     const req = http.request({
@@ -149,7 +137,7 @@ function printStatus({ port, backend }) {
     `port: ${port}`,
     `data_dir: ${DATA_DIR}`,
     `db: ${existsSync(DB_PATH) ? 'present' : 'absent'}`,
-    `offline_mode: ${process.env.TOKENMETER_OFFLINE === '1' ? 'yes' : 'no'}`,
+    `offline_mode: ${process.env.TOKENMONITOR_OFFLINE === '1' ? 'yes' : 'no'}`,
   ];
   for (const line of lines) console.log(line);
 }
@@ -198,11 +186,6 @@ if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
   process.exit(0);
 }
 
-migrateLegacyHome();
-// 便携/强制数据目录首跑迁移：老 ~/.tokenmeter 有库而新位置没有时复制过来（#23）
-if (DATA_LOCATIONS.dbDir !== join(homedir(), '.tokenmeter')) {
-  migratePortableData({ dataDir: DATA_LOCATIONS.dbDir, log });
-}
 const store = new Store(DB_PATH);
 
 if (cmd === 'scan') {
@@ -238,7 +221,7 @@ if (cmd === 'scan') {
   const shutdown = (signal) => {
     if (shutting) return;
     shutting = true;
-    process.stderr.write(`[token-watcher] shutting down (${signal})\n`);
+    process.stderr.write(`[tokenmonitor] shutting down (${signal})\n`);
     try { scanner.stop(); } catch { /* already stopped */ }
     try { balancePoller.stop?.(); } catch { /* optional */ }
     try { server.close(); } catch { /* listen failed */ }

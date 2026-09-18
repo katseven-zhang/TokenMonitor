@@ -7,7 +7,7 @@
  * cleanly when killed. If the artifact has not been built yet, the suite
  * skips with a note (CI green without the .NET SDK).
  *
- * Run: TOKENMETER_OFFLINE=1 node test/windows/tray.test.mjs
+ * Run: TOKENMONITOR_OFFLINE=1 node test/windows/tray.test.mjs
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';

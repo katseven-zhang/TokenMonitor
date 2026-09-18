@@ -12,7 +12,7 @@
   the swap and moving it back after the new install verifies.
 
   Upgrade safety: the candidate is staged and validated (node --version and
-  tokenwatcher --version both run) BEFORE the existing install is replaced;
+  tokenmonitor --version both run) BEFORE the existing install is replaced;
   the old install is kept as a rollback copy until the new one verifies, and
   is restored automatically if verification fails.
 
@@ -75,12 +75,12 @@ if (-not (Test-Path -LiteralPath $Source)) {
   Fail "candidate package not found: $Source - build it first with scripts/build-windows.ps1"
 }
 $srcFull = (Resolve-Path -LiteralPath $Source).Path
-foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenwatcher.js', 'runtime\package.json', 'manifest.json', 'TokenMonitor.exe')) {
+foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenmonitor.js', 'runtime\package.json', 'manifest.json', 'TokenMonitor.exe')) {
   if (-not (Test-Path -LiteralPath (Join-Path $srcFull $rel))) { Fail "candidate is missing $rel" }
 }
 
 $candNode = Join-Path $srcFull 'runtime\node.exe'
-$candScript = Join-Path $srcFull 'runtime\bin\tokenwatcher.js'
+$candScript = Join-Path $srcFull 'runtime\bin\tokenmonitor.js'
 $candVersion = (& $candNode $candScript --version)
 if ($LASTEXITCODE -ne 0) { Fail 'candidate failed --version validation before install' }
 Info "candidate version: $candVersion"
@@ -121,7 +121,7 @@ try {
   # --- stage + validate the candidate in final layout --------------------------
   Info "staging candidate -> $staging"
   Copy-Item -LiteralPath $srcFull -Destination $staging -Recurse
-  $stagedVersion = (& (Join-Path $staging 'runtime\node.exe') (Join-Path $staging 'runtime\bin\tokenwatcher.js') --version)
+  $stagedVersion = (& (Join-Path $staging 'runtime\node.exe') (Join-Path $staging 'runtime\bin\tokenmonitor.js') --version)
   if ($LASTEXITCODE -ne 0) { Fail 'staged candidate failed --version validation' }
   Log "staged candidate version=$stagedVersion"
 
@@ -135,7 +135,7 @@ try {
     try {
       Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
       if ($dataAside) { Move-DataBack }
-      $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenwatcher.js') --version)
+      $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
       if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }
       Remove-Item -LiteralPath $backup -Recurse -Force
       $backupActive = $false
@@ -155,7 +155,7 @@ try {
     }
   } else {
     Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-    $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenwatcher.js') --version)
+    $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
     if ($LASTEXITCODE -ne 0) {
       Remove-Item -LiteralPath $installDir -Recurse -Force
       Fail 'post-install verification failed; broken first install removed'

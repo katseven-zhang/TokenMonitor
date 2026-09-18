@@ -1,10 +1,10 @@
-// Token Watcher 菜单栏胶囊：轮询本地 /api/summary，常驻显示今日消耗与配额。
+// TokenMonitor 菜单栏胶囊：轮询本地 /api/summary，常驻显示今日消耗与配额。
 // 编译：npm run build-bar
 import AppKit
 import Foundation
 import UserNotifications
 
-// 端口来自 `token-watcher bar --port N`（经 open --args 传入）；直接双击启动时取默认值。
+// 端口来自 `tokenmonitor bar --port N`（经 open --args 传入）；直接双击启动时取默认值。
 // 写死端口会让 `serve --port 9000` 的用户拿到一个连不上的胶囊。
 let PORT: Int = {
   let a = CommandLine.arguments
@@ -112,7 +112,7 @@ final class BarApp: NSObject, NSApplicationDelegate, UNUserNotificationCenterDel
     let menu = NSMenu()
     func add(_ title: String) { menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: "")) }
     let s = summary
-    add(s.map { "今日 \($0.totals?.today_tokens.map(fmtTokens) ?? "--") tokens" } ?? "TokenMeter：服务未启动")
+    add(s.map { "今日 \($0.totals?.today_tokens.map(fmtTokens) ?? "--") tokens" } ?? "TokenMonitor：服务未启动")
     if let all = s?.totals?.all_time_tokens {
       add("累计 \(fmtTokens(all)) tokens")
     }

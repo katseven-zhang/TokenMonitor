@@ -1,13 +1,13 @@
 /**
  * Win-Service：当前用户任务计划 XML/命令。测试注入执行器，不在本机创建真实任务。
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/service.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/service.test.mjs
  */
 import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { buildTaskXml, installWindowsAgent, uninstallWindowsAgent, WINDOWS_TASK_NAME }
@@ -22,7 +22,7 @@ const ok = (name, cond, detail = '') => {
 };
 
 const node = 'D:\\Program Files\\nodejs\\node.exe';
-const script = 'D:\\Users\\Test User\\我的 项目\\TokenMonitor\\bin\\tokenwatcher.js';
+const script = 'D:\\Users\\Test User\\我的 项目\\TokenMonitor\\bin\\tokenmonitor.js';
 
 console.log('\n[xml] Hidden logon task, quoted paths, no secrets');
 {
@@ -68,15 +68,15 @@ console.log('\n[install/uninstall] 注入执行器，不创建真实任务');
 
 console.log('\n[agent.js] Windows 走任务计划；macOS plist 回归仍可生成');
 {
-  const plist = buildPlist({ node: '/usr/local/bin/node', script: '/opt/pkg/bin/tokenwatcher.js', port: 9001, logDir: '/tmp/l' });
-  ok('macOS plist 仍固化 node 与脚本', plist.includes('/usr/local/bin/node') && plist.includes('/opt/pkg/bin/tokenwatcher.js'));
+  const plist = buildPlist({ node: '/usr/local/bin/node', script: '/opt/pkg/bin/tokenmonitor.js', port: 9001, logDir: '/tmp/l' });
+  ok('macOS plist 仍固化 node 与脚本', plist.includes('/usr/local/bin/node') && plist.includes('/opt/pkg/bin/tokenmonitor.js'));
   ok('macOS plist 含 serve 与 KeepAlive', plist.includes('serve') && plist.includes('KeepAlive'));
-  ok('entryScript 指向 bin/tokenwatcher.js', entryScript().replaceAll('\\', '/').endsWith('bin/tokenwatcher.js'));
+  ok('entryScript 指向 bin/tokenmonitor.js', entryScript().replaceAll('\\', '/').endsWith('bin/tokenmonitor.js'));
 }
 
 console.log('\n[cli glue] install-agent 仍在 new Store 之前');
 {
-  const src = readFileSync(join(ROOT, 'bin', 'tokenwatcher.js'), 'utf8');
+  const src = readFileSync(join(ROOT, 'bin', 'tokenmonitor.js'), 'utf8');
   ok('install-agent 在 Store 前', src.indexOf("cmd === 'install-agent'") < src.indexOf('new Store(DB_PATH)'));
   ok('Windows help 不再说任务计划未实现', !/Task Scheduler \(Windows\) is not in this CLI yet/i.test(src));
 }

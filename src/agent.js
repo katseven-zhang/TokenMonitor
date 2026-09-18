@@ -18,13 +18,11 @@ import { installWindowsAgent, uninstallWindowsAgent } from './platform/windows-s
  * 所以 node 与脚本路径都在生成时固化成绝对路径。
  */
 
-export const AGENT_LABEL = 'com.tokenwatcher.server';
-/** 1.4.1 之前手写的 plist 用的标签；它占同一个端口，两个一起跑会互相抢 */
-export const LEGACY_LABEL = 'com.tokenmeter.server';
+export const AGENT_LABEL = 'com.tokenmonitor.server';
 
 const AGENT_DIR = join(homedir(), 'Library', 'LaunchAgents');
 export const PLIST_PATH = join(AGENT_DIR, `${AGENT_LABEL}.plist`);
-export const LOG_DIR = join(homedir(), '.tokenmeter', 'logs');
+export const LOG_DIR = join(homedir(), '.tokenmonitor', 'logs');
 
 const XML = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 /** 家目录含 & 的用户并不罕见。不转义会生成非法 XML，而 launchd 只是静默拒绝加载 */
@@ -32,7 +30,7 @@ const esc = (v) => String(v).replace(/[&<>"']/g, (c) => XML[c]);
 
 /** 包内真实的入口脚本路径（realpath：全局安装时 bin/ 下是软链） */
 export function entryScript() {
-  const p = join(import.meta.dirname, '..', 'bin', 'tokenwatcher.js');
+  const p = join(import.meta.dirname, '..', 'bin', 'tokenmonitor.js');
   try { return realpathSync(p); } catch { return p; }
 }
 
@@ -59,11 +57,6 @@ ${argv.map((a) => `    <string>${esc(a)}</string>`).join('\n')}
 
 const domain = () => `gui/${process.getuid()}`;
 
-function isLoaded(label) {
-  try { execFileSync('launchctl', ['list', label], { stdio: 'ignore' }); return true; }
-  catch { return false; }
-}
-
 function bootout(label) {
   try { execFileSync('launchctl', ['bootout', `${domain()}/${label}`], { stdio: 'ignore' }); return true; }
   catch { return false; } // 本就没加载
@@ -71,7 +64,7 @@ function bootout(label) {
 
 function requireDarwin() {
   if (process.platform !== 'darwin') {
-    throw new Error('开机自启目前只支持 macOS（launchd）。其他平台请用 systemd / pm2 等常驻方案，或直接运行 token-watcher serve');
+    throw new Error('开机自启目前只支持 macOS（launchd）。其他平台请用 systemd / pm2 等常驻方案，或直接运行 tokenmonitor serve');
   }
 }
 
@@ -87,13 +80,6 @@ export function installAgent({ port = DEFAULT_PORT, force = false, log = console
     });
   }
   requireDarwin();
-  // 旧标签的服务监听同一个端口。装第二个不会报错，只会两边抢端口、一边反复重启，
-  // 是那种"看起来装好了其实一直在坏"的状态，所以默认挡住。
-  if (!force && isLoaded(LEGACY_LABEL)) {
-    throw new Error(`检测到旧服务 ${LEGACY_LABEL} 正在运行，它占用同一个端口。\n`
-      + `  先卸载：launchctl bootout ${domain()}/${LEGACY_LABEL}\n`
-      + '  或加 --force 强行安装（两个服务会抢端口，不建议）');
-  }
   const node = process.execPath;
   const script = entryScript();
   mkdirSync(AGENT_DIR, { recursive: true });
@@ -103,7 +89,7 @@ export function installAgent({ port = DEFAULT_PORT, force = false, log = console
   bootout(AGENT_LABEL); // 已加载时必须先卸载，否则 bootstrap 报 already loaded
   execFileSync('launchctl', ['bootstrap', domain(), PLIST_PATH], { stdio: 'inherit' });
   log(`已启动并设为开机自启（端口 ${port}，日志在 ${LOG_DIR}）`);
-  log(`  停用：token-watcher uninstall-agent`);
+  log(`  停用：tokenmonitor uninstall-agent`);
 }
 
 export function uninstallAgent({ log = console.log, run } = {}) {

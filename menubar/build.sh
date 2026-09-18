@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/bin/token-watcher.app"
+APP="$ROOT/bin/tokenmonitor.app"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   echo "[build-bar] 非 macOS，跳过菜单栏 App 构建"
@@ -28,7 +28,7 @@ swiftc -O -target arm64-apple-macos13.0  -o "$TMP/arm64"  "$ROOT/menubar/main.sw
 swiftc -O -target x86_64-apple-macos13.0 -o "$TMP/x86_64" "$ROOT/menubar/main.swift"
 
 mkdir -p "$APP/Contents/MacOS"
-lipo -create -output "$APP/Contents/MacOS/token-watcher" "$TMP/arm64" "$TMP/x86_64"
+lipo -create -output "$APP/Contents/MacOS/tokenmonitor" "$TMP/arm64" "$TMP/x86_64"
 cp "$ROOT/menubar/Info.plist" "$APP/Contents/Info.plist"
 
-echo "[build-bar] $APP  ($(lipo -archs "$APP/Contents/MacOS/token-watcher"), $(du -h "$APP/Contents/MacOS/token-watcher" | cut -f1))"
+echo "[build-bar] $APP  ($(lipo -archs "$APP/Contents/MacOS/tokenmonitor"), $(du -h "$APP/Contents/MacOS/tokenmonitor" | cut -f1))"

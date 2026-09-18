@@ -1,6 +1,6 @@
 /**
  * Win-DSH：无外部 zstd.exe 的多帧 v3/旧格式解析。
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/dsh.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/dsh.test.mjs
  *
  * 解压依赖：fzstd@0.1.1（MIT，纯 JS ~8kB minified）。不下载原生二进制。
  */
@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { collectDshFile, decompressZstdBuffer } = await import(pathToFileURL(join(ROOT, 'src/collectors/dsh.js')).href);

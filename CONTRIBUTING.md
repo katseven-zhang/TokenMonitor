@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢关注 Token Watcher！这是一个本地多源 AI Agent 用量统计工具，最容易也最有价值的贡献方向是**接入新的数据源**。
+感谢关注 TokenMonitor！这是一个本地多源 AI Agent 用量统计工具，最容易也最有价值的贡献方向是**接入新的数据源**。
 
 ## 添加一个新数据源
 
@@ -35,7 +35,7 @@ export async function collectXxxFile(store, { tool, path, fileId, offset, state,
 5. **补测试**（`test/run.mjs`）：在临时 HOME 下加 fixture，断言黄金数字、dedup 幂等、project 归属、
    工具调用；增量类源再补一条"续写/删行后仍正确"的用例。判断测试是否够格的办法是把实现改坏一行，
    看它会不会变红——不会变红的测试等于没写。
-6. **对账**：写独立脚本（Python 等）直接重算原始文件，与 `tokenwatcher scan` 后的库内数字精确比对，
+6. **对账**：写独立脚本（Python 等）直接重算原始文件，与 `tokenmonitor scan` 后的库内数字精确比对，
    把结果贴进 PR。数量对不上要能解释清楚（例如全 0 用量的空调用被 `total <= 0` 跳过）
 
 ## 采集逻辑升级（已有源）

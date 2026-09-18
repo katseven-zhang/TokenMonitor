@@ -1,6 +1,6 @@
 /**
  * Windows CI 烟测：语法/import、CLI help/version、临时 HOME scan、loopback 静态资源。
- * TOKENMETER_OFFLINE=1。不把 npm test 伪装成通过。
+ * TOKENMONITOR_OFFLINE=1。不把 npm test 伪装成通过。
  */
 import { spawnSync, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
@@ -11,10 +11,10 @@ import { globSync } from 'node:fs';
 import net from 'node:net';
 import http from 'node:http';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CLI = join(ROOT, 'bin', 'tokenwatcher.js');
+const CLI = join(ROOT, 'bin', 'tokenmonitor.js');
 let failed = 0;
 const ok = (name, cond, detail = '') => {
   if (cond) console.log(`  ✓ ${name}`);
@@ -37,7 +37,7 @@ console.log('\n[ci-smoke] import');
 
 console.log('\n[ci-smoke] CLI help/version');
 {
-  const env = { ...process.env, TOKENMETER_OFFLINE: '1', HOME: mkdtempSync(join(tmpdir(), 'ci-home-')), USERPROFILE: '' };
+  const env = { ...process.env, TOKENMONITOR_OFFLINE: '1', HOME: mkdtempSync(join(tmpdir(), 'ci-home-')), USERPROFILE: '' };
   env.USERPROFILE = env.HOME;
   const help = spawnSync(process.execPath, [CLI, '--help'], { encoding: 'utf8', env, timeout: 15000, windowsHide: true });
   ok('--help 0', help.status === 0, help.stderr.slice(0, 120));
@@ -50,7 +50,7 @@ console.log('\n[ci-smoke] temp HOME scan + serve');
 {
   const HOME = mkdtempSync(join(tmpdir(), 'ci-scan-中文 空格-'));
   mkdirSync(join(HOME, '.grok', 'sessions', 'proj'), { recursive: true });
-  const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMETER_OFFLINE: '1' };
+  const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMONITOR_OFFLINE: '1' };
   const scan = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', CLI, 'scan'], {
     encoding: 'utf8', env, timeout: 30000, windowsHide: true,
   });

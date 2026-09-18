@@ -1,5 +1,5 @@
 /**
- * TokenMeter 回归测试（零依赖，node test/run.mjs 或 npm test）
+ * TokenMonitor 回归测试（零依赖，node test/run.mjs 或 npm test）
  *
  * 三层：
  *  1. 语法层：所有 JS 过 node --check
@@ -283,9 +283,9 @@ console.log('\n[2c] 后端健壮性');
 {
   const mod = (rel) => import(pathToFileURL(join(ROOT, rel)).href);
 
-  // 并发读写：serve 常驻时跑 `tokenmeter today` 会撞锁，没有 busy_timeout 就是立刻 SQLITE_BUSY
+  // 并发读写：serve 常驻时跑 `tokenmonitor today` 会撞锁，没有 busy_timeout 就是立刻 SQLITE_BUSY
   const { Store } = await mod('src/store.js');
-  const tmp = mkdtempSync(join(tmpdir(), 'tokenmeter-store-'));
+  const tmp = mkdtempSync(join(tmpdir(), 'tokenmonitor-store-'));
   const st = new Store(join(tmp, 'x.db'));
   const bt = Object.values(st.db.prepare('PRAGMA busy_timeout').get())[0];
   ok('Store 设置了 busy_timeout（并发读写不立刻 SQLITE_BUSY）', Number(bt) >= 1000, String(bt));
@@ -306,7 +306,7 @@ console.log('\n[2c] 后端健壮性');
 
   // 对账：DeepSeek 按美元计价，旧实现要求 currency==='CNY' → 统计花费恒为 0，面板据此误报 ⚠
   const { computeRecon } = await mod('src/pricing.js');
-  const rtmp = mkdtempSync(join(tmpdir(), 'tokenmeter-recon-'));
+  const rtmp = mkdtempSync(join(tmpdir(), 'tokenmonitor-recon-'));
   const rdb = new DatabaseSync(join(rtmp, 'r.db'));
   rdb.exec(`CREATE TABLE events (ts INTEGER, tool TEXT, model TEXT, input_tokens INTEGER,
     cached_input INTEGER, cache_write INTEGER, output_tokens INTEGER, total_tokens INTEGER);
@@ -320,7 +320,7 @@ console.log('\n[2c] 后端健壮性');
   const usdPricing = { models: { 'deepseek-v4.1-flash': { currency: 'USD', input_miss: 0.30, input_hit: 0.006, output: 1.20, off_peak: 1 } } };
   // 余额轮询熔断：GLM 端点持续 404，真实日志两天里带着 key 重试了 85 次
   const { BalancePoller } = await mod('src/balance.js');
-  const etmp = mkdtempSync(join(tmpdir(), 'tokenmeter-env-'));
+  const etmp = mkdtempSync(join(tmpdir(), 'tokenmonitor-env-'));
   writeFileSync(join(etmp, '.env'), 'DEEPSEEK_API_KEY=test-key-not-real\n');
   let calls = 0;
   const always404 = async () => { calls++; return { ok: false, status: 404, json: async () => ({}) }; };
@@ -345,8 +345,8 @@ console.log('\n[2c] 后端健壮性');
 
 /* ---------- 第 3 层：端到端冒烟 ---------- */
 console.log('\n[3] 端到端冒烟（临时 HOME + fixtures）');
-const HOME = mkdtempSync(join(tmpdir(), 'tokenmeter-test-'));
-const dbFile = join(HOME, '.tokenmeter', 'tokenmeter.db');
+const HOME = mkdtempSync(join(tmpdir(), 'tokenmonitor-test-'));
+const dbFile = join(HOME, '.tokenmonitor', 'tokenmonitor.db');
 let hasDsh = false; // 系统无 zstd 时 dsh 源整体跳过，相关断言随之放行
 {
   // ---- fixtures（时间戳用"现在"附近，避免健康检查把过去时间的 fixture 判为 stale）----
@@ -524,8 +524,8 @@ let hasDsh = false; // 系统无 zstd 时 dsh 源整体跳过，相关断言随�
     })));
 
   // 本地定价（离线可算费用；deepseek/glm 覆盖 fixtures 模型）
-  mkdirSync(join(HOME, '.tokenmeter'), { recursive: true });
-  writeFileSync(join(HOME, '.tokenmeter', 'pricing.json'), JSON.stringify({
+  mkdirSync(join(HOME, '.tokenmonitor'), { recursive: true });
+  writeFileSync(join(HOME, '.tokenmonitor', 'pricing.json'), JSON.stringify({
     usd_to_cny: 7.0,
     models: {
       'deepseek-v4.1-flash': { currency: 'CNY', input_miss: 2, input_hit: 0.4, output: 8 },
@@ -547,8 +547,8 @@ const DSH_T = hasDsh ? 1800 : 0, DSH_N = hasDsh ? 2 : 0;
 
 // 离线：回归测试不该依赖公网（汇率/LiteLLM 牌价），否则断网就跑不了、时长也不可控。
 // USERPROFILE 是 Windows 上 os.homedir() 认的变量，只设 HOME 在那边临时家目录不生效。
-const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMETER_OFFLINE: '1' };
-const cli = (args) => spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenwatcher.js'), ...args], { encoding: 'utf8', env });
+const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMONITOR_OFFLINE: '1' };
+const cli = (args) => spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenmonitor.js'), ...args], { encoding: 'utf8', env });
 
 {
   const r1 = cli(['scan']);
@@ -652,7 +652,7 @@ const cli = (args) => spawnSync(process.execPath, ['--disable-warning=Experiment
 console.log('\n[4] API 冒烟');
 {
   const port = await new Promise(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
-  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenwatcher.js'), 'serve', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenmonitor.js'), 'serve', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let buf = '';
   child.stdout.on('data', d => { buf += d; });
   const started = await new Promise(r => { const t = setTimeout(() => r(false), 30000); child.stdout.on('data', () => { if (buf.includes('listening')) { clearTimeout(t); r(true); } }); });
@@ -885,7 +885,7 @@ console.log('\n[6] DeepSeek 峰谷价');
   pdb.close();
 
   const port = await new Promise(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
-  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenwatcher.js'), 'serve', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenmonitor.js'), 'serve', '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let buf = '';
   child.stdout.on('data', d => { buf += d; });
   const up = await new Promise(r => { const t = setTimeout(() => r(false), 30000); child.stdout.on('data', () => { if (buf.includes('listening')) { clearTimeout(t); r(true); } }); });
@@ -976,11 +976,11 @@ console.log('\n[9] LaunchAgent 生成');
 {
   const { buildPlist, entryScript, AGENT_LABEL } = await import(pathToFileURL(join(ROOT, 'src/agent.js')).href);
 
-  const plist = buildPlist({ node: '/usr/local/bin/node', script: '/opt/pkg/bin/tokenwatcher.js', port: 9001, logDir: '/tmp/l' });
+  const plist = buildPlist({ node: '/usr/local/bin/node', script: '/opt/pkg/bin/tokenmonitor.js', port: 9001, logDir: '/tmp/l' });
   // launchd 的 PATH 是系统默认，不含 npm 全局 bin 也不含 homebrew；脚本 shebang 又是
   // #!/usr/bin/env node。所以 node 与脚本都必须是生成时就固化的绝对路径。
   ok('plist 固化 node 绝对路径', plist.includes('<string>/usr/local/bin/node</string>'));
-  ok('plist 固化入口脚本绝对路径', plist.includes('<string>/opt/pkg/bin/tokenwatcher.js</string>'));
+  ok('plist 固化入口脚本绝对路径', plist.includes('<string>/opt/pkg/bin/tokenmonitor.js</string>'));
   ok('plist 带上端口', plist.includes('<string>--port</string>') && plist.includes('<string>9001</string>'));
   ok('plist 含 serve 与 KeepAlive', plist.includes('<string>serve</string>') && plist.includes('<key>KeepAlive</key>'));
   ok('plist 标签与文件名一致', plist.includes(`<string>${AGENT_LABEL}</string>`));
@@ -1002,16 +1002,16 @@ console.log('\n[9] LaunchAgent 生成');
   }
 
   const entry = entryScript();
-  ok('入口脚本解析到真实存在的文件', existsSync(entry) && entry.replaceAll('\\', '/').endsWith('bin/tokenwatcher.js'), entry);
+  ok('入口脚本解析到真实存在的文件', existsSync(entry) && entry.replaceAll('\\', '/').endsWith('bin/tokenmonitor.js'), entry);
 
   // 装卸服务与数据无关。若排在 new Store 之后，仅仅装个开机自启就会在用户机器上
   // 建出数据库文件——这种副作用没人会想到要去测，只能靠顺序锁住。
-  const cliSrc = read(join(ROOT, 'bin/tokenwatcher.js'));
+  const cliSrc = read(join(ROOT, 'bin/tokenmonitor.js'));
   ok('装卸服务在创建 Store 之前分流',
     cliSrc.indexOf("cmd === 'install-agent'") < cliSrc.indexOf('new Store(DB_PATH)'));
   // README 曾指向 npm run install-agent，而全局安装的用户根本调不到 npm scripts
   ok('README 用 CLI 子命令而非 npm script 指引常驻',
-    /token-watcher install-agent|tokenwatcher install-agent/.test(read(join(ROOT, 'README.md'))));
+    /tokenmonitor install-agent/.test(read(join(ROOT, 'README.md'))));
 }
 
 /* ---------- 第 10 层：菜单栏胶囊的分发 ----------
@@ -1022,17 +1022,20 @@ console.log('\n[9] LaunchAgent 生成');
 console.log('\n[10] 菜单栏胶囊的分发');
 {
   const { barAppPath } = await import(pathToFileURL(join(ROOT, 'src/bar.js')).href);
-  ok('app 路径解析在包内', barAppPath().endsWith(join('bin', 'token-watcher.app')), barAppPath());
+  ok('app 路径解析在包内', barAppPath().endsWith(join('bin', 'tokenmonitor.app')), barAppPath());
 
   // 发布白名单必须声明它。产物本身不入 git（由 prepack 在发版前编译），
   // 所以干净克隆与 Linux CI 上盘里没有 .app，那种情况下只能验声明。
   const pkg = JSON.parse(read(join(ROOT, 'package.json')));
-  ok('files 白名单声明了菜单栏 app', (pkg.files || []).includes('bin/token-watcher.app/'),
+  ok('package 只暴露 tokenmonitor CLI',
+    Object.keys(pkg.bin || {}).length === 1 && pkg.bin.tokenmonitor === 'bin/tokenmonitor.js',
+    JSON.stringify(pkg.bin));
+  ok('files 白名单声明了菜单栏 app', (pkg.files || []).includes('bin/tokenmonitor.app/'),
     JSON.stringify(pkg.files));
   ok('prepack 会在发版前编译，避免发出陈旧或缺失的产物',
     /build.sh/.test(pkg.scripts?.prepack || ''), pkg.scripts?.prepack);
 
-  const exe = join(barAppPath(), 'Contents', 'MacOS', 'token-watcher');
+  const exe = join(barAppPath(), 'Contents', 'MacOS', 'tokenmonitor');
   if (existsSync(exe)) {
     // 光声明不够：曾经 files 里写了却因为路径写法不对而没进包
     const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'],
@@ -1040,8 +1043,8 @@ console.log('\n[10] 菜单栏胶囊的分发');
     let files = [];
     try { files = JSON.parse(packed.stdout)[0].files.map((f) => f.path); } catch { /* 断言会报错 */ }
     ok('声明的 app 确实进了发布产物',
-      files.some((f) => f.endsWith('token-watcher.app/Contents/MacOS/token-watcher'))
-      && files.some((f) => f.endsWith('token-watcher.app/Contents/Info.plist')),
+      files.some((f) => f.endsWith('tokenmonitor.app/Contents/MacOS/tokenmonitor'))
+      && files.some((f) => f.endsWith('tokenmonitor.app/Contents/Info.plist')),
       files.filter((f) => f.includes('.app')).join(',') || packed.stderr?.slice(0, 120));
   } else {
     console.log('  – 打包内容检查跳过（本地尚未编译 app，执行 npm run build-bar 后可验）');
@@ -1056,12 +1059,12 @@ console.log('\n[10] 菜单栏胶囊的分发');
     console.log('  – 架构检查跳过（非 macOS 或尚未编译）');
   }
 
-  const cliSrc = read(join(ROOT, 'bin/tokenwatcher.js'));
+  const cliSrc = read(join(ROOT, 'bin/tokenmonitor.js'));
   ok('bar 在创建 Store 之前分流', cliSrc.indexOf("cmd === 'bar'") < cliSrc.indexOf('new Store(DB_PATH)'));
   // 写死端口会让 serve --port 的用户拿到一个连不上的胶囊
   ok('菜单栏源码不再写死端口', !/127\.0\.0\.1:8787/.test(read(join(ROOT, 'menubar/main.swift'))));
   ok('README 用 CLI 子命令指引菜单栏',
-    /token-watcher bar|tokenwatcher bar/.test(read(join(ROOT, 'README.md'))));
+    /tokenmonitor bar/.test(read(join(ROOT, 'README.md'))));
 }
 
 /* ---------- 清理 ---------- */

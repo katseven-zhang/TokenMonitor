@@ -258,7 +258,7 @@ function scheduleBackup(store, log = () => {}) {
     try {
       mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().slice(0, 10);
-      const target = join(dir, `token-watcher-${stamp}.db`);
+      const target = join(dir, `tokenmonitor-${stamp}.db`);
       try {
         store.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
       } catch (e) {
@@ -397,7 +397,7 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
         rows.map(r => [r.d, r.tool, r.input, r.cached, r.cache_write, r.output, r.total, r.calls].map(esc).join(',')).join('\n') + '\n';
       res.writeHead(200, {
         'content-type': 'text/csv; charset=utf-8',
-        'content-disposition': `attachment; filename="token-watcher-${days || 'all'}d.csv"`,
+        'content-disposition': `attachment; filename="tokenmonitor-${days || 'all'}d.csv"`,
       });
       return res.end(csv);
     }

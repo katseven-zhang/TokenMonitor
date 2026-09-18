@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    # 回归测试跑在离线模式下（TOKENMETER_OFFLINE=1），不依赖汇率 / LiteLLM 牌价等公网接口
+    # 回归测试跑在离线模式下（TOKENMONITOR_OFFLINE=1），不依赖汇率 / LiteLLM 牌价等公网接口
     strategy:
       fail-fast: false
       matrix:
@@ -45,14 +45,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/consumer"
           cd "$RUNNER_TEMP/consumer"
           npm init -y >/dev/null
-          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/token-watcher-*.tgz
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/tokenmonitor-*.tgz
       - name: 起服务并检查关键资源
         shell: bash
         env:
-          TOKENMETER_OFFLINE: '1'
+          TOKENMONITOR_OFFLINE: '1'
         run: |
           cd "$RUNNER_TEMP/consumer"
-          node node_modules/token-watcher/bin/tokenwatcher.js serve --port 8799 &
+          node node_modules/tokenmonitor/bin/tokenmonitor.js serve --port 8799 &
           for i in $(seq 1 40); do
             curl -sf -o /dev/null "http://127.0.0.1:8799/api/summary?days=1" && break
             sleep 1

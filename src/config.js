@@ -13,12 +13,12 @@ export const HOME = homedir();
 export { SOURCES, SOURCE_ERRORS } from './source-registry.js';
 
 /**
- * 离线模式（TOKENMETER_OFFLINE=1）：完全不发外网请求。
+ * 离线模式（TOKENMONITOR_OFFLINE=1）：完全不发外网请求。
  * 服务平时会访问三类外部端点——汇率接口、LiteLLM 牌价表、厂商余额接口（带 API key），
  * 离线时全部跳过，改用本地缓存 / pricing.json 的手动汇率 / 种子价继续出数。
  * 运行期读取，便于测试与用户临时切换。
  */
-export const isOffline = () => process.env.TOKENMETER_OFFLINE === '1';
+export const isOffline = () => process.env.TOKENMONITOR_OFFLINE === '1';
 
 /**
  * 打包/安装形态检测：从本文件位置向上最多 maxUp 层找 manifest.json，且内容必须
@@ -50,10 +50,10 @@ export function detectAppRoot({
 
 /**
  * 数据位置解析（#23，优先级从高到低）：
- * 1. TOKENMETER_DATA_DIR 环境变量——显式指定，数据库/日志/锁/设置统一落该目录；
+ * 1. TOKENMONITOR_DATA_DIR 环境变量——显式指定，数据库/日志/锁/设置统一落该目录；
  * 2. 打包/安装形态（检测到应用根）——统一落 <应用根>\data，用户看得见、随包走；
- * 3. 源码运行形态——维持既有默认：数据库 ~/.tokenmeter，运行数据（日志/锁）
- *    %LOCALAPPDATA%\TokenMonitor（非 Windows 或缺 LOCALAPPDATA 时退回 ~/.tokenmeter）。
+ * 3. 源码运行形态——数据库 ~/.tokenmonitor，运行数据（日志/锁）
+ *    %LOCALAPPDATA%\TokenMonitor（非 Windows 或缺 LOCALAPPDATA 时退回 ~/.tokenmonitor）。
  */
 export function resolveDataLocations({
   env = process.env,
@@ -63,13 +63,13 @@ export function resolveDataLocations({
   detect = detectAppRoot,
 } = {}) {
   const root = appRoot !== undefined ? appRoot : detect();
-  if (env.TOKENMETER_DATA_DIR) {
+  if (env.TOKENMONITOR_DATA_DIR) {
     return {
       portable: false,
       forced: true,
       appRoot: root,
-      dbDir: env.TOKENMETER_DATA_DIR,
-      runtimeDir: env.TOKENMETER_DATA_DIR,
+      dbDir: env.TOKENMONITOR_DATA_DIR,
+      runtimeDir: env.TOKENMONITOR_DATA_DIR,
     };
   }
   if (root) {
@@ -80,17 +80,17 @@ export function resolveDataLocations({
     portable: false,
     forced: false,
     appRoot: null,
-    dbDir: join(home, '.tokenmeter'),
+    dbDir: join(home, '.tokenmonitor'),
     runtimeDir: platform === 'win32' && env.LOCALAPPDATA
       ? join(env.LOCALAPPDATA, 'TokenMonitor')
-      : join(home, '.tokenmeter'),
+      : join(home, '.tokenmonitor'),
   };
 }
 
 const LOCATIONS = resolveDataLocations();
 
 export const DATA_DIR = LOCATIONS.dbDir;
-export const DB_PATH = join(DATA_DIR, 'tokenmeter.db');
+export const DB_PATH = join(DATA_DIR, 'tokenmonitor.db');
 /** 运行数据目录（日志/锁/GUI 设置）。源码形态与 DATA_DIR 不同，打包/强制形态二者相同。 */
 export const RUNTIME_DATA_DIR = LOCATIONS.runtimeDir;
 export const DATA_LOCATIONS = LOCATIONS;

@@ -1,6 +1,6 @@
 /**
  * Win-CLI：help/version/status 不建库、非法参数非零、SIGINT 受控退出。
- * 运行：TOKENMETER_OFFLINE=1 node test/windows/cli.test.mjs
+ * 运行：TOKENMONITOR_OFFLINE=1 node test/windows/cli.test.mjs
  */
 import { spawnSync, spawn } from 'node:child_process';
 import { existsSync, rmSync, readFileSync } from 'node:fs';
@@ -10,10 +10,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 
-process.env.TOKENMETER_OFFLINE = '1';
+process.env.TOKENMONITOR_OFFLINE = '1';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CLI = join(ROOT, 'bin', 'tokenwatcher.js');
+const CLI = join(ROOT, 'bin', 'tokenmonitor.js');
 
 let failed = 0;
 const ok = (name, cond, detail = '') => {
@@ -26,7 +26,7 @@ function run(args, { home, extraEnv = {}, timeout = 15000 } = {}) {
     ...process.env,
     HOME: home,
     USERPROFILE: home,
-    TOKENMETER_OFFLINE: '1',
+    TOKENMONITOR_OFFLINE: '1',
     ...extraEnv,
   };
   return spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', CLI, ...args], {
@@ -38,7 +38,7 @@ function run(args, { home, extraEnv = {}, timeout = 15000 } = {}) {
 }
 
 const HOME = mkdtempSync(join(tmpdir(), 'cli-home-中文 空格-'));
-const dbFile = join(HOME, '.tokenmeter', 'tokenmeter.db');
+const dbFile = join(HOME, '.tokenmonitor', 'tokenmonitor.db');
 
 console.log('\n[help/version] 不创建数据库，文案按平台');
 {
@@ -127,7 +127,7 @@ console.log('\n[serve SIGINT] 受控关闭退出码 0');
     const s = net.createServer();
     s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); });
   });
-  const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMETER_OFFLINE: '1' };
+  const env = { ...process.env, HOME, USERPROFILE: HOME, TOKENMONITOR_OFFLINE: '1' };
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', CLI, 'serve', '--port', String(port)], {
     env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });

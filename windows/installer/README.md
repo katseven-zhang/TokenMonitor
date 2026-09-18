@@ -10,11 +10,11 @@
 | `<安装目录>\data` | 便携数据目录（SQLite 数据库、pricing、logs、gui-settings.json），随安装目录走，升级/卸载默认保留 |
 | `%APPDATA%\Microsoft\Windows\Start Menu\Programs\TokenMonitor.lnk` | 开始菜单快捷方式（总是创建，指向 `TokenMonitor.exe`） |
 | `<桌面>\TokenMonitor.lnk` | 可选桌面快捷方式（`-DesktopShortcut` 时创建） |
-| 任务计划 `TokenMonitor-Server` | 由 `token-watcher install-agent`（任务 #8）管理；卸载器按名精确删除 |
+| 任务计划 `TokenMonitor-Server` | 由 `tokenmonitor install-agent`（任务 #8）管理；卸载器按名精确删除 |
 
 ## 安装 / 覆盖升级
 
-1. 校验候选包（默认 `dist\windows-x64`）：必须含 `runtime\node.exe`、`runtime\bin\tokenwatcher.js`、`runtime\package.json`、根目录 `manifest.json` 与 `TokenMonitor.exe`，且 `--version` 可执行。
+1. 校验候选包（默认 `dist\windows-x64`）：必须含 `runtime\node.exe`、`runtime\bin\tokenmonitor.js`、`runtime\package.json`、根目录 `manifest.json` 与 `TokenMonitor.exe`，且 `--version` 可执行。
 2. 候选先复制到 `<安装目录>.new` 暂存并在最终布局下再次验证。
 3. 覆盖升级：`<安装目录>\data` 先移到 `<InstallRoot>\TokenMonitor-data` 暂存 → 旧目录改名 `TokenMonitor.old` 保留 → 暂存目录转正 → `data` 挪回 → 转正后再跑一次 `--version` 验证 → 验证通过才删除 `.old`；验证失败自动把 `.old` 改名回滚并把 `data` 挪回旧目录，机器上始终保留一个可用版本、数据永不进入删除范围。
 4. 数据目录只创建、不删除；升级天然保留数据库、日志与 `gui-settings.json`。

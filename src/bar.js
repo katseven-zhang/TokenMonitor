@@ -11,7 +11,7 @@ import { DEFAULT_PORT } from './config.js';
  * 而指引用的 `npm run bar` 对全局安装也不可见。
  */
 export function barAppPath() {
-  return join(import.meta.dirname, '..', 'bin', 'token-watcher.app');
+  return join(import.meta.dirname, '..', 'bin', 'tokenmonitor.app');
 }
 
 /**
@@ -35,7 +35,7 @@ export function openBar({ port = DEFAULT_PORT, log = console.log } = {}) {
         `找不到 Windows 托盘程序 TokenMonitorTray.exe（tray）。\n` +
         `  构建自包含单文件（需要 .NET 8 SDK）：\n` +
         `  powershell -NoProfile -ExecutionPolicy Bypass -File windows\\tray\\build.ps1\n` +
-        `  然后重试 token-watcher bar --port ${port}；面板地址 http://127.0.0.1:${port}`,
+        `  然后重试 tokenmonitor bar --port ${port}；面板地址 http://127.0.0.1:${port}`,
       );
     }
     // detached：托盘独立于 CLI 生命周期存活；端口透传给托盘

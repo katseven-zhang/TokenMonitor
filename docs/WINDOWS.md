@@ -17,21 +17,21 @@
 git clone <仓库地址> TokenMonitor
 cd TokenMonitor
 npm ci
-node bin\tokenwatcher.js scan     # 首次增量扫描历史数据后退出
-node bin\tokenwatcher.js serve    # 启动后台与本地面板，默认 http://127.0.0.1:8787
+node bin\tokenmonitor.js scan     # 首次增量扫描历史数据后退出
+node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://127.0.0.1:8787
 ```
 
 路径含空格或中文时，用引号包住完整路径再调用：
 
 ```powershell
-& "D:\我的工具\Token Monitor\bin\tokenwatcher.js" serve --port 8787
+& "D:\我的工具\Token Monitor\bin\tokenmonitor.js" serve --port 8787
 ```
 
-通过 `npm install -g` 安装后，`tokenwatcher` / `token-watcher` / `tokenmeter` 三个短命令等价（见 [../package.json](../package.json) 的 `bin` 字段）。
+通过 `npm install -g` 安装后，唯一 CLI 命令为 `tokenmonitor`（见 [../package.json](../package.json) 的 `bin` 字段）。
 
 ### 可用命令（✅ 已集成，#10）
 
-实现：[../bin/tokenwatcher.js](../bin/tokenwatcher.js)；测试：[../test/windows/cli.test.mjs](../test/windows/cli.test.mjs)。
+实现：[../bin/tokenmonitor.js](../bin/tokenmonitor.js)；测试：[../test/windows/cli.test.mjs](../test/windows/cli.test.mjs)。
 
 | 命令 | 行为 |
 | --- | --- |
@@ -50,24 +50,22 @@ node bin\tokenwatcher.js serve    # 启动后台与本地面板，默认 http://
 
 数据位置按三级优先解析（见 [../src/config.js](../src/config.js) 的 `resolveDataLocations`）：
 
-1. **环境变量 `TOKENMETER_DATA_DIR`**：显式指定，数据库、日志、锁、设置全部落到该目录（最高优先，测试/自定义场景用）。
+1. **环境变量 `TOKENMONITOR_DATA_DIR`**：显式指定，数据库、日志、锁、设置全部落到该目录（最高优先，测试/自定义场景用）。
 2. **打包/安装形态**：应用根存在 `manifest.json`（构建清单，含 `name: TokenMonitor` 标记）即视为打包形态——数据库、日志、锁、设置统一落在 **`<应用根>\data`**，用户看得见、随目录走（便携式）。
-3. **源码运行形态**：维持既有默认——数据库 `%USERPROFILE%\.tokenmeter\tokenmeter.db`（[../src/config.js](../src/config.js)）；运行数据（日志、锁文件）在 `%LOCALAPPDATA%\TokenMonitor`（[../src/platform/runtime.js](../src/platform/runtime.js)）。旧目录 `%USERPROFILE%\.token-stats` 会在首次运行 `scan`/`serve`/`today` 时自动改名迁移（幂等；仅当新目录不存在时执行，见 [../bin/tokenwatcher.js](../bin/tokenwatcher.js) 的 `migrateLegacyHome`）。
-
-**打包形态首跑迁移**：老位置 `~/.tokenmeter` 已有数据库而新 `data\` 还没有时，启动会自动把 `tokenmeter.db` 与 `pricing.json` **复制**到 `data\`（旧文件保留不删；目标已存在则跳过，不会覆盖新数据；经临时文件落盘再改名，中断不留半截文件）。实现与测试见 [../src/platform/runtime.js](../src/platform/runtime.js) `migratePortableData`、[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
+3. **源码运行形态**：数据库 `%USERPROFILE%\.tokenmonitor\tokenmonitor.db`（[../src/config.js](../src/config.js)）；运行数据（日志、锁文件）在 `%LOCALAPPDATA%\TokenMonitor`（[../src/platform/runtime.js](../src/platform/runtime.js)）。源码运行与打包运行使用各自的新数据根，不读取、迁移或删除其他命名空间。
 
 - **单实例锁**：`tokenmonitor-<端口>.lock`，位于上述运行数据目录；重复启动返回 `already_running` 与已运行 PID。
 - **端口**：默认 `8787`；`--port N`（1–65535）对 serve/status/install-agent/bar 均可用，非法值直接报错退出。服务只绑定 `127.0.0.1` 回环并校验 `Host` 头（DNS rebinding 防护，[../src/server.js](../src/server.js)）。
-- **离线模式**：设置 `$env:TOKENMETER_OFFLINE='1'` 后，汇率、LiteLLM 牌价表、厂商余额三类外网请求全部跳过，改用本地缓存 / 内置牌价 / 种子价继续出数（[../src/config.js](../src/config.js)）。CI 与 Windows 专项测试默认离线运行。
+- **离线模式**：设置 `$env:TOKENMONITOR_OFFLINE='1'` 后，汇率、LiteLLM 牌价表、厂商余额三类外网请求全部跳过，改用本地缓存 / 内置牌价 / 种子价继续出数（[../src/config.js](../src/config.js)）。CI 与 Windows 专项测试默认离线运行。
 
 ## 4. 开机自启：当前用户任务计划（✅ 已集成，#8）
 
 实现：[../src/platform/windows-service.js](../src/platform/windows-service.js)、[../src/agent.js](../src/agent.js)；测试：[../test/windows/service.test.mjs](../test/windows/service.test.mjs)。
 
 ```powershell
-node bin\tokenwatcher.js install-agent               # 默认端口 8787
-node bin\tokenwatcher.js install-agent --port 9001   # 指定端口
-node bin\tokenwatcher.js uninstall-agent             # 只删除 TokenMonitor-Server 这一条任务
+node bin\tokenmonitor.js install-agent               # 默认端口 8787
+node bin\tokenmonitor.js install-agent --port 9001   # 指定端口
+node bin\tokenmonitor.js uninstall-agent             # 只删除 TokenMonitor-Server 这一条任务
 schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST  # 手动核对任务状态
 ```
 
@@ -77,11 +75,11 @@ schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST  # 手动核对任务状�
 
 ## 5. 系统托盘（✅ 已集成，#9）
 
-实现：[../windows/tray/](../windows/tray/)（.NET 8 WinForms NotifyIcon，自包含单文件 x64）；测试：[../test/windows/tray.test.mjs](../test/windows/tray.test.mjs)。
+实现：[../windows/tray/](../windows/tray/)（独立 Windows 系统托盘，自包含单文件 x64）；测试：[../test/windows/tray.test.mjs](../test/windows/tray.test.mjs)。
 
 ```powershell
-dotnet publish windows\tray\TokenMonitorTray.csproj -c Release -r win-x64   # 构建自包含单文件托盘
-node bin\tokenwatcher.js bar                                                 # 查找并以 --port 拉起托盘
+powershell -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1 # 固定目录覆盖构建托盘
+node bin\tokenmonitor.js bar                                                 # 查找并以 --port 拉起托盘
 ```
 
 - `bar` 依次查找 `windows/tray/publish` 与包内 `tray/` 目录下的托盘 EXE；找到则以当前 `--port` 拉起，找不到则打印含 `tray` 与面板地址的明确提示，不静默失败（托盘 EXE 属构建产物，源码目录默认没有）。
@@ -103,7 +101,7 @@ node bin\tokenwatcher.js bar                                                 # �
 cd <仓库目录>
 git pull --ff-only
 npm ci
-node bin\tokenwatcher.js status    # 确认后台在线；如已停止则重新 serve
+node bin\tokenmonitor.js status    # 确认后台在线；如已停止则重新 serve
 ```
 
 - 基于安装器的覆盖升级（先验证候选、失败可回滚、保留 `data\`）：✅ 已集成（#13，`558380a` + 修复 `50fab85`；布局 v2 由 #25 重构）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
@@ -113,7 +111,7 @@ node bin\tokenwatcher.js status    # 确认后台在线；如已停止则重新 
 
 ```text
 dist\windows-x64\
-├─ TokenMonitor.exe     ← GUI 启动器（启动/停止后台、端口设置、日志查看）
+├─ TokenMonitor.exe     ← GUI 启动器（原生 Rust Win32，零运行时依赖：启动/停止后台、端口设置、日志查看）
 ├─ manifest.json        ← 完整性清单（逐文件 bytes/sha256）
 └─ runtime\             ← 全部运行库（根目录不再出现 node.exe）
    ├─ node.exe
@@ -122,22 +120,22 @@ dist\windows-x64\
 ```
 
 绿色版直接使用：双击 `TokenMonitor.exe`（GUI）或 `runtime\tokenmonitor.cmd serve`（CLI）；
-首次运行自动创建 `<包根>\data` 并把旧位置 `~/.tokenmeter` 的库迁移过来（见第 3 节）。
+首次运行自动创建 `<包根>\data`；打包运行只使用包根内的新数据目录（见第 3 节）。
 
 ## 8. 卸载与数据备份
 
 ```powershell
-node bin\tokenwatcher.js uninstall-agent        # 只删除 TokenMonitor-Server 任务
+node bin\tokenmonitor.js uninstall-agent        # 只删除 TokenMonitor-Server 任务
 # 移除程序本身：安装版运行 scripts\uninstall-windows.ps1；
 # 卸载默认把 <安装目录>\data 移到 %LOCALAPPDATA%\Programs\TokenMonitor-data 保留
 # 移除绿色版：删除解压目录即可（data\ 在目录内，一并移走）
-Remove-Item "$env:USERPROFILE\.tokenmeter" -Recurse -Force
+Remove-Item "$env:USERPROFILE\.tokenmonitor" -Recurse -Force
 ```
 
 备份（建议先停止后台进程，获得一致快照；目标路径含空格/中文同样加引号）：
 
 ```powershell
-Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Recurse -Force
+Copy-Item "$env:USERPROFILE\.tokenmonitor" "D:\备份路径\tokenmonitor-backup" -Recurse -Force
 ```
 
 ## 9. Windows 与 macOS 命令差异
@@ -145,9 +143,9 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 | 事项 | Windows | macOS |
 | --- | --- | --- |
 | 自启安装/卸载 | 当前用户任务计划 `TokenMonitor-Server`（schtasks，免管理员） | 当前用户 LaunchAgent（launchctl + plist） |
-| 核对自启 | `schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST` | `launchctl print gui/$(id -u)/com.tokenmeter.server` |
+| 核对自启 | `schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST` | `launchctl print gui/$(id -u)/com.tokenmonitor.server` |
 | `bar` | 启动系统托盘（✅ #9）；托盘 EXE 缺失时明确提示面板地址 | 打开菜单栏胶囊 |
-| 数据目录 | `%USERPROFILE%\.tokenmeter` | `~/.tokenmeter` |
+| 数据目录 | `%USERPROFILE%\.tokenmonitor` | `~/.tokenmonitor` |
 | 停止后台 | `serve` 窗口 Ctrl+C（SIGBREAK 同样受控关闭） | `launchctl bootout` 或 Ctrl+C |
 | 路径引用 | PowerShell 中含空格/中文路径一律加引号 | 多数场景无需引号 |
 
@@ -156,17 +154,17 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 ## 10. 隐私边界
 
 - 面板只监听 `127.0.0.1` 并校验 `Host` 头，本机外部进程与浏览器页面无法跨源读取（[../src/server.js](../src/server.js)）。
-- 不上传任何会话数据；`TOKENMETER_OFFLINE=1` 下完全不出网。
+- 不上传任何会话数据；`TOKENMONITOR_OFFLINE=1` 下完全不出网。
 - 任务计划 XML 不含秘密；日志自动脱敏（第 6 节）。
 - 余额轮询只在配置了对应 API Key 时访问厂商接口，离线模式整体跳过。
 
 ## 11. 能力与证据总表
 
-实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMETER_OFFLINE=1`）运行且退出码 0。
+实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMONITOR_OFFLINE=1`）运行且退出码 0。
 
 | 能力 | 状态 | 任务/commit | 代码 | 测试 |
 | --- | --- | --- | --- | --- |
-| CLI help/version/status/错误码 | ✅ | #10 `65d0f21` | [../bin/tokenwatcher.js](../bin/tokenwatcher.js) | [cli.test.mjs](../test/windows/cli.test.mjs) |
+| CLI help/version/status/错误码 | ✅ | #10 `65d0f21` | [../bin/tokenmonitor.js](../bin/tokenmonitor.js) | [cli.test.mjs](../test/windows/cli.test.mjs) |
 | 当前用户任务计划自启 | ✅ | #8 `035627c` | [windows-service.js](../src/platform/windows-service.js) | [service.test.mjs](../test/windows/service.test.mjs) |
 | 来源注册表与 Windows 根目录发现 | ✅ | #2 `6af9e76` | [../src/source-registry.js](../src/source-registry.js)、[../src/sources/](../src/sources/) | 各来源专项测试 |
 | Claude/ccmr/Codex JSONL 兼容 | ✅ | #3 `ce8a39f` | [claude.js](../src/collectors/claude.js) 等 | [jsonl-a.test.mjs](../test/windows/jsonl-a.test.mjs) |
@@ -180,28 +178,32 @@ Copy-Item "$env:USERPROFILE\.tokenmeter" "D:\备份路径\tokenmeter-backup" -Re
 | 非管理员安装器（安装/升级/卸载/回滚） | ✅ | #13 `558380a`/`50fab85` | [install-windows.ps1](../scripts/install-windows.ps1)、[uninstall-windows.ps1](../scripts/uninstall-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
 | EXE 覆盖式构建（dist/windows-x64 + manifest） | ✅ | #12 `c5db723` | [build-windows.ps1](../scripts/build-windows.ps1) | —（验收轮实跑验证） |
 | 面板来源元数据动态展示（/api/sources + 回退色） | ✅ | #16 `eedf2c4` | [../src/server.js](../src/server.js)、[../web/lib/sources.js](../web/lib/sources.js) | [ui-sources.test.mjs](../test/windows/ui-sources.test.mjs) |
+| 数据目录便携化（打包形态 <根>\data + 旧库迁移） | ✅ | #23 `d568ba2` | [../src/config.js](../src/config.js)、[../src/platform/runtime.js](../src/platform/runtime.js) | [runtime.test.mjs](../test/windows/runtime.test.mjs) |
+| 运行包布局 v2（根 GUI exe + runtime\） | ✅ | #25 `71a04e2` | [build-windows.ps1](../scripts/build-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
+| GUI 启动器（原生 Rust Win32，≤2MB 零依赖） | ✅ | #24 `18c9047`，#28 Rust 重写 | [windows/gui/](../windows/gui/) | [gui.test.mjs](../test/windows/gui.test.mjs) |
 | 新来源 Antigravity（~/.gemini/antigravity SQLite） | ✅ | #20 `71697ce` | [antigravity.js](../src/collectors/antigravity.js) | [antigravity.test.mjs](../test/sources/antigravity/antigravity.test.mjs) |
 | 新来源 TRAE / Hermes | ⛔ Pending（blocker：本地无用量数据面） | #18 / #19 | — | — |
 
 ### 本次核验命令与退出码
 
-实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMETER_OFFLINE=1`）运行且退出码 0。
+实测环境：Windows x64，Node v24.14.0，2026-09-18 刷新；除注明外均为离线（`TOKENMONITOR_OFFLINE=1`）运行且退出码 0。
 
 ```text
-TOKENMETER_OFFLINE=1 node test/windows/cli.test.mjs              exit 0
-TOKENMETER_OFFLINE=1 node test/windows/service.test.mjs          exit 0
-TOKENMETER_OFFLINE=1 node test/windows/jsonl-a.test.mjs          exit 0
-TOKENMETER_OFFLINE=1 node test/windows/jsonl-b.test.mjs          exit 0
-TOKENMETER_OFFLINE=1 node test/windows/sqlite-sources.test.mjs   exit 0
-TOKENMETER_OFFLINE=1 node test/windows/dsh.test.mjs              exit 0
-TOKENMETER_OFFLINE=1 node test/windows/watch.test.mjs            exit 0
-TOKENMETER_OFFLINE=1 node test/windows/runtime.test.mjs          exit 0
-TOKENMETER_OFFLINE=1 node test/windows/tray.test.mjs             exit 0
-TOKENMETER_OFFLINE=1 node test/windows/installer.test.mjs        exit 0
-TOKENMETER_OFFLINE=1 node test/windows/ui-sources.test.mjs       exit 0
-TOKENMETER_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs  exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/cli.test.mjs              exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/service.test.mjs          exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/jsonl-a.test.mjs          exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/jsonl-b.test.mjs          exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/sqlite-sources.test.mjs   exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/dsh.test.mjs              exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/watch.test.mjs            exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/runtime.test.mjs          exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/tray.test.mjs             exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/gui.test.mjs              exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/installer.test.mjs        exit 0
+TOKENMONITOR_OFFLINE=1 node test/windows/ui-sources.test.mjs       exit 0
+TOKENMONITOR_OFFLINE=1 node test/sources/antigravity/antigravity.test.mjs  exit 0
 node test/windows/ci-smoke.mjs                                   exit 0
 npm test（在线全量）                                              exit 0，全部通过
-node bin/tokenwatcher.js --version / --help / status             exit 0
-node bin/tokenwatcher.js <未知命令> / serve --port 0              exit 2
+node bin/tokenmonitor.js --version / --help / status             exit 0
+node bin/tokenmonitor.js <未知命令> / serve --port 0              exit 2
 ```

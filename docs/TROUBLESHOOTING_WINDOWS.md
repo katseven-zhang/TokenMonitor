@@ -6,7 +6,7 @@
 
 ```powershell
 cd <仓库目录>
-node bin\tokenwatcher.js status      # 后台在线/离线、端口、数据目录、数据库在否、离线模式
+node bin\tokenmonitor.js status      # 后台在线/离线、端口、数据目录、数据库在否、离线模式
 Get-Content "$env:LOCALAPPDATA\TokenMonitor\logs\tokenmonitor.log" -Tail 50 -ErrorAction SilentlyContinue
 schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 核对自启任务（装了自启才有）
 ```
@@ -28,8 +28,8 @@ tasklist /FI "PID eq <上一步的PID>"
 
 **处置**：
 
-- 首选换端口：`node bin\tokenwatcher.js serve --port 9001`（自启用户改用 `install-agent --port 9001` 重新注册）。
-- 只有在确认占用者是**本产品的旧实例**时才结束它：先用 `Get-CimInstance Win32_Process -Filter "ProcessId=<PID>" | Select-Object CommandLine` 核对命令行里是否有 `tokenwatcher`/`serve --port` 字样，确认后再 `Stop-Process -Id <PID>`。
+- 首选换端口：`node bin\tokenmonitor.js serve --port 9001`（自启用户改用 `install-agent --port 9001` 重新注册）。
+- 只有在确认占用者是**本产品的实例**时才结束它：先用 `Get-CimInstance Win32_Process -Filter "ProcessId=<PID>" | Select-Object CommandLine` 核对命令行里是否有 `tokenmonitor`/`serve --port` 字样，确认后再 `Stop-Process -Id <PID>`。
 - 系统绝不自动抢占端口，也绝不误杀无关 node.exe（单实例锁按数据目录+端口作用域，重复启动返回 `already_running`，见 [../src/platform/runtime.js](../src/platform/runtime.js)；测试 [../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)）。
 
 ## 2. 任务计划安装 / 自启失败（✅ #8 能力，故障定位）
@@ -40,7 +40,7 @@ tasklist /FI "PID eq <上一步的PID>"
 
 ```powershell
 schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 任务是否存在、上次运行结果
-node bin\tokenwatcher.js install-agent --force           # 覆盖式重建任务
+node bin\tokenmonitor.js install-agent --force           # 覆盖式重建任务
 ```
 
 - **任务已存在**：直接重跑 `install-agent` 即为覆盖更新；`--force` 语义相同。
@@ -83,7 +83,7 @@ npm ci        # 或 npm install
 
 - 安装自启、扫描、面板均为**普通用户权限**操作，不要用管理员身份运行任务计划（LeastPrivilege 设计）。
 - `EPERM`：单实例锁探测 PID 时，`EPERM` 表示进程仍在（权限不足以发信号），按“已在运行”处理而非误判为死进程（[../src/platform/runtime.js](../src/platform/runtime.js)）。
-- 数据库/日志目录位于用户目录（`%USERPROFILE%\.tokenmeter`、`%LOCALAPPDATA%\TokenMonitor`），不需要对仓库目录或系统目录写权限；若被重定向到受保护目录，检查 `LOCALAPPDATA`/`USERPROFILE` 环境变量。
+- 数据库/日志目录位于用户目录（`%USERPROFILE%\.tokenmonitor`、`%LOCALAPPDATA%\TokenMonitor`），不需要对仓库目录或系统目录写权限；若被重定向到受保护目录，检查 `LOCALAPPDATA`/`USERPROFILE` 环境变量。
 
 ## 8. 日志里出现 [REDACTED]
 
@@ -91,5 +91,5 @@ npm ci        # 或 npm install
 
 ## 9. 已知遗留问题（非阻断）
 
-- 离线模式（`TOKENMETER_OFFLINE=1`）下运行全量 `npm test`，其中两项熔断（circuit breaker）断言存在**环境性假红**；在线运行 `npm test` 全部通过（2026-09-17 实测 exit 0）。该项已登记为 #14 的后继改进，不影响 `scan`/`serve` 功能。
+- 离线模式（`TOKENMONITOR_OFFLINE=1`）下运行全量 `npm test`，其中两项熔断（circuit breaker）断言存在**环境性假红**；在线运行 `npm test` 全部通过（2026-09-17 实测 exit 0）。该项已登记为 #14 的后继改进，不影响 `scan`/`serve` 功能。
 - 离线专项测试（`test/windows/*.test.mjs`、`ci-smoke.mjs`）不受此影响，2026-09-17 实测全部 exit 0。

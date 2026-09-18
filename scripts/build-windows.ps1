@@ -81,17 +81,14 @@ if (-not ((Test-Path -LiteralPath $echartsMin) -and (Test-Path -LiteralPath $fzs
 }
 if (-not (Test-Path -LiteralPath $echartsMin)) { Fail "missing $echartsMin after npm ci" }
 
-# --- 4b. GUI launcher exe (#24): use the published artifact, else dotnet publish now ---
+# --- 4b. GUI launcher exe (#28, native Rust Win32): use the published artifact, else build via windows\gui\build.ps1 ---
 $guiExe = Join-Path $repoFull 'windows\gui\publish\TokenMonitorGui.exe'
 if (-not (Test-Path -LiteralPath $guiExe)) {
-  Write-Host '[build] GUI exe missing, publishing windows\gui (dotnet 8 SDK required)...'
-  & dotnet publish (Join-Path $repoFull 'windows\gui\TokenMonitorGui.csproj') `
-    -c Release -r win-x64 --self-contained true `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-    -o (Join-Path $repoFull 'windows\gui\publish')
-  if ($LASTEXITCODE -ne 0) { Fail 'GUI publish failed (dotnet 8 SDK required; or run windows\gui\build.ps1 first)' }
+  Write-Host '[build] GUI exe missing, building windows\gui (Rust toolchain required)...'
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoFull 'windows\gui\build.ps1')
+  if ($LASTEXITCODE -ne 0) { Fail 'GUI build failed (Rust toolchain required; or run windows\gui\build.ps1 first)' }
 }
-if (-not (Test-Path -LiteralPath $guiExe)) { Fail "GUI launcher missing after publish: $guiExe" }
+if (-not (Test-Path -LiteralPath $guiExe)) { Fail "GUI launcher missing after build: $guiExe" }
 
 # --- 5. clean ONLY the fixed output directory (path validated first) -----------
 $dist = Join-Path $repoFull 'dist\windows-x64'
@@ -124,7 +121,7 @@ try {
 
   # CLI launcher inside runtime\: %~dp0 resolves to runtime\, where node.exe and
   # bin\ both live, so the script keeps working from the new layout.
-  $lines = @('@echo off', '"%~dp0node.exe" "%~dp0bin\tokenwatcher.js" %*', 'exit /b %ERRORLEVEL%')
+  $lines = @('@echo off', '"%~dp0node.exe" "%~dp0bin\tokenmonitor.js" %*', 'exit /b %ERRORLEVEL%')
   [System.IO.File]::WriteAllText((Join-Path $runtime 'tokenmonitor.cmd'), ($lines -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
 
   # --- 7. forbidden content scan (runtime artifacts / secrets must not ship) ---

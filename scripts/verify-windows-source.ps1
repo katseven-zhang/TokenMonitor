@@ -29,11 +29,11 @@ if (Test-Path (Join-Path $Root 'node_modules')) {
   New-Item -ItemType Junction -Path (Join-Path $Work 'node_modules') -Target (Join-Path $Root 'node_modules') | Out-Null
 }
 
-$env:TOKENMETER_OFFLINE = '1'
+$env:TOKENMONITOR_OFFLINE = '1'
 Push-Location $Work
 try {
-  Log "node --check bin/tokenwatcher.js"
-  & node --check .\bin\tokenwatcher.js
+  Log "node --check bin/tokenmonitor.js"
+  & node --check .\bin\tokenmonitor.js
   if ($LASTEXITCODE -ne 0) { Fail "node --check failed ($LASTEXITCODE)" }
 
   Log "ci-smoke"
@@ -41,7 +41,7 @@ try {
   if ($LASTEXITCODE -ne 0) { Fail "ci-smoke failed ($LASTEXITCODE)" }
 
   Log "CLI --help"
-  & node .\bin\tokenwatcher.js --help | Out-Null
+  & node .\bin\tokenmonitor.js --help | Out-Null
   if ($LASTEXITCODE -ne 0) { Fail "help failed ($LASTEXITCODE)" }
 }
 catch {

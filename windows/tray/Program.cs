@@ -52,7 +52,7 @@ internal static class Program
         if (string.IsNullOrEmpty(_backendExe))
         {
             _startRestartItem.Enabled = false;
-            _startRestartItem.ToolTipText = "未找到后端启动命令（需要 node.exe 与 bin/tokenwatcher.js）";
+            _startRestartItem.ToolTipText = "未找到后端启动命令（需要 node.exe 与 bin/tokenmonitor.js）";
         }
 
         var menu = new ContextMenuStrip();
@@ -132,14 +132,14 @@ internal static class Program
     {
         var exeDir = AppContext.BaseDirectory;
         var localNode = Path.Combine(exeDir, "node.exe");
-        var localScript = Path.Combine(exeDir, "bin", "tokenwatcher.js");
+        var localScript = Path.Combine(exeDir, "bin", "tokenmonitor.js");
         if (File.Exists(localNode) && File.Exists(localScript))
         {
             _backendExe = localNode;
             _backendArgs = $"\"{localScript}\" serve --port {_port}";
             return;
         }
-        var repoScript = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "bin", "tokenwatcher.js"));
+        var repoScript = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", "bin", "tokenmonitor.js"));
         if (File.Exists(repoScript))
         {
             // 开发布局：publish 输出在 <repo>\windows\tray\publish 下，仓库根再往上三级
@@ -158,7 +158,7 @@ internal static class Program
     {
         if (string.IsNullOrEmpty(_backendExe))
         {
-            ShowTip("未找到后端启动命令（需要 node.exe 与 bin/tokenwatcher.js）");
+            ShowTip("未找到后端启动命令（需要 node.exe 与 bin/tokenmonitor.js）");
             return;
         }
         try

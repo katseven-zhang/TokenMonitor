@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleName</key><string>token-watcher</string>
-  <key>CFBundleDisplayName</key><string>Token Stats</string>
-  <key>CFBundleIdentifier</key><string>com.tokenwatcher.bar</string>
+  <key>CFBundleName</key><string>tokenmonitor</string>
+  <key>CFBundleDisplayName</key><string>TokenMonitor</string>
+  <key>CFBundleIdentifier</key><string>com.tokenmonitor.bar</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleExecutable</key><string>token-watcher</string>
+  <key>CFBundleExecutable</key><string>tokenmonitor</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSUserNotificationsUsageDescription</key><string>配额与余额阈值提醒</string>

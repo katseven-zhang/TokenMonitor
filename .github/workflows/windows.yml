@@ -7,7 +7,7 @@ on:
 
 # Verification only. No secrets, no publish, no artifact upload of DBs/logs.
 env:
-  TOKENMETER_OFFLINE: '1'
+  TOKENMONITOR_OFFLINE: '1'
 
 jobs:
   windows-smoke:
@@ -34,8 +34,8 @@ jobs:
         run: node test/windows/ci-smoke.mjs
       - name: CLI help/version
         run: |
-          node bin/tokenwatcher.js --help
-          node bin/tokenwatcher.js --version
+          node bin/tokenmonitor.js --help
+          node bin/tokenmonitor.js --version
       - name: Chinese-path local verifier
         run: powershell -NoProfile -File scripts/verify-windows-source.ps1
 

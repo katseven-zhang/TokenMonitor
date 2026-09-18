@@ -1,4 +1,4 @@
-/* Token Watcher 面板：fetch /api/summary 渲染，SSE 实时刷新。
+/* TokenMonitor 面板：fetch /api/summary 渲染，SSE 实时刷新。
  * 纯逻辑（格式化/系列选择/配色/悬浮框定位）在 lib/ 下，可被 test/run.mjs 直接 import。
  * ECharts 走全局 UMD（index.html 里的 <script>），不参与模块图。 */
 import { esc, fmt, fmtShort, hhmm, ymd } from './lib/format.js';
