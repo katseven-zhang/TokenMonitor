@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 export const HOME = homedir();
@@ -19,8 +20,80 @@ export { SOURCES, SOURCE_ERRORS } from './source-registry.js';
  */
 export const isOffline = () => process.env.TOKENMETER_OFFLINE === '1';
 
-export const DATA_DIR = join(HOME, '.tokenmeter');
+/**
+ * 打包/安装形态检测：从本文件位置向上最多 maxUp 层找 manifest.json，且内容必须
+ * 带 TokenMonitor/windows 标记（构建清单写入的字段）。仓库源码运行没有该清单，
+ * 返回 null；这样 dist\windows-x64 与安装目录（<根>\manifest.json + <根>\runtime\src）
+ * 命中两层，仓库与任意上级目录不会误判。
+ */
+export function detectAppRoot({
+  from = import.meta.dirname,
+  maxUp = 2,
+  exists = existsSync,
+  read = readFileSync,
+} = {}) {
+  let dir = from;
+  for (let i = 0; i <= maxUp; i++) {
+    const marker = join(dir, 'manifest.json');
+    if (exists(marker)) {
+      try {
+        const j = JSON.parse(read(marker, 'utf8'));
+        if (j && j.name === 'TokenMonitor' && j.os === 'windows') return dir;
+      } catch { /* 损坏的清单不构成标记 */ }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * 数据位置解析（#23，优先级从高到低）：
+ * 1. TOKENMETER_DATA_DIR 环境变量——显式指定，数据库/日志/锁/设置统一落该目录；
+ * 2. 打包/安装形态（检测到应用根）——统一落 <应用根>\data，用户看得见、随包走；
+ * 3. 源码运行形态——维持既有默认：数据库 ~/.tokenmeter，运行数据（日志/锁）
+ *    %LOCALAPPDATA%\TokenMonitor（非 Windows 或缺 LOCALAPPDATA 时退回 ~/.tokenmeter）。
+ */
+export function resolveDataLocations({
+  env = process.env,
+  home = HOME,
+  platform = process.platform,
+  appRoot,
+  detect = detectAppRoot,
+} = {}) {
+  const root = appRoot !== undefined ? appRoot : detect();
+  if (env.TOKENMETER_DATA_DIR) {
+    return {
+      portable: false,
+      forced: true,
+      appRoot: root,
+      dbDir: env.TOKENMETER_DATA_DIR,
+      runtimeDir: env.TOKENMETER_DATA_DIR,
+    };
+  }
+  if (root) {
+    const data = join(root, 'data');
+    return { portable: true, forced: false, appRoot: root, dbDir: data, runtimeDir: data };
+  }
+  return {
+    portable: false,
+    forced: false,
+    appRoot: null,
+    dbDir: join(home, '.tokenmeter'),
+    runtimeDir: platform === 'win32' && env.LOCALAPPDATA
+      ? join(env.LOCALAPPDATA, 'TokenMonitor')
+      : join(home, '.tokenmeter'),
+  };
+}
+
+const LOCATIONS = resolveDataLocations();
+
+export const DATA_DIR = LOCATIONS.dbDir;
 export const DB_PATH = join(DATA_DIR, 'tokenmeter.db');
+/** 运行数据目录（日志/锁/GUI 设置）。源码形态与 DATA_DIR 不同，打包/强制形态二者相同。 */
+export const RUNTIME_DATA_DIR = LOCATIONS.runtimeDir;
+export const DATA_LOCATIONS = LOCATIONS;
 export const DEFAULT_PORT = 8787;
 export const WEB_DIR = join(import.meta.dirname, '..', 'web');
 /**

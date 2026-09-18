@@ -2,7 +2,7 @@
  * Win-Runtime：单实例锁、日志脱敏与轮转、端口冲突诊断与受控关闭。
  * 运行：TOKENMETER_OFFLINE=1 node test/windows/runtime.test.mjs
  */
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +18,9 @@ import {
   RuntimeManager,
   getLockFilePath,
   getDefaultDataDir,
+  migratePortableData,
 } from '../../src/platform/runtime.js';
+import { detectAppRoot, resolveDataLocations } from '../../src/config.js';
 import { startServer } from '../../src/server.js';
 import { Store } from '../../src/store.js';
 
@@ -32,6 +34,7 @@ const ok = (name, cond, detail = '') => {
 
 const TEMP_BASE = mkdtempSync(join(tmpdir(), 'runtime-测试 空格-'));
 console.log(`[test setup] temp directory: ${TEMP_BASE}`);
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 // ==========================================
 // 1. 单实例锁：作用域、并发竞争与陈旧锁恢复
@@ -277,6 +280,111 @@ console.log('\n[runtime lifecycle] RuntimeManager 资源接管与受控停止');
   // 幂等重复停止
   const stopAgain = await manager.shutdown('controlled');
   ok('重复关闭幂等安全返回', stopAgain.closed === true && stopAgain.already === true);
+}
+
+// ==========================================
+// 7. 数据位置三级解析（#23）：env > 打包形态 data\ > 源码默认
+// ==========================================
+console.log('\n[data locations] TOKENMETER_DATA_DIR / manifest 打包形态 / 源码默认');
+{
+  const home = join('D:\\', 'Users', 'Test User', '我的 项目');
+  const localAppData = join(home, 'AppData', 'Local');
+
+  // 源码形态：无 env、无 manifest
+  const src = resolveDataLocations({ env: { LOCALAPPDATA: localAppData }, home, platform: 'win32', appRoot: null });
+  ok('源码形态 DB 目录 = ~/.tokenmeter', src.dbDir === join(home, '.tokenmeter'), JSON.stringify(src));
+  ok('源码形态运行目录 = %LOCALAPPDATA%\\TokenMonitor', src.runtimeDir === join(localAppData, 'TokenMonitor'), JSON.stringify(src));
+  ok('源码形态非便携', src.portable === false && src.forced === false && src.appRoot === null);
+
+  // 缺 LOCALAPPDATA 时运行目录退回 ~/.tokenmeter
+  const srcNoLa = resolveDataLocations({ env: {}, home, platform: 'win32', appRoot: null });
+  ok('缺 LOCALAPPDATA 时运行目录退回 ~/.tokenmeter', srcNoLa.runtimeDir === join(home, '.tokenmeter'), JSON.stringify(srcNoLa));
+
+  // 非 Windows 平台运行目录同 DB 目录
+  const bare = resolveDataLocations({ env: { LOCALAPPDATA: localAppData }, home, platform: 'darwin', appRoot: null });
+  ok('非 Windows 平台运行目录同 DB 目录', bare.runtimeDir === join(home, '.tokenmeter'), JSON.stringify(bare));
+
+  // 打包形态：应用根命中 → 统一落 <根>\data（路径含空格）
+  const appRoot = join('D:\\', 'Programs', 'Token Monitor', '发行');
+  const portable = resolveDataLocations({ env: {}, home, platform: 'win32', appRoot });
+  ok('打包形态 DB 与运行目录统一 = <根>\\data',
+    portable.dbDir === join(appRoot, 'data') && portable.runtimeDir === join(appRoot, 'data'), JSON.stringify(portable));
+  ok('打包形态 portable=true', portable.portable === true && portable.forced === false);
+
+  // env 覆盖优先级最高（含中文与反斜杠），且压过打包形态
+  const envDir = join('E:\\', '监控数据', '数据目录');
+  const forced = resolveDataLocations({ env: { TOKENMETER_DATA_DIR: envDir }, home, platform: 'win32', appRoot });
+  ok('env 覆盖优先于打包形态与默认', forced.dbDir === envDir && forced.runtimeDir === envDir && forced.forced === true, JSON.stringify(forced));
+
+  // getDefaultDataDir 跟随运行目录解析
+  ok('getDefaultDataDir 返回运行目录', getDefaultDataDir() === resolveDataLocations({}).runtimeDir, getDefaultDataDir());
+}
+
+console.log('\n[app-root detect] manifest 标记检测（含损坏/伪造清单）');
+{
+  const root = join(TEMP_BASE, 'pkg-root');
+  const runtimeSrc = join(root, 'runtime', 'src');
+  mkdirSync(runtimeSrc, { recursive: true });
+
+  const files = new Map();
+  const exists = (p) => files.has(p);
+  const read = (p) => files.get(p);
+  const probe = () => detectAppRoot({ from: runtimeSrc, maxUp: 2, exists, read });
+
+  ok('无清单时不误判', probe() === null);
+
+  files.set(join(root, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', os: 'windows', arch: 'x64' }));
+  ok('两层上的 TokenMonitor 清单命中应用根', probe() === root, String(probe()));
+
+  files.set(join(root, 'manifest.json'), JSON.stringify({ name: 'OtherApp', os: 'windows' }));
+  ok('名字不符的清单不算标记', probe() === null);
+
+  files.set(join(root, 'manifest.json'), '{ corrupt json …');
+  ok('损坏清单不算标记', probe() === null);
+
+  files.set(join(root, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', os: 'windows' }));
+  ok('maxUp=1 时不越层命中', detectAppRoot({ from: runtimeSrc, maxUp: 1, exists, read }) === null);
+  ok('显式 appRoot 传参跳过检测', resolveDataLocations({ env: {}, appRoot: root }).portable === true);
+}
+
+console.log('\n[portable migration] 旧库复制、幂等与不删旧数据');
+{
+  const legacy = join(TEMP_BASE, 'legacy-.tokenmeter');
+  const dataDir = join(TEMP_BASE, 'pkg-data');
+  mkdirSync(legacy, { recursive: true });
+  writeFileSync(join(legacy, 'tokenmeter.db'), 'OLD-DB-BYTES', 'utf8');
+  writeFileSync(join(legacy, 'pricing.json'), '{"usd":7.2}', 'utf8');
+
+  const moved = migratePortableData({ dataDir, legacyDir: legacy });
+  ok('首跑迁移 DB 与 pricing', moved.includes('tokenmeter.db') && moved.includes('pricing.json'), JSON.stringify(moved));
+  ok('迁移后目标可读', readFileSync(join(dataDir, 'tokenmeter.db'), 'utf8') === 'OLD-DB-BYTES');
+  ok('旧文件保留不删除', existsSync(join(legacy, 'tokenmeter.db')) && existsSync(join(legacy, 'pricing.json')));
+  ok('无临时残留文件', !readdirSync(dataDir).some((f) => f.includes('.tmp')));
+
+  // 目标已有 → 跳过（不覆盖新数据）
+  writeFileSync(join(dataDir, 'tokenmeter.db'), 'NEW-DB-BYTES', 'utf8');
+  const moved2 = migratePortableData({ dataDir, legacyDir: legacy });
+  ok('目标已存在时跳过不覆盖', moved2.length === 0 && readFileSync(join(dataDir, 'tokenmeter.db'), 'utf8') === 'NEW-DB-BYTES');
+
+  // 无源无操作 / 同目录无操作
+  ok('旧目录不存在时无操作', migratePortableData({ dataDir, legacyDir: join(TEMP_BASE, 'not-exist') }).length === 0);
+  ok('legacy 与目标相同直接返回空', migratePortableData({ dataDir: legacy, legacyDir: legacy }).length === 0);
+}
+
+console.log('\n[data locations e2e] TOKENMETER_DATA_DIR 下 status 指向该目录');
+{
+  const { spawnSync } = await import('node:child_process');
+  const forcedDir = join(TEMP_BASE, 'forced-data-中文');
+  const res = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenwatcher.js'), 'status'], {
+    encoding: 'utf8',
+    timeout: 30000,
+    env: { ...process.env, TOKENMETER_DATA_DIR: forcedDir, TOKENMETER_OFFLINE: '1' },
+    windowsHide: true,
+  });
+  const out = res.stdout || '';
+  ok('status exit 0', res.status === 0, `exit=${res.status} ${String(res.stderr || '').slice(0, 120)}`);
+  ok('status data_dir 指向 env 目录（含中文）', out.includes(`data_dir: ${forcedDir}`), out.trim());
+  ok('status 不创建数据库', !existsSync(join(forcedDir, 'tokenmeter.db')));
 }
 
 // 清理临时目录

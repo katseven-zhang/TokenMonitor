@@ -48,8 +48,15 @@ node bin\tokenwatcher.js serve    # 启动后台与本地面板，默认 http://
 
 ## 3. 数据目录与端口
 
-- **数据库**：`%USERPROFILE%\.tokenmeter\tokenmeter.db`（[../src/config.js](../src/config.js)）。旧目录 `%USERPROFILE%\.token-stats` 会在首次运行 `scan`/`serve`/`today` 时自动改名迁移（幂等；仅当新目录不存在时执行，见 [../bin/tokenwatcher.js](../bin/tokenwatcher.js) 的 `migrateLegacyHome`）。
-- **运行锁与日志目录（🟡 评审通过待集成，#11）**：默认 `%LOCALAPPDATA%\TokenMonitor`（未设置 `LOCALAPPDATA` 时退回 `~/.tokenmeter`）；单实例锁文件为 `tokenmonitor-<端口>.lock`；日志在其 `logs\` 子目录（见第 6 节）。实现：[../src/platform/runtime.js](../src/platform/runtime.js)；测试：[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
+数据位置按三级优先解析（见 [../src/config.js](../src/config.js) 的 `resolveDataLocations`）：
+
+1. **环境变量 `TOKENMETER_DATA_DIR`**：显式指定，数据库、日志、锁、设置全部落到该目录（最高优先，测试/自定义场景用）。
+2. **打包/安装形态**：应用根存在 `manifest.json`（构建清单，含 `name: TokenMonitor` 标记）即视为打包形态——数据库、日志、锁、设置统一落在 **`<应用根>\data`**，用户看得见、随目录走（便携式）。
+3. **源码运行形态**：维持既有默认——数据库 `%USERPROFILE%\.tokenmeter\tokenmeter.db`（[../src/config.js](../src/config.js)）；运行数据（日志、锁文件）在 `%LOCALAPPDATA%\TokenMonitor`（[../src/platform/runtime.js](../src/platform/runtime.js)）。旧目录 `%USERPROFILE%\.token-stats` 会在首次运行 `scan`/`serve`/`today` 时自动改名迁移（幂等；仅当新目录不存在时执行，见 [../bin/tokenwatcher.js](../bin/tokenwatcher.js) 的 `migrateLegacyHome`）。
+
+**打包形态首跑迁移**：老位置 `~/.tokenmeter` 已有数据库而新 `data\` 还没有时，启动会自动把 `tokenmeter.db` 与 `pricing.json` **复制**到 `data\`（旧文件保留不删；目标已存在则跳过，不会覆盖新数据；经临时文件落盘再改名，中断不留半截文件）。实现与测试见 [../src/platform/runtime.js](../src/platform/runtime.js) `migratePortableData`、[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
+
+- **单实例锁**：`tokenmonitor-<端口>.lock`，位于上述运行数据目录；重复启动返回 `already_running` 与已运行 PID。
 - **端口**：默认 `8787`；`--port N`（1–65535）对 serve/status/install-agent/bar 均可用，非法值直接报错退出。服务只绑定 `127.0.0.1` 回环并校验 `Host` 头（DNS rebinding 防护，[../src/server.js](../src/server.js)）。
 - **离线模式**：设置 `$env:TOKENMETER_OFFLINE='1'` 后，汇率、LiteLLM 牌价表、厂商余额三类外网请求全部跳过，改用本地缓存 / 内置牌价 / 种子价继续出数（[../src/config.js](../src/config.js)）。CI 与 Windows 专项测试默认离线运行。
 

@@ -21,7 +21,8 @@ import { Store } from '../src/store.js';
 import { Scanner } from '../src/scanner.js';
 import { startServer } from '../src/server.js';
 import { BalancePoller } from '../src/balance.js';
-import { DB_PATH, DEFAULT_PORT, DATA_DIR } from '../src/config.js';
+import { DB_PATH, DEFAULT_PORT, DATA_DIR, DATA_LOCATIONS } from '../src/config.js';
+import { migratePortableData } from '../src/platform/runtime.js';
 
 const log = (msg) => console.log(`[token-watcher] ${msg}`);
 const err = (msg) => console.error(`[token-watcher] ${msg}`);
@@ -198,6 +199,10 @@ if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
 }
 
 migrateLegacyHome();
+// 便携/强制数据目录首跑迁移：老 ~/.tokenmeter 有库而新位置没有时复制过来（#23）
+if (DATA_LOCATIONS.dbDir !== join(homedir(), '.tokenmeter')) {
+  migratePortableData({ dataDir: DATA_LOCATIONS.dbDir, log });
+}
 const store = new Store(DB_PATH);
 
 if (cmd === 'scan') {
