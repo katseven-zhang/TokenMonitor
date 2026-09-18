@@ -68,6 +68,23 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   dedup_key TEXT NOT NULL UNIQUE
 );
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(ts);
+
+-- Codex 配额快照历史（#45）：primary/secondary/monthly 每窗口逐采样点一行。
+-- PRIMARY KEY(window_kind, ts) 保证同一采集点重复写入不产生重复样本；
+-- 显式 0 保留为 0，缺失字段存 NULL（绝不伪造样本）。
+CREATE TABLE IF NOT EXISTS codex_quota_history (
+  window_kind TEXT NOT NULL,              -- primary | secondary | monthly
+  ts INTEGER NOT NULL,                    -- 采样时刻（ms）
+  window_id TEXT NOT NULL,                -- 窗口标识 kind:resets_at_ms（重置后必变化）
+  used REAL,                              -- 由 used_percent×capacity 推导；未知为 NULL
+  capacity REAL,
+  remaining REAL,
+  used_percent REAL,
+  resets_at_ms INTEGER,
+  raw TEXT NOT NULL,                      -- #44 规范化窗口对象全量 JSON
+  PRIMARY KEY (window_kind, ts)           -- 同点重复写入不产生重复样本
+);
+CREATE INDEX IF NOT EXISTS idx_codex_qh_window ON codex_quota_history(window_kind, ts);
 `;
 
 /** 增量迁移：旧库补列、模型名归一（幂等，每次启动跑一遍，DISTINCT 很小） */
@@ -157,6 +174,18 @@ export class Store {
       INSERT INTO quota (tool, ts, data) VALUES (?, ?, ?)
       ON CONFLICT(tool) DO UPDATE SET ts = excluded.ts, data = excluded.data
       WHERE excluded.ts > quota.ts`); // 只接受更新的快照，扫描顺序无关
+    // Codex 配额历史（#45）：同 (window_kind, ts) 重复写入由主键去重
+    this._insertCodexQuotaHistory = this.db.prepare(`
+      INSERT OR IGNORE INTO codex_quota_history
+        (window_kind, ts, window_id, used, capacity, remaining, used_percent, resets_at_ms, raw)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    this._codexQuotaHistoryQuery = this.db.prepare(`
+      SELECT window_kind, ts, window_id, used, capacity, remaining, used_percent, resets_at_ms, raw
+      FROM codex_quota_history
+      WHERE (? IS NULL OR window_kind = ?)
+        AND (? IS NULL OR ts >= ?)
+        AND (? IS NULL OR ts <= ?)
+      ORDER BY ts DESC LIMIT ?`);
   }
 
   insertEvent(e) {
@@ -207,10 +236,53 @@ export class Store {
       this.db.prepare('INSERT INTO balance_history (ts, provider, balance) VALUES (?, ?, ?)')
         .run(ts, tool.slice(8), data.balance ?? 0);
     }
+    if (tool === 'codex' && Array.isArray(data?.windows)) {
+      this._saveCodexQuotaHistory(ts, data);
+    }
   }
+
   getQuota(tool) {
     const row = this.db.prepare('SELECT ts, data FROM quota WHERE tool = ?').get(tool);
     return row ? { ts: row.ts, data: JSON.parse(row.data) } : null;
+  }
+
+  /**
+   * Codex 配额历史写入（#45）：#44 规范化快照的每窗口一行。
+   * used 由 used_percent×capacity 推导（两者缺一则 NULL——绝不伪造样本）；
+   * window_id = kind:resets_at_ms（重置后必变化，对应 #47 pace 的窗口切换）。
+   * 历史尽力而为：任何失败（瞬时 SQLITE_BUSY/文件占用）只丢弃历史样本，
+   * 绝不影响主 quota 快照与扫描链路。
+   */
+  _saveCodexQuotaHistory(ts, data) {
+    try {
+      for (const w of data.windows) {
+        if (!w || typeof w.kind !== 'string') continue;
+        const pct = typeof w.used_percent === 'number' && Number.isFinite(w.used_percent) ? w.used_percent : null;
+        const cap = typeof w.capacity === 'number' && Number.isFinite(w.capacity) ? w.capacity : null;
+        const used = (pct !== null && cap !== null) ? cap * pct / 100 : null;
+        this._insertCodexQuotaHistory.run(
+          w.kind, ts,
+          `${w.kind}:${Number.isFinite(w.resets_at_ms) ? w.resets_at_ms : 'unknown'}`,
+          used, cap,
+          typeof w.remaining === 'number' && Number.isFinite(w.remaining) ? w.remaining : null,
+          pct,
+          Number.isFinite(w.resets_at_ms) ? w.resets_at_ms : null,
+          JSON.stringify(w));
+      }
+    } catch { /* 历史是尽力而为：失败不传播（来源级容错） */ }
+  }
+
+  /**
+   * Codex 配额历史读取（#45）：按 ts 降序；windowKind/sinceTs/untilTs 时间边界；
+   * 行形状对齐 #47 pace 样本契约（ts/window_id/used/capacity/resets_at_ms）。
+   */
+  getCodexQuotaHistory({ windowKind = null, sinceTs = null, untilTs = null, limit = 500 } = {}) {
+    return this._codexQuotaHistoryQuery.all(
+      windowKind, windowKind,
+      Number.isFinite(sinceTs) ? sinceTs : null, Number.isFinite(sinceTs) ? sinceTs : null,
+      Number.isFinite(untilTs) ? untilTs : null, Number.isFinite(untilTs) ? untilTs : null,
+      Math.max(1, Math.min(5000, Number.isFinite(limit) ? limit : 500)),
+    );
   }
 
   insertToolCall(e) {

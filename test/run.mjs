@@ -1548,6 +1548,72 @@ console.log('\n[17] Codex rate_limits 规范化（#44：三窗口/0与缺失可�
   }
 }
 
+/* ---------- [18] Codex 配额快照历史存储（#45） ---------- */
+console.log('\n[18] Codex 配额历史（#45：幂等迁移/去重/0 与 NULL/getQuota 兼容/读取边界）');
+{
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'codex45 中文 目录-'));
+  const dbPath = join(base, 't45.db');
+  // 与 #44 契约一致的规范化快照
+  const snap = (ts, pct, resets) => ({
+    ts,
+    data: {
+      used_percent: pct, plan_type: 'pro',
+      windows: [
+        { kind: 'primary', used_percent: pct, window_minutes: 300, resets_at_ms: resets, resets_at: new Date(resets).toISOString() },
+        { kind: 'secondary', used_percent: pct / 2, window_minutes: 10080, resets_at_ms: resets + 7 * 86_400_000, resets_at: new Date(resets + 7 * 86_400_000).toISOString() },
+      ],
+    },
+  });
+
+  try {
+    // 全新库
+    const s1 = new Store(dbPath);
+    const t1 = 1_700_000_000_000, t2 = t1 + 60_000, reset1 = t1 + 3 * 3_600_000;
+    s1.saveQuota('codex', t1, snap(t1, 42, reset1).data);
+    s1.saveQuota('codex', t2, snap(t2, 44, reset1).data);
+    ok('#45 每窗口一行历史（2 窗口 × 2 采样 = 4 行）',
+      s1.getCodexQuotaHistory().length === 4, String(s1.getCodexQuotaHistory().length));
+    // 同一采集点重复写入不产生重复样本
+    s1.saveQuota('codex', t2, snap(t2, 44, reset1).data);
+    ok('#45 同点重复写入去重（仍 4 行）', s1.getCodexQuotaHistory().length === 4);
+    // used 推导：capacity 未知 → NULL（不伪造）；显式 0 保留
+    const rowUsed = s1.getCodexQuotaHistory({ windowKind: 'primary', limit: 1 })[0];
+    ok('#45 capacity 缺失时 used=NULL（绝不伪造样本）', rowUsed.used === null && rowUsed.used_percent === 44);
+    s1.saveQuota('codex', t2 + 1, { windows: [{ kind: 'primary', used_percent: 0, capacity: 1000, resets_at_ms: reset1 }] });
+    const zeroRow = s1.getCodexQuotaHistory({ windowKind: 'primary', limit: 1 })[0];
+    ok('#45 显式 0 保留（used_percent=0、used=0）',
+      zeroRow.used_percent === 0 && zeroRow.used === 0, JSON.stringify(zeroRow));
+    // 窗口 reset 切换：resets_at_ms 变化 → window_id 变化
+    const reset2 = reset1 + 5 * 3_600_000;
+    s1.saveQuota('codex', t2 + 2, snap(t2 + 2, 5, reset2).data);
+    const ids = [...new Set(s1.getCodexQuotaHistory({ windowKind: 'primary' }).map((r) => r.window_id))];
+    ok('#45 重置后 window_id 切换（两个窗口代际）', ids.length === 2, JSON.stringify(ids));
+    // getQuota('codex') 兼容
+    const q = s1.getQuota('codex');
+    ok('#45 getQuota(codex) 仍返回最新兼容快照', q && q.data.used_percent === 5 && Array.isArray(q.data.windows));
+    // 读取边界：sinceTs/untilTs/limit、降序
+    const bounded = s1.getCodexQuotaHistory({ windowKind: 'primary', sinceTs: t2, untilTs: t2 + 1 });
+    ok('#45 时间边界过滤（t2 与 t2+1 两行）', bounded.length === 2, String(bounded.length));
+    const limited = s1.getCodexQuotaHistory({ limit: 2 });
+    ok('#45 limit 生效且 ts 降序',
+      limited.length === 2 && limited[0].ts >= limited[1].ts);
+    // 打开失败恢复：历史表被删后 saveQuota 不崩溃（尽力而为），重开 Store 后恢复可用
+    s1.db.exec('DROP TABLE codex_quota_history');
+    let threw = false;
+    try { s1.saveQuota('codex', t2 + 3, snap(t2 + 3, 6, reset2).data); } catch { threw = true; }
+    ok('#45 历史异常不崩溃（saveQuota 不传播错误）', !threw);
+    s1.db.close();
+    // 旧库重开：迁移补表（幂等），既有数据未破坏
+    const s2 = new Store(dbPath);
+    ok('#45 旧库重开迁移补表且既有 events/quota 未破坏',
+      Array.isArray(s2.getCodexQuotaHistory({ limit: 1 })) && s2.getQuota('codex') != null);
+    s2.db.close();
+  } finally {
+    try { rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* 延迟句柄 */ }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
