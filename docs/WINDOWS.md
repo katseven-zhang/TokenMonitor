@@ -106,15 +106,31 @@ npm ci
 node bin\tokenwatcher.js status    # 确认后台在线；如已停止则重新 serve
 ```
 
-- 基于安装器的覆盖升级（先验证候选、失败可回滚、保留数据库与配置）：✅ 已集成（#13，`558380a` + 修复 `50fab85`）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
-- 固定目录覆盖式 EXE 构建（`dist/windows-x64`）：✅ 已集成（#12，`c5db723`）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256）。
+- 基于安装器的覆盖升级（先验证候选、失败可回滚、保留 `data\`）：✅ 已集成（#13，`558380a` + 修复 `50fab85`；布局 v2 由 #25 重构）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
+- 固定目录覆盖式运行包构建（`dist/windows-x64`）：✅ 已集成（#12 `c5db723`；布局 v2 由 #25 重构）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256）。
+
+### 运行包布局（v2，#25）
+
+```text
+dist\windows-x64\
+├─ TokenMonitor.exe     ← GUI 启动器（启动/停止后台、端口设置、日志查看）
+├─ manifest.json        ← 完整性清单（逐文件 bytes/sha256）
+└─ runtime\             ← 全部运行库（根目录不再出现 node.exe）
+   ├─ node.exe
+   ├─ bin\  src\  web\  package.json  node_modules\
+   └─ tokenmonitor.cmd  ← CLI 入口（tokenmonitor.cmd status 等）
+```
+
+绿色版直接使用：双击 `TokenMonitor.exe`（GUI）或 `runtime\tokenmonitor.cmd serve`（CLI）；
+首次运行自动创建 `<包根>\data` 并把旧位置 `~/.tokenmeter` 的库迁移过来（见第 3 节）。
 
 ## 8. 卸载与数据备份
 
 ```powershell
 node bin\tokenwatcher.js uninstall-agent        # 只删除 TokenMonitor-Server 任务
-# 移除程序本身：删除源码/安装目录即可
-# 用户数据默认保留；确认不再需要后再手动删除：
+# 移除程序本身：安装版运行 scripts\uninstall-windows.ps1；
+# 卸载默认把 <安装目录>\data 移到 %LOCALAPPDATA%\Programs\TokenMonitor-data 保留
+# 移除绿色版：删除解压目录即可（data\ 在目录内，一并移走）
 Remove-Item "$env:USERPROFILE\.tokenmeter" -Recurse -Force
 ```
 

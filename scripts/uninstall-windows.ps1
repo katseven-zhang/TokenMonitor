@@ -5,17 +5,20 @@
 
 .DESCRIPTION
   Removes exactly three things: the TokenMonitor install folder
-  (<InstallRoot>\TokenMonitor), the TokenMonitor shortcuts, and the product's
-  own Task Scheduler entry (TokenMonitor-Server).
+  (<InstallRoot>\TokenMonitor, layout v2: root TokenMonitor.exe + runtime\),
+  the TokenMonitor shortcuts, and the product's own Task Scheduler entry
+  (TokenMonitor-Server).
 
-  User data (<DataRoot>\TokenMonitor with the SQLite database, pricing and
-  config) is PRESERVED by default and its location is printed. Deleting data
-  requires the explicit -PurgeData switch plus a second confirmation
-  (-ConfirmPurge, or typing DELETE at the prompt).
+  User data lives INSIDE the install folder at <install>\data (portable
+  layout, product contract v2 s.5). On uninstall it is MOVED to
+  <InstallRoot>\TokenMonitor-data and PRESERVED by default; its location is
+  printed. Deleting it requires the explicit -PurgeData switch plus a second
+  confirmation (-ConfirmPurge, or typing DELETE at the prompt).
 
-  Safety guards: the delete targets are resolved and validated (leaf name must
-  be exactly TokenMonitor, the root must not be a drive root) before any
-  recursive delete; an unresolved or broad path aborts the script.
+  Safety guards: the delete targets are resolved and validated (leaf name
+  must be exactly TokenMonitor / TokenMonitor-data, the root must not be a
+  drive root) before any recursive delete; an unresolved or broad path aborts
+  the script.
 
   All roots can be overridden for automated dry-runs inside temp directories;
   tests pass -SkipScheduledTask so they never touch the real Task Scheduler.
@@ -26,10 +29,9 @@
 #>
 param(
   [string]$InstallRoot = '',
-  [string]$DataRoot = '',
   [string]$StartMenuRoot = '',
   [string]$DesktopRoot = '',
-  # Delete the user data directory as well (needs a second confirmation).
+  # Delete the preserved user data folder as well (needs a second confirmation).
   [switch]$PurgeData,
   # Second confirmation for -PurgeData (skips the interactive DELETE prompt).
   [switch]$ConfirmPurge,
@@ -46,11 +48,10 @@ function Info([string]$Message) { Write-Host "[uninstall] $Message" }
 $localAppData = $env:LOCALAPPDATA
 if ([string]::IsNullOrEmpty($localAppData)) { Fail 'LOCALAPPDATA is not set' }
 if ([string]::IsNullOrEmpty($InstallRoot))  { $InstallRoot  = Join-Path $localAppData 'Programs' }
-if ([string]::IsNullOrEmpty($DataRoot))     { $DataRoot     = $localAppData }
 if ([string]::IsNullOrEmpty($StartMenuRoot)) { $StartMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs' }
 if ([string]::IsNullOrEmpty($DesktopRoot))  { $DesktopRoot  = [Environment]::GetFolderPath('Desktop') }
 
-foreach ($rootName in @('InstallRoot', 'DataRoot')) {
+foreach ($rootName in @('InstallRoot')) {
   $rootValue = Get-Variable $rootName -ValueOnly
   # string-level guard first: dry-run roots may not exist at all
   if ($rootValue -match '^[A-Za-z]:\\?$') { Fail "$rootName must not be a drive root (got $rootValue)" }
@@ -61,7 +62,8 @@ foreach ($rootName in @('InstallRoot', 'DataRoot')) {
 }
 
 $installDir = Join-Path $InstallRoot 'TokenMonitor'
-$dataDir = Join-Path $DataRoot 'TokenMonitor'
+$dataDir = Join-Path $installDir 'data'                  # portable data (inside the install folder)
+$dataKeep = Join-Path $InstallRoot 'TokenMonitor-data'   # where uninstall keeps the data
 
 try {
   # --- 1. this product's scheduled task only ---------------------------------
@@ -82,7 +84,16 @@ try {
     }
   }
 
-  # --- 3. install directory (exact path guard before recursive delete) --------
+  # --- 3. user data: move out of the install folder first ----------------------
+  if (Test-Path -LiteralPath $dataDir) {
+    if (Test-Path -LiteralPath $dataKeep) {
+      Fail "both $dataDir and $dataKeep exist; resolve the leftover folder and retry"
+    }
+    Move-Item -LiteralPath $dataDir -Destination $dataKeep
+    Info "user data moved to: $dataKeep"
+  }
+
+  # --- 4. install directory (exact path guard before recursive delete) --------
   if (Test-Path -LiteralPath $installDir) {
     $full = (Resolve-Path -LiteralPath $installDir).Path
     if ((Split-Path -Leaf $full) -cne 'TokenMonitor') { Fail "refusing to delete unexpected install path: $full" }
@@ -93,25 +104,25 @@ try {
     Info "install dir not present: $installDir"
   }
 
-  # --- 4. user data: preserve by default, purge needs explicit double confirm --
-  if (Test-Path -LiteralPath $dataDir) {
+  # --- 5. preserved data: keep by default, purge needs explicit double confirm --
+  if (Test-Path -LiteralPath $dataKeep) {
     if (-not $PurgeData) {
-      Info "user data preserved at: $dataDir (database, pricing and config)"
+      Info "user data preserved at: $dataKeep (database, logs and settings)"
       Info 'to delete it too, run again with -PurgeData -ConfirmPurge'
     } else {
       if (-not $ConfirmPurge) {
-        $answer = Read-Host "Type DELETE to permanently purge user data at $dataDir"
+        $answer = Read-Host "Type DELETE to permanently purge user data at $dataKeep"
         if ($answer -cne 'DELETE') { Fail 'purge cancelled: confirmation did not match DELETE' }
       }
-      $full = (Resolve-Path -LiteralPath $dataDir).Path
-      if ((Split-Path -Leaf $full) -cne 'TokenMonitor') { Fail "purge refuses non-TokenMonitor leaf: $full" }
-      $rootFull = (Resolve-Path -LiteralPath $DataRoot).Path
-      if ($full -ieq $rootFull) { Fail 'purge refuses to delete the data root itself' }
+      $full = (Resolve-Path -LiteralPath $dataKeep).Path
+      if ((Split-Path -Leaf $full) -cne 'TokenMonitor-data') { Fail "purge refuses unexpected leaf: $full" }
+      $rootFull = (Resolve-Path -LiteralPath $InstallRoot).Path
+      if ($full -ieq $rootFull) { Fail 'purge refuses to delete the install root itself' }
       Remove-Item -LiteralPath $full -Recurse -Force
       Info "user data purged: $full"
     }
   } else {
-    Info "data dir not present: $dataDir"
+    Info "user data folder not present: $dataKeep"
   }
 
   Info 'uninstall complete'

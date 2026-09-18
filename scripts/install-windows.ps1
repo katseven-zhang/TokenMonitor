@@ -4,18 +4,21 @@
   TokenMonitor per-user (non-admin) installer.
 
 .DESCRIPTION
-  Installs the dist\windows-x64 runtime package (see scripts\build-windows.ps1)
-  into the FIXED per-user location %LOCALAPPDATA%\Programs\TokenMonitor and
-  prepares the project data directory %LOCALAPPDATA%\TokenMonitor.
+  Installs the dist\windows-x64 runtime package (see scripts\build-windows.ps1,
+  layout v2: root TokenMonitor.exe + manifest.json + runtime\) into the FIXED
+  per-user location %LOCALAPPDATA%\Programs\TokenMonitor. User data lives
+  INSIDE the install folder at <install>\data (portable layout, product
+  contract v2 s.5) and is preserved across upgrades by moving it aside during
+  the swap and moving it back after the new install verifies.
 
   Upgrade safety: the candidate is staged and validated (node --version and
   tokenwatcher --version both run) BEFORE the existing install is replaced;
   the old install is kept as a rollback copy until the new one verifies, and
   is restored automatically if verification fails.
 
-  Every root can be overridden (-InstallRoot/-DataRoot/-StartMenuRoot/
-  -DesktopRoot), which is how automated dry-runs run entirely inside temp
-  directories without touching the real user profile.
+  Every root can be overridden (-InstallRoot/-StartMenuRoot/-DesktopRoot),
+  which is how automated dry-runs run entirely inside temp directories
+  without touching the real user profile.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1
@@ -26,8 +29,6 @@ param(
   [string]$Source = '',
   # Directory that will contain the TokenMonitor install folder.
   [string]$InstallRoot = '',
-  # Directory that will contain the TokenMonitor data folder.
-  [string]$DataRoot = '',
   # Directory that receives the Start Menu shortcut.
   [string]$StartMenuRoot = '',
   # Directory that receives the optional desktop shortcut.
@@ -52,11 +53,10 @@ if (-not (Test-Path -LiteralPath $Repo)) { Fail "repo not found: $Repo" }
 $repoFull = (Resolve-Path -LiteralPath $Repo).Path
 
 if ([string]::IsNullOrEmpty($InstallRoot))  { $InstallRoot  = Join-Path $localAppData 'Programs' }
-if ([string]::IsNullOrEmpty($DataRoot))     { $DataRoot     = $localAppData }
 if ([string]::IsNullOrEmpty($StartMenuRoot)) { $StartMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs' }
 if ([string]::IsNullOrEmpty($DesktopRoot))  { $DesktopRoot  = [Environment]::GetFolderPath('Desktop') }
 
-foreach ($rootName in @('InstallRoot', 'DataRoot')) {
+foreach ($rootName in @('InstallRoot')) {
   $rootValue = Get-Variable $rootName -ValueOnly
   # string-level guard first: the root may not exist yet on a fresh install
   if ($rootValue -match '^[A-Za-z]:\\?$') { Fail "$rootName must not be a drive root (got $rootValue)" }
@@ -67,34 +67,52 @@ foreach ($rootName in @('InstallRoot', 'DataRoot')) {
 }
 
 $installDir = Join-Path $InstallRoot 'TokenMonitor'
-$dataDir = Join-Path $DataRoot 'TokenMonitor'
+$dataDir = Join-Path $installDir 'data'   # portable data dir (contract v2 s.5), travels with the install
 
-# --- candidate -----------------------------------------------------------------
+# --- candidate (layout v2) -------------------------------------------------------
 if ([string]::IsNullOrEmpty($Source)) { $Source = Join-Path $repoFull 'dist\windows-x64' }
 if (-not (Test-Path -LiteralPath $Source)) {
   Fail "candidate package not found: $Source - build it first with scripts/build-windows.ps1"
 }
 $srcFull = (Resolve-Path -LiteralPath $Source).Path
-foreach ($rel in @('node.exe', 'bin\tokenwatcher.js', 'package.json')) {
+foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenwatcher.js', 'runtime\package.json', 'manifest.json', 'TokenMonitor.exe')) {
   if (-not (Test-Path -LiteralPath (Join-Path $srcFull $rel))) { Fail "candidate is missing $rel" }
 }
 
-$candVersion = (& (Join-Path $srcFull 'node.exe') (Join-Path $srcFull 'bin\tokenwatcher.js') --version)
+$candNode = Join-Path $srcFull 'runtime\node.exe'
+$candScript = Join-Path $srcFull 'runtime\bin\tokenwatcher.js'
+$candVersion = (& $candNode $candScript --version)
 if ($LASTEXITCODE -ne 0) { Fail 'candidate failed --version validation before install' }
 Info "candidate version: $candVersion"
 
 # --- prepare directories --------------------------------------------------------
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-$logDir = Join-Path $dataDir 'logs'
+$logDir = Join-Path $InstallRoot 'install-logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $logFile = Join-Path $logDir ("install-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 function Log([string]$Message) { $Message | Out-File -LiteralPath $logFile -Append -Encoding utf8 }
 
-$isUpgrade = Test-Path -LiteralPath (Join-Path $installDir 'node.exe')
+$isUpgrade = Test-Path -LiteralPath (Join-Path $installDir 'runtime\node.exe')
 $staging = "$installDir.new"
 $backup = "$installDir.old"
+$dataKeep = Join-Path $InstallRoot 'TokenMonitor-data'
 $backupActive = $false
+
+# During the upgrade swap the portable data moves to <InstallRoot>TokenMonitor-data
+# and moves back once the new install verifies; rollback moves it back too - data never
+function Move-DataAside {
+  if (Test-Path -LiteralPath (Join-Path $installDir 'data')) {
+    if (Test-Path -LiteralPath $dataKeep) { Fail "unexpected leftover data folder: $dataKeep - resolve it and retry" }
+    Move-Item -LiteralPath (Join-Path $installDir 'data') -Destination $dataKeep
+    return $true
+  }
+  return $false
+}
+function Move-DataBack {
+  if (Test-Path -LiteralPath $dataKeep) {
+    Move-Item -LiteralPath $dataKeep -Destination (Join-Path $installDir 'data')
+  }
+}
 
 try {
   if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
@@ -103,19 +121,21 @@ try {
   # --- stage + validate the candidate in final layout --------------------------
   Info "staging candidate -> $staging"
   Copy-Item -LiteralPath $srcFull -Destination $staging -Recurse
-  $stagedVersion = (& (Join-Path $staging 'node.exe') (Join-Path $staging 'bin\tokenwatcher.js') --version)
+  $stagedVersion = (& (Join-Path $staging 'runtime\node.exe') (Join-Path $staging 'runtime\bin\tokenwatcher.js') --version)
   if ($LASTEXITCODE -ne 0) { Fail 'staged candidate failed --version validation' }
   Log "staged candidate version=$stagedVersion"
 
   if ($isUpgrade) {
     # --- replace with rollback: old copy kept until the new install verifies ---
     Info "upgrading existing install at $installDir"
+    $dataAside = Move-DataAside
     Rename-Item -LiteralPath $installDir -NewName 'TokenMonitor.old'
     $backup = Join-Path $InstallRoot 'TokenMonitor.old'
     $backupActive = $true
     try {
       Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-      $newVersion = (& (Join-Path $installDir 'node.exe') (Join-Path $installDir 'bin\tokenwatcher.js') --version)
+      if ($dataAside) { Move-DataBack }
+      $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenwatcher.js') --version)
       if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }
       Remove-Item -LiteralPath $backup -Recurse -Force
       $backupActive = $false
@@ -125,14 +145,17 @@ try {
       if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
       if ($backupActive -and (Test-Path -LiteralPath $backup)) {
         Rename-Item -LiteralPath $backup -NewName 'TokenMonitor'
+        Move-DataBack
         Info 'post-verification failed; rolled back to the previous install'
         Log 'upgrade failed; rolled back'
+      } elseif ($dataAside) {
+        Move-DataBack
       }
       throw
     }
   } else {
     Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-    $newVersion = (& (Join-Path $installDir 'node.exe') (Join-Path $installDir 'bin\tokenwatcher.js') --version)
+    $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenwatcher.js') --version)
     if ($LASTEXITCODE -ne 0) {
       Remove-Item -LiteralPath $installDir -Recurse -Force
       Fail 'post-install verification failed; broken first install removed'
@@ -141,16 +164,20 @@ try {
     Log "first install version=$newVersion"
   }
 
-  # --- shortcuts (Start Menu always, desktop optional) --------------------------
+  # --- portable data directory (created on install; app keeps everything here) ---
+  New-Item -ItemType Directory -Path (Join-Path $dataDir 'logs') -Force | Out-Null
+  Info "data dir ready: $dataDir (database/logs/settings; preserved on uninstall)"
+
+  # --- shortcuts (Start Menu always, desktop optional): target the GUI launcher ---
   $shell = New-Object -ComObject WScript.Shell
   function New-TokenMonitorShortcut([string]$Directory) {
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
     $link = Join-Path $Directory 'TokenMonitor.lnk'
     $sc = $shell.CreateShortcut($link)
-    $sc.TargetPath = Join-Path $installDir 'node.exe'
-    $sc.Arguments = 'bin\tokenwatcher.js serve'
+    $sc.TargetPath = Join-Path $installDir 'TokenMonitor.exe'
+    $sc.Arguments = ''
     $sc.WorkingDirectory = $installDir
-    $sc.Description = 'TokenMonitor local token usage panel'
+    $sc.Description = 'TokenMonitor console (start/stop backend, port, logs)'
     $sc.Save()
     Info "shortcut created: $link"
     Log "shortcut $link"
@@ -158,7 +185,6 @@ try {
   New-TokenMonitorShortcut $StartMenuRoot
   if ($DesktopShortcut) { New-TokenMonitorShortcut $DesktopRoot }
 
-  Info "data dir ready: $dataDir (database/pricing/config; preserved on uninstall)"
   Log "install complete"
   Write-Host "[install] log: $logFile"
   exit 0

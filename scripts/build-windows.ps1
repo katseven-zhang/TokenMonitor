@@ -1,17 +1,19 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-  TokenMonitor Windows x64 runtime package builder (task #12 Win-Package).
+  TokenMonitor Windows x64 runtime package builder (task #12 Win-Package; layout v2 by #25).
 
 .DESCRIPTION
   Builds a self-contained runtime package into the FIXED directory dist\windows-x64.
-  The package carries its own node.exe so it runs away from the source checkout:
-    node.exe            copied from the local Node >= 22.13 (ESM + node:sqlite OK)
-    bin\src\web         application code and static panel assets
-    package.json        version + ESM marker
-    node_modules\       echarts (package.json + dist/echarts.min.js only) and fzstd
-    tokenmonitor.cmd    launcher: tokenmonitor serve --port 8787
-    manifest.json       version/arch/sizes/SHA-256 for every file
+  Root layout keeps only user-facing entries; all runtime files live under runtime\:
+    TokenMonitor.exe   GUI launcher (published from windows\gui, root entry)
+    manifest.json      version/arch/layout/sizes/SHA-256 for every file
+    runtime\node.exe   copied from the local Node >= 22.13 (ESM + node:sqlite OK)
+    runtime\bin\src\web  application code and static panel assets
+    runtime\package.json version + ESM marker
+    runtime\node_modules\ echarts (package.json + dist/echarts.min.js) and fzstd
+    runtime\tokenmonitor.cmd  CLI launcher: tokenmonitor serve --port 8787
+  Runtime data lands in <package>\data on first run (portable layout, #23).
 
   Guarantees:
   - Only dist\windows-x64 is ever cleaned; the exact path is validated first.
@@ -79,6 +81,18 @@ if (-not ((Test-Path -LiteralPath $echartsMin) -and (Test-Path -LiteralPath $fzs
 }
 if (-not (Test-Path -LiteralPath $echartsMin)) { Fail "missing $echartsMin after npm ci" }
 
+# --- 4b. GUI launcher exe (#24): use the published artifact, else dotnet publish now ---
+$guiExe = Join-Path $repoFull 'windows\gui\publish\TokenMonitorGui.exe'
+if (-not (Test-Path -LiteralPath $guiExe)) {
+  Write-Host '[build] GUI exe missing, publishing windows\gui (dotnet 8 SDK required)...'
+  & dotnet publish (Join-Path $repoFull 'windows\gui\TokenMonitorGui.csproj') `
+    -c Release -r win-x64 --self-contained true `
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+    -o (Join-Path $repoFull 'windows\gui\publish')
+  if ($LASTEXITCODE -ne 0) { Fail 'GUI publish failed (dotnet 8 SDK required; or run windows\gui\build.ps1 first)' }
+}
+if (-not (Test-Path -LiteralPath $guiExe)) { Fail "GUI launcher missing after publish: $guiExe" }
+
 # --- 5. clean ONLY the fixed output directory (path validated first) -----------
 $dist = Join-Path $repoFull 'dist\windows-x64'
 if (Test-Path -LiteralPath $dist) {
@@ -89,24 +103,29 @@ if (Test-Path -LiteralPath $dist) {
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
 try {
-  # --- 6. assemble the package -------------------------------------------------
-  Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $dist 'node.exe')
+  # --- 6. assemble the package (root: GUI exe only; everything else under runtime\) ---
+  $runtime = Join-Path $dist 'runtime'
+  New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+
+  Copy-Item -LiteralPath $guiExe -Destination (Join-Path $dist 'TokenMonitor.exe')
+  Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $runtime 'node.exe')
 
   foreach ($dir in @('bin', 'src', 'web')) {
-    Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $dist $dir) -Recurse
+    Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $runtime $dir) -Recurse
   }
-  Copy-Item -LiteralPath (Join-Path $repoFull 'package.json') -Destination (Join-Path $dist 'package.json')
+  Copy-Item -LiteralPath (Join-Path $repoFull 'package.json') -Destination (Join-Path $runtime 'package.json')
 
   # echarts: the server resolves 'echarts/dist/echarts.min.js' at runtime; the
   # exports map's "./*" passthrough makes package.json + the min bundle enough.
-  New-Item -ItemType Directory -Path (Join-Path $dist 'node_modules\echarts\dist') -Force | Out-Null
-  Copy-Item -LiteralPath (Join-Path $nm 'echarts\package.json') -Destination (Join-Path $dist 'node_modules\echarts\package.json')
-  Copy-Item -LiteralPath $echartsMin -Destination (Join-Path $dist 'node_modules\echarts\dist\echarts.min.js')
-  Copy-Item -Path $fzstdDir -Destination (Join-Path $dist 'node_modules\fzstd') -Recurse
+  New-Item -ItemType Directory -Path (Join-Path $runtime 'node_modules\echarts\dist') -Force | Out-Null
+  Copy-Item -LiteralPath (Join-Path $nm 'echarts\package.json') -Destination (Join-Path $runtime 'node_modules\echarts\package.json')
+  Copy-Item -LiteralPath $echartsMin -Destination (Join-Path $runtime 'node_modules\echarts\dist\echarts.min.js')
+  Copy-Item -Path $fzstdDir -Destination (Join-Path $runtime 'node_modules\fzstd') -Recurse
 
-  # launcher so users can run: tokenmonitor serve --port 8787
+  # CLI launcher inside runtime\: %~dp0 resolves to runtime\, where node.exe and
+  # bin\ both live, so the script keeps working from the new layout.
   $lines = @('@echo off', '"%~dp0node.exe" "%~dp0bin\tokenwatcher.js" %*', 'exit /b %ERRORLEVEL%')
-  [System.IO.File]::WriteAllText((Join-Path $dist 'tokenmonitor.cmd'), ($lines -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
+  [System.IO.File]::WriteAllText((Join-Path $runtime 'tokenmonitor.cmd'), ($lines -join "`r`n") + "`r`n", [System.Text.Encoding]::ASCII)
 
   # --- 7. forbidden content scan (runtime artifacts / secrets must not ship) ---
   # Path level: no collaboration metadata dirs/files (.agentchatroom/.workbuddy).
@@ -119,7 +138,8 @@ try {
   if ($nameHits) { Fail ("forbidden metadata dirs/files in output: " + (($nameHits | ForEach-Object FullName) -join '; ')) }
 
   $scanHits = @()
-  $appFiles = Get-ChildItem -LiteralPath $dist -Recurse -File | Where-Object { $_.Name -ine 'node.exe' }
+  # scan text content only (.exe files are self-contained binaries; ReadAllText on 161MB is slow and pointless)
+  $appFiles = Get-ChildItem -LiteralPath $dist -Recurse -File | Where-Object { $_.Extension -ine '.exe' }
   foreach ($f in $appFiles) {
     $text = [System.IO.File]::ReadAllText($f.FullName)
     if ($text -match 'acr\.credential_[a-f0-9]') { $scanHits += "credential token -> $($f.FullName)" }
@@ -150,6 +170,7 @@ try {
     version      = $version
     os           = 'windows'
     arch         = 'x64'
+    layout       = 2          # root GUI exe + runtime libs (#25); data in <pkg> data dir
     nodeVersion  = $nodeVersionRaw
     generatedAt  = (Get-Date).ToUniversalTime().ToString('o')
     fileCount    = $fileEntries.Count

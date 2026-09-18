@@ -1,0 +1,4 @@
+# .NET build artifacts (fixed publish dir, never committed)
+bin/
+obj/
+publish/
