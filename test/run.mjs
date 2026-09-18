@@ -1989,6 +1989,46 @@ console.log('\n[24] Codex 报告子视图（#49：明细/日报/CSV 挂载于 #4
   }
 }
 
+/* ---------- [25] CSP 纵深防御（#53） ---------- */
+console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/SSE 语义不改写）');
+{
+  const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const { EventEmitter } = await import('node:events');
+  const base = mkdtempSync(join(tmpdir(), 'csp53-'));
+  const store = new Store(join(base, 't53.db'));
+  const fakeScanner = Object.assign(new EventEmitter(), { stats: {} });
+  const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+  const server = await startServer({ store, scanner: fakeScanner, port, log: () => {} });
+  await new Promise((r) => setTimeout(r, 500));
+  try {
+    const home = await fetch(`http://127.0.0.1:${port}/`);
+    const csp1 = home.headers.get('content-security-policy');
+    ok('#53 首页 HTML 带 CSP（default-src self / script-src self）',
+      home.status === 200 && (csp1 || '').includes("default-src 'self'") && (csp1 || '').includes("script-src 'self'"),
+      String(csp1));
+    const codex = await fetch(`http://127.0.0.1:${port}/codex`);
+    ok('#53 /codex 独立页同套 CSP', (codex.headers.get('content-security-policy') || '') === (csp1 || ''));
+    ok('#53 附加安全头（nosniff/DENY/no-referrer）',
+      home.headers.get('x-content-type-options') === 'nosniff'
+        && home.headers.get('x-frame-options') === 'DENY'
+        && home.headers.get('referrer-policy') === 'no-referrer');
+    const api = await fetch(`http://127.0.0.1:${port}/api/summary?days=7`);
+    ok('#53 API JSON 语义不被 CSP 改写（无 CSP 头、JSON 类型保留）',
+      api.status === 200 && api.headers.get('content-security-policy') === null
+        && (api.headers.get('content-type') || '').includes('json'));
+    const js = await fetch(`http://127.0.0.1:${port}/app.js`);
+    ok('#53 静态 JS 无 CSP（页面级策略已覆盖其执行环境）', js.status === 200 && js.headers.get('content-security-policy') === null);
+    // #42/#46/#48 无回归抽查
+    const codexSummary = await fetch(`http://127.0.0.1:${port}/api/codex/summary`);
+    ok('#53 /api/codex/* 契约不受影响（200 JSON）', codexSummary.status === 200);
+  } finally {
+    server.close();
+    try { store.db.close(); } catch { /* 句柄 */ }
+    try { rmSync(base, { recursive: true, force: true }); } catch { /* 延迟 */ }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

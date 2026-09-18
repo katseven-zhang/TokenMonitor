@@ -224,16 +224,33 @@ export async function buildSummary(store, scannerStats, days, { balanceStatus = 
   };
 }
 
+/**
+ * 安全响应头（#53）：只对 HTML 页面生效——首页与 /codex 独立页同源加载全部资源
+ * （本地 ECharts/样式/模块脚本、SSE 同源 /api/stream），无需 CDN 白名单。
+ * style-src 保留 'unsafe-inline'：index.html/codex.html/app.js 模板存在内联
+ * style 属性（布局补丁性质），抽干属于独立重构，不在本任务范围。
+ * API JSON/SSE/CSV 不加 CSP（语义不改写）。
+ */
+const SECURITY_HEADERS = {
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'no-referrer',
+};
+
 async function serveFile(res, path, type) {
   const s = await stat(path).catch(() => null);
   if (!s || !s.isFile()) {
     res.writeHead(404); res.end('not found'); return;
   }
-  res.writeHead(200, {
-    'content-type': type || MIME[extname(path)] || 'application/octet-stream',
+  const contentType = type || MIME[extname(path)] || 'application/octet-stream';
+  const headers = {
+    'content-type': contentType,
     'content-length': s.size,
     'cache-control': 'no-cache',
-  });
+  };
+  if (contentType === MIME['.html']) Object.assign(headers, SECURITY_HEADERS);
+  res.writeHead(200, headers);
   createReadStream(path).pipe(res);
 }
 
