@@ -1,17 +1,20 @@
 /**
- * Windows GUI launcher tests (#24 Win-GUI).
+ * Windows GUI launcher tests (#24 Win-GUI; stay-alive regression #26).
  *
  * Part A: source-contract assertions on windows/gui/Program.cs (path
  * resolution tiers, port validation, own-PID-only process handling, log
  * tail sharing, settings location, headless --selfcheck). Part B: runs the
  * published self-contained exe headlessly (--selfcheck) against a simulated
  * package layout (manifest.json + runtime\ in a temp dir with spaces AND
- * Chinese) plus the dev-tree fallback. If the artifact has not been built,
- * Part B skips with a note (CI green without the .NET SDK).
+ * Chinese) plus the dev-tree fallback. Part C: the real GUI process must
+ * STAY ALIVE (the #26 bug made it close itself instantly via a duplicated
+ * named mutex) while a second instance must exit immediately. If the
+ * artifact has not been built, Parts B/C skip with a note (CI green without
+ * the .NET SDK).
  *
  * Run: TOKENMETER_OFFLINE=1 node test/windows/gui.test.mjs
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -57,8 +60,10 @@ console.log('\n[source contract] Program.cs 契约断言');
   ok('无写死盘符/用户名', !/[A-Za-z]:\\Users\\|[A-Za-z]:\\AgentData/.test(source));
 }
 
+let guiBehaviorSkipped = false;
 console.log('\n[behavioral] 已发布 exe 无头自检（中文+空格包布局）');
 if (!existsSync(exe)) {
+  guiBehaviorSkipped = true;
   console.log('  [skip] 未找到 windows/gui/publish/TokenMonitorGui.exe —— 先执行：');
   console.log('         powershell -NoProfile -ExecutionPolicy Bypass -File windows/gui/build.ps1');
   console.log('  gui behavioral: skipped (artifact not built)');
@@ -103,6 +108,30 @@ if (!existsSync(exe)) {
     const forcedDir = join(base, '强制数据 目录');
     const forced = run({ TOKENMETER_DATA_DIR: forcedDir }, pkg);
     ok('env 覆盖优先于打包形态', parse(forced.stdout).dataRoot === forcedDir, parse(forced.stdout).dataRoot);
+
+    // ---- Part C: 进程常驻 + 单实例（#26 回归：重复互斥锁曾致窗体 Load 即 Close）----
+    console.log('\n[stay-alive] GUI 进程常驻与单实例（#26 回归）');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+    // 无参启动（真实 GUI 路径）：4 秒后必须仍在运行。修复前该进程 1 秒内 exit 0。
+    const gui = spawn(exe, [], { stdio: 'ignore', windowsHide: false });
+    let guiExitedEarly = false;
+    gui.on('exit', () => { if (!gui.killed) guiExitedEarly = true; });
+    await sleep(4000);
+    ok('GUI 进程 4 秒后仍存活（窗口不再自闭）', !guiExitedEarly && alive(gui.pid), guiExitedEarly ? 'exited early (#26 regression)' : `pid=${gui.pid}`);
+
+    // 第二实例：立即退出，第一实例不受影响
+    const second = spawn(exe, [], { stdio: 'ignore' });
+    let secondExited = false;
+    second.on('exit', () => { secondExited = true; });
+    await sleep(2500);
+    ok('第二实例立即退出（单实例语义保持）', secondExited);
+    ok('第一实例不受影响', !guiExitedEarly && alive(gui.pid));
+
+    gui.kill();
+    await sleep(800);
+    ok('关闭第一实例后退出干净', !alive(gui.pid));
   } finally {
     try { rmSync(base, { recursive: true, force: true }); } catch { /* Windows 句柄延迟时容忍 */ }
   }

@@ -180,10 +180,12 @@ internal static class Selfcheck
     }
 }
 
-/// <summary>主窗口：端口设置 + 启动/停止 + 状态 + 日志 tail。</summary>
+/// <summary>主窗口：端口设置 + 启动/停止 + 状态 + 日志 tail。
+/// 单实例判定只在 Program.Main 一处（命名互斥锁）；这里绝不能再创建同名
+/// Mutex——同进程第二次创建 createdNew 必为 false，会被误判成“第二实例”
+/// 而在 Load 时 Close 自闭（#26 修复的启动即退缺陷）。</summary>
 internal sealed class MainForm : Form
 {
-    private readonly Mutex _mutex;
     private readonly string _dataRoot;
     private readonly string _settingsPath;
     private readonly string _logPath;
@@ -211,9 +213,6 @@ internal sealed class MainForm : Form
 
     public MainForm()
     {
-        _mutex = new Mutex(initiallyOwned: true, GuiCore.MutexName, out var createdNew);
-        if (!createdNew) { Load += (_, _) => Close(); }
-
         var exeDir = AppContext.BaseDirectory;
         var appRoot = GuiCore.DetectAppRoot(exeDir);
         _dataRoot = GuiCore.ResolveDataRoot(
@@ -276,7 +275,6 @@ internal sealed class MainForm : Form
             _pollTimer.Stop();
             _logTimer.Stop();
             StopOwnBackend(userInitiated: false); // 与托盘一致：退出控制台只停自己拉起的后台
-            try { _mutex.ReleaseMutex(); } catch { /* 释放失败不影响退出 */ }
         };
     }
 
