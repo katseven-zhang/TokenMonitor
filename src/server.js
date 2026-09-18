@@ -43,13 +43,13 @@ function startOfDay(d = new Date()) {
  * 塌成 30，「全部历史」永远表达不出来（前端 data-days=0 按钮实际只拿 30 天）。
  * 语义固化：未提供/空串 → fallback；显式 "0" → 0（全量）；非数字/负数/NaN →
  * fallback（非法输入不产生意外窗口，绝不 clamp 到 0 造成"负数=全量"）；超上限 →
- * clamp 到 max。
+ * clamp 到 max。（#56：原 min 参数在负数改为直接 fallback 后恒为 0 且无调用方使用，已移除。）
  */
-export function parseDays(raw, fallback, min = 0, max = 3650) {
+export function parseDays(raw, fallback, max = 3650) {
   if (raw === null || raw === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return fallback;
-  return Math.max(min, Math.min(max, Math.trunc(n)));
+  return Math.min(max, Math.trunc(n));
 }
 
 /** 连续使用天数：从今天（或昨天）往前数有用量的连续自然日 */
