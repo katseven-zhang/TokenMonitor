@@ -226,12 +226,19 @@ export class Scanner extends EventEmitter {
         changed = true;
       }
     }
-    // 统一回填事件 + 持久化 state
+    // 统一回填事件 + 持久化 state（#52：仅在真正变化时写入，消灭每轮全量重写）
     for (const r of rows) {
       const st = states.get(r.session_id);
       if (!st) continue;
+      // UPDATE 自带 WHERE model IS NULL：只命中真正需要回填的行，已回填的行零写入
       if (st.model) updState.run(st.model, r.session_id);
-      this.store.saveFile({ ...r, state_json: JSON.stringify(st) });
+      // 修前无条件 saveFile：每轮把所有 codex 行的 state_json 重写一遍，且 saveFile
+      // 的 upsert 会把 last_scan_ms 刷成 Date.now()（写放大 + 时间语义扰动）。
+      // 现在先序列化新值与原值做字符串比对，仅真变化才落盘；连续无变化扫描零写入。
+      const nextJson = JSON.stringify(st);
+      if (nextJson !== (r.state_json ?? null)) {
+        this.store.saveFile({ ...r, state_json: nextJson });
+      }
     }
   }
 

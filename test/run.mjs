@@ -1146,6 +1146,52 @@ console.log('\n[11] Scanner 健壮性（#43：脏 state_json 容错 / 当轮统�
   }
 }
 
+/* ---------- [12] _inheritCodexModels 写抑制（#52） ---------- */
+console.log('\n[12] _inheritCodexModels 仅在真变化时写入（#52：连续无变化扫描零写入）');
+{
+  const { Scanner } = await import(pathToFileURL(join(ROOT, 'src/scanner.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'scanner52-'));
+  const store = new Store(join(base, 'test52.db'));
+  const parentUuid = 'a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6';
+  const parentSid = `rollout-2026-09-18-${parentUuid}`;
+  const childUuid = 'f0e9d8c7-b6a5-f4e3-d2c1-b0a998877665';
+  const childSid = `rollout-2026-09-18-${childUuid}`;
+  // 父行已有最终模型；子行（resume 文件）无模型、带 parent 指向
+  store.saveFile({ path: join(base, 'p.jsonl'), tool: 'codex', session_id: parentSid, size: 1, mtime_ms: 1, offset: 0, state_json: '{"model":"gpt-x"}' });
+  store.saveFile({ path: join(base, 'c.jsonl'), tool: 'codex', session_id: childSid, size: 1, mtime_ms: 1, offset: 0, state_json: `{"parent":"${parentUuid}"}` });
+  // 一条 model 为 NULL 的 codex 事件：供回填断言
+  store.insertEvent({ ts: 1700000000000, tool: 'codex', model: null, session_id: childSid, project: null, dedup_key: 't52-e1' });
+  const evBefore = store.db.prepare('SELECT model FROM events WHERE dedup_key = ?').get('t52-e1');
+
+  const scanner = new Scanner(store, { sources: [] });
+  let saveCalls = 0;
+  const origSave = store.saveFile.bind(store);
+  store.saveFile = (...a) => { saveCalls++; return origSave(...a); };
+
+  try {
+    scanner._inheritCodexModels(); // 第 1 轮：继承 + 回填 + 写盘
+    const child = store.db.prepare('SELECT state_json FROM files WHERE session_id = ?').get(childSid);
+    const childState = JSON.parse(child.state_json);
+    const evAfter = store.db.prepare('SELECT model FROM events WHERE dedup_key = ?').get('t52-e1');
+    ok('#52 resume 子行继承父模型并落盘', childState.model === 'gpt-x', child.state_json);
+    ok('#52 事件回填把 NULL model 补写为继承模型',
+      evBefore.model === null && evAfter.model === 'gpt-x',
+      `before=${evBefore.model} after=${evAfter.model}`);
+    const firstRoundSaves = saveCalls;
+
+    saveCalls = 0;
+    scanner._inheritCodexModels(); // 第 2 轮：无任何变化
+    ok('#52 连续无变化轮零 saveFile（last_scan_ms 不被扰动）', saveCalls === 0, `saveCalls=${saveCalls}`);
+    const childAgain = store.db.prepare('SELECT state_json, last_scan_ms FROM files WHERE session_id = ?').get(childSid);
+    ok('#52 第二轮后 state_json 逐字节一致', childAgain.state_json === child.state_json);
+    ok('#52 首轮确实发生过写入（对照非恒真）', firstRoundSaves >= 1, `firstRoundSaves=${firstRoundSaves}`);
+  } finally {
+    try { store.db.close(); } catch { /* 句柄由进程回收 */ }
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
