@@ -2,7 +2,7 @@
 
 **Mac 本地多源 AI Agent 用量与配额实时面板。** 一个常驻进程解析你机器上各 AI 编码工具留下的本地会话记录，统一归一化为 token 事件流，提供 Codex 风格的统计面板、实时配额卡、厂商余额轮询、费用估算与菜单栏胶囊。零框架依赖、纯本地运行。
 
-![Token Watcher](https://raw.githubusercontent.com/luwill/token-watcher/main/docs/screenshot.png)
+![Token Watcher](https://raw.githubusercontent.com/katseven-zhang/TokenMonitor/main/docs/screenshot.png)
 
 > 截图为真实运行数据（厂商余额与项目名已脱敏为 ••••）。
 
@@ -72,8 +72,8 @@ PATH 是系统默认，既不含 npm 全局 bin（前缀还可能被改过），
 ### 方式三：克隆仓库（想改代码）
 
 ```bash
-git clone https://github.com/luwill/token-watcher.git
-cd token-watcher && npm install
+git clone https://github.com/katseven-zhang/TokenMonitor.git
+cd TokenMonitor && npm install
 npm run serve        # 首扫历史 ~3.3GB 约 6 秒，仅首次
 ```
 

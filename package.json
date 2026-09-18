@@ -16,13 +16,13 @@
     "cli",
     "macos"
   ],
-  "homepage": "https://github.com/luwill/token-watcher#readme",
+  "homepage": "https://github.com/katseven-zhang/TokenMonitor#readme",
   "bugs": {
-    "url": "https://github.com/luwill/token-watcher/issues"
+    "url": "https://github.com/katseven-zhang/TokenMonitor/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/luwill/token-watcher.git"
+    "url": "git+https://github.com/katseven-zhang/TokenMonitor.git"
   },
   "license": "MIT",
   "author": "louwill",
