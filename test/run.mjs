@@ -329,9 +329,18 @@ console.log('\n[2c] 后端健壮性');
   const poller = new BalancePoller({ saveQuota() {} }, {
     fetchImpl: always404, maxClientErrors: 2, envPath: join(etmp, '.env'), log: () => {},
   });
-  await poller.poll();
-  await poller.poll();
-  await poller.poll();
+  // #57：poll() 的离线早退会把本合成用例一起挡掉（fetchImpl 已注入，本块不出网），
+  // 故临时解除 OFFLINE 让断言真正走到熔断逻辑；结束后恢复，
+  // poll()/start() 对真实 fetch 的离线拦截不受影响。
+  const prevOffline = process.env.TOKENMONITOR_OFFLINE;
+  delete process.env.TOKENMONITOR_OFFLINE;
+  try {
+    await poller.poll();
+    await poller.poll();
+    await poller.poll();
+  } finally {
+    if (prevOffline !== undefined) process.env.TOKENMONITOR_OFFLINE = prevOffline;
+  }
   ok('连续 4xx 后熔断，不再每轮重试', calls === 2, `实际请求 ${calls} 次`);
   ok('熔断状态可见（面板能标出来）', poller.status().some(s => s.id === 'deepseek'),
     JSON.stringify(poller.status()));
