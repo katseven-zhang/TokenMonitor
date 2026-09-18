@@ -11,6 +11,13 @@ import { mergeSourceMeta, fallbackColorFor } from './lib/sources.js';
 import { initMoney, setCurrency, getCurrency, formatMoney, formatMoneyAxis } from './lib/money.js';
 
 let days = 7;
+// #48：跳转 Codex 独立页是真实导航，返回时本脚本会整体重跑——
+// 从 sessionStorage 恢复用户选过的天数范围，否则「返回后首页状态被重置」（AC 隐藏陷阱）
+try {
+  const savedDays = Number(sessionStorage.getItem('tm.days'));
+  if (Number.isFinite(savedDays) && savedDays >= 0) days = savedDays;
+} catch { /* 隐私模式等：用默认 7 天 */ }
+const persistDays = () => { try { sessionStorage.setItem('tm.days', String(days)); } catch { /* 内存态 */ }};
 let heatMode = 'd';
 let lastSummary = null;
 
@@ -870,6 +877,7 @@ document.getElementById('range').addEventListener('click', (ev) => {
   if (!btn) return;
   document.querySelectorAll('#range button').forEach(b => b.classList.toggle('on', b === btn));
   days = Number(btn.dataset.days);
+  persistDays();
   load();
 });
 

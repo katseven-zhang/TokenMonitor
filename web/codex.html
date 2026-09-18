@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<!-- Codex 独立统计页（#48）：真实导航（/codex 可书签、Back/Forward 原生支持）。
+     资源加载方式与 index.html 同族（本地 style.css + 本地 ECharts + module script），
+     #53 的 CSP 一套响应头即可同时覆盖两页。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex 详细统计 · TokenMonitor</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/vendor/echarts.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 64 64" aria-hidden="true">
+        <circle cx="32" cy="32" r="30" fill="none" stroke="#e0813f" stroke-width="4"/>
+        <text x="32" y="42" text-anchor="middle" font-size="30" fill="#e0813f" font-family="Segoe UI, sans-serif">C</text>
+      </svg>
+      <h1>Codex 详细统计</h1>
+      <span id="codex-live" class="live off" title="数据新鲜度"><i></i>本地</span>
+    </div>
+    <nav class="range">
+      <a href="/" id="back-home" title="返回多来源总览（浏览器后退同样可用）">← 返回总览</a>
+      <button id="codex-refresh" title="立即刷新">刷新</button>
+    </nav>
+  </header>
+
+  <main>
+    <div id="codex-error" class="load-error" hidden></div>
+
+    <section class="cards" id="codex-cards"></section>
+
+    <div id="codex-quota" class="quota-extra"></div>
+
+    <div class="pair">
+      <div class="panel"><h2>按日用量（input / cached / output / reasoning）</h2><div id="codex-day" class="chart"></div></div>
+      <div class="panel"><h2>按小时趋势（tokens / 请求数）</h2><div id="codex-hour" class="chart"></div></div>
+    </div>
+
+    <div class="pair">
+      <div class="panel"><h2>消耗节奏与耗尽风险（5h 窗口）</h2><div id="codex-pace" class="quota-extra"></div></div>
+      <div class="panel"><h2>Weekly API 等值金额（secondary 窗口）</h2><div id="codex-cost" class="quota-extra"></div></div>
+    </div>
+
+    <section class="panel" style="margin-top:12px">
+      <h2>吞吐 Breakdown</h2>
+      <div id="codex-breakdown" class="quota-extra"></div>
+      <!-- #49：请求明细 / 日报 / CSV 报告子视图由报告任务挂载到 #codex-report-slot -->
+      <div id="codex-report-slot"></div>
+    </section>
+  </main>
+
+  <footer><span class="dim" id="codex-gen"></span></footer>
+  <script type="module" src="/codex.js"></script>
+</body>
+</html>

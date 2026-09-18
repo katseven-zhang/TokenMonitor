@@ -1880,6 +1880,71 @@ console.log('\n[22] source×model 聚合与应用选择器（#35）');
   }
 }
 
+/* ---------- [23] Codex 独立页（#48） ---------- */
+console.log('\n[23] /codex 独立页（#48：路由/入口/状态保持/契约消费/免责声明）');
+{
+  const appSrc = read(join(ROOT, 'web/app.js'));
+  const htmlSrc = read(join(ROOT, 'web/index.html'));
+  const codexHtml = read(join(ROOT, 'web/codex.html'));
+  const codexJs = read(join(ROOT, 'web/codex.js'));
+  const serverSrc = read(join(ROOT, 'src/server.js'));
+
+  // 服务端稳定路由
+  ok('#48 /codex 稳定可书签路由（serveFile codex.html）',
+    serverSrc.includes("p === '/codex' || p === '/codex/'") && serverSrc.includes("codex.html"));
+  // 首页入口（唯一改动）
+  ok('#48 首页有进入 Codex 详细页的入口', /id="codex-entry" href="\/codex"/.test(htmlSrc));
+  // 资源同族（#53 一套 CSP 可覆盖两页）
+  ok('#48 codex.html 资源加载与首页同族（本地 css/echarts/module）',
+    codexHtml.includes('href="/style.css"') && codexHtml.includes('src="/vendor/echarts.min.js"')
+      && codexHtml.includes('type="module" src="/codex.js"') && !codexHtml.includes('http://') && !codexHtml.includes('https://'));
+  // 契约消费：只吃 #46 接口；金额只经 #38；前端零 burn 算法
+  ok('#48 codex.js 只消费 /api/codex/* 契约',
+    codexJs.includes('/api/codex/summary') && codexJs.includes('/api/codex/throughput')
+      && codexJs.includes('/api/codex/pace') && codexJs.includes('/api/codex/cost'));
+  ok('#48 金额只经 #38 money.js（页面内无第二套货币换算）',
+    codexJs.includes("from './lib/money.js'") && !codexJs.includes('¥')
+      && !codexJs.includes('usd_to_cny *') && !codexJs.includes('/ usd_to_cny'));
+  ok('#48 pace 只展示 #47 结果（引用字段做展示属合法；无本地重算函数）',
+    !codexJs.includes('EWMA') && !codexJs.includes('function computePace')
+      && !codexJs.includes('eta_to_exhaust_ms =') && codexJs.includes('pace.burn_rate_per_hour'));
+  ok('#48 免责声明：API 等值估算不是订阅账单',
+    codexJs.includes('API 等值估算，不是订阅真实账单'));
+  ok('#48 monthly 缺失显式提示（null 不是 0，布局不跳动）',
+    codexJs.includes('monthly') && codexJs.includes('null，不是 0'));
+  // 返回导航 + 首页状态保持（R5 陷阱）
+  ok('#48 页面内返回（history.back 优先、书签进入兜底跳 /）',
+    codexJs.includes('history.back()') && codexJs.includes("history.length > 1"));
+  ok('#48 首页 days 用 sessionStorage 保持（返回后不被重置回 7）',
+    appSrc.includes("sessionStorage.getItem('tm.days')") && appSrc.includes('persistDays()'));
+  // DOM/资源证据（AC8）：真实服务下页面与全部资源可达
+  {
+    const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+    const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+    const { EventEmitter } = await import('node:events');
+    const base48 = mkdtempSync(join(tmpdir(), 'codex48-'));
+    const s48 = new Store(join(base48, 't.db'));
+    const fakeScanner = Object.assign(new EventEmitter(), { stats: {} });
+    const p48 = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+    const srv = await startServer({ store: s48, scanner: fakeScanner, port: p48, log: () => {} });
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      const page = await fetch(`http://127.0.0.1:${p48}/codex`);
+      const html = await page.text();
+      const containers = ['codex-cards', 'codex-quota', 'codex-day', 'codex-hour', 'codex-pace', 'codex-cost', 'codex-breakdown', 'back-home'];
+      const jsRes = await fetch(`http://127.0.0.1:${p48}/codex.js`);
+      ok('#48 /codex 真实服务 200、全部容器 id 存在、codex.js 可达（DOM 证据）',
+        page.status === 200 && (page.headers.get('content-type') || '').includes('html')
+          && containers.every((id) => html.includes(id)) && jsRes.status === 200,
+        `page=${page.status} js=${jsRes.status}`);
+    } finally {
+      srv.close();
+      try { s48.db.close(); } catch { /* 句柄 */ }
+      try { rmSync(base48, { recursive: true, force: true }); } catch { /* 延迟 */ }
+    }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

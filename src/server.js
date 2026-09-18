@@ -673,6 +673,8 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     }
     if (p === '/vendor/echarts.min.js') return serveFile(res, ECHARTS_PATH, MIME['.js']);
     if (p === '/') return serveFile(res, join(WEB_DIR, 'index.html'));
+    // Codex 独立统计页（#48）：稳定可书签路由；真实导航天然支持 Back/Forward
+    if (p === '/codex' || p === '/codex/') return serveFile(res, join(WEB_DIR, 'codex.html'));
     // 静态资源：限制在 web 目录内
     const safe = resolve(WEB_DIR, '.' + p);
     if (safe.startsWith(resolve(WEB_DIR))) return serveFile(res, safe);
