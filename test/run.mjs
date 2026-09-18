@@ -1067,10 +1067,89 @@ console.log('\n[10] 菜单栏胶囊的分发');
     /tokenmonitor bar/.test(read(join(ROOT, 'README.md'))));
 }
 
+/* ---------- [11] Scanner 健壮性（#43） ---------- */
+console.log('\n[11] Scanner 健壮性（#43：脏 state_json 容错 / 当轮统计重置 / 路径 contain 判定）');
+{
+  const { Scanner } = await import(pathToFileURL(join(ROOT, 'src/scanner.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const base = mkdtempSync(join(tmpdir(), 'scanner43 含中文 空格-'));
+  const logs = join(base, 'logs');
+  mkdirSync(logs, { recursive: true });
+  const logFile = join(logs, 'session.jsonl');
+  writeFileSync(logFile, '{"model":"m1"}\n');
+  // 同前缀但非子目录的干扰路径（修前 startsWith('…\\logs') 会把 logs-old 误判为子目录）
+  const decoyPath = join(base, 'logs-old', 'gone.jsonl');
+  mkdirSync(dirname(decoyPath), { recursive: true });
+  writeFileSync(decoyPath, 'x\n');
+  // 真子目录里已消失的文件行（应被 prune；文件本体不存在即可，prune 只查 db 行）
+  const subGonePath = join(logs, 'sub', 'gone.jsonl');
+
+  const store = new Store(join(base, 'test43.db'));
+  store.saveFile({ path: decoyPath, tool: 'fake43', session_id: 'd1', size: 2, mtime_ms: 1, offset: 0, state_json: '{}' });
+  store.saveFile({ path: subGonePath, tool: 'fake43', session_id: 's2', size: 2, mtime_ms: 1, offset: 0, state_json: '{}' });
+
+  const collectCalls = [];
+  let collectImpl = async (st, ctx) => {
+    collectCalls.push({ state: ctx.state, path: ctx.path });
+    return { inserted: 0, newOffset: ctx.offset ?? 0, state: ctx.state ?? {} };
+  };
+  const fakeSource = {
+    tool: 'fake43', label: 'fake43', kind: 'jsonl', version: 1,
+    roots: [logs],
+    collect: (...a) => collectImpl(...a),
+  };
+  const scannerLogs = [];
+  const scanner = new Scanner(store, { log: (m) => scannerLogs.push(m), sources: [fakeSource] });
+
+  try {
+    // --- 脏 state_json：坏 JSON 不让整轮扫描 reject，该文件按全量重扫 ---
+    const s1 = statSync(logFile);
+    store.saveFile({
+      path: logFile, tool: 'fake43', session_id: 's1', size: s1.size, mtime_ms: s1.mtimeMs,
+      offset: s1.size, state_json: '{broken json!!',
+    });
+    await scanner.scanAll({ quiet: true });
+    ok('#43 坏 state_json 不让 scanAll reject 且文件按 state=undefined 全量重扫',
+      collectCalls.length === 1 && collectCalls[0].state === undefined,
+      `calls=${collectCalls.length} state=${JSON.stringify(collectCalls[0]?.state)}`);
+    ok('#43 坏 state_json 记录了 warning 日志', scannerLogs.some((m) => m.includes('corrupt state_json')), scannerLogs.join(' | '));
+    const fixed = JSON.parse(store.getFile(logFile).state_json);
+    ok('#43 重扫后 state_json 已被合法 JSON 覆盖（_v 版本标记）', fixed._v === 1, JSON.stringify(fixed));
+
+    // --- 当轮统计重置：files 是本轮数字；last_error 在恢复轮置回 null ---
+    collectImpl = async () => { throw new Error('boom-parse'); };
+    appendFileSync(logFile, '{"model":"m2"}\n'); // 改变 size，绕过 unchanged 跳过
+    await scanner.scanAll({ quiet: true });
+    const stErr = scanner.stats.fake43;
+    ok('#43 collect 抛错计入本轮 parse_errors/last_error', stErr.parse_errors === 1 && !!stErr.last_error,
+      JSON.stringify({ pe: stErr.parse_errors, le: stErr.last_error }));
+
+    collectImpl = async (st, ctx) => ({ inserted: 0, newOffset: ctx.offset ?? 0, state: ctx.state ?? {} });
+    appendFileSync(logFile, '{"model":"m3"}\n');
+    await scanner.scanAll({ quiet: true });
+    const stOk = scanner.stats.fake43;
+    ok('#43 恢复轮 last_error 置回 null（不展示陈年错误）',
+      stOk.last_error === null && stOk.parse_errors === 0,
+      JSON.stringify({ pe: stOk.parse_errors, le: stOk.last_error }));
+    ok('#43 files 为当轮数字而非累计（1 个文件扫 3 轮仍为 1）', stOk.files === 1, `files=${stOk.files}`);
+
+    // --- 路径 contain 判定：同前缀不同目录不误删，真子目录被清 ---
+    // （第三轮 scanAll 内部已跑过 _pruneMissingFiles：sub 行应在扫描轮被清掉，decoy 行必须保留）
+    ok('#43 真子目录中已消失文件在扫描轮被 prune（isInside 判定）',
+      store.getFile(subGonePath) == null, store.getFile(subGonePath) ? 'still present' : 'pruned');
+    ok('#43 同前缀目录（logs-old）不被误判为子目录（行保留）', store.getFile(decoyPath) != null);
+    const pruned = scanner._pruneMissingFiles('fake43', new Set([logFile]), [logs]);
+    ok('#43 prune 幂等（无新增消失文件时返回 0）', pruned === 0, `pruned=${pruned}`);
+  } finally {
+    try { store.db.close(); } catch { /* 句柄由进程回收 */ }
+    rmSync(base, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
 process.exit(failed ? 1 : 0);
 
 function read(p) { return readFileSync(p, 'utf8'); }
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';

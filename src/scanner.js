@@ -1,8 +1,14 @@
 import { readdir, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { SOURCES } from './config.js';
 import { createWatchManager } from './platform/watch.js';
+
+/** 真目录包含判定（#43）：字符串 startsWith 会把 C:\data\codex-old 误判成 C:\data\codex 的子项 */
+function isInside(root, target) {
+  const rel = relative(resolve(root), resolve(target));
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
 
 async function* walkByExt(root, match) {
   let entries;
@@ -86,7 +92,11 @@ export class Scanner extends EventEmitter {
     try {
     for (const src of this.sources) {
       const st = this._stat(src.tool);
-      st.parse_errors = 0; // 每轮重置为"本轮错误数"
+      // 每轮全部重置为"本轮"语义（#43）：修前 files 从不重置（实际是累计扫描次数）、
+      // last_error 从不置回（解析恢复后前端 tooltip 仍挂着几天前的错误）
+      st.files = 0;
+      st.parse_errors = 0;
+      st.last_error = null;
       st.last_scan_ms = Date.now();
       const liveRoots = await liveRootsOf(src);
       const seen = new Set();
@@ -100,7 +110,17 @@ export class Scanner extends EventEmitter {
         seen.add(path);
         const fileId = sessionKey || basename(path, '.jsonl');
         const row = this.store.getFile(path);
-        const prev = row?.state_json ? JSON.parse(row.state_json) : undefined;
+        // 脏 state_json 容错（#43）：旧版本数据/库损坏/手改都可能产生坏 JSON。
+        // 修前裸 JSON.parse 让一行坏数据 reject 整轮扫描；现在记 warning、该文件按
+        // state=undefined 全量重扫（needFull 因 !prev 自动成立），其余源/文件不受影响，
+        // dedup_key 保证重扫幂等。
+        let prev;
+        try {
+          prev = row?.state_json ? JSON.parse(row.state_json) : undefined;
+        } catch (err) {
+          prev = undefined;
+          this.log(`corrupt state_json ${path}: ${err.message}`);
+        }
         // 采集器版本落后 → 全量重扫补数据（dedup 幂等，仅一次性成本）
         const needFull = !prev || prev._v !== src.version;
         // mtime 跳过仅用于文件型源（sqlite 的 WAL 写入不改变主文件 mtime），且须版本一致
@@ -163,7 +183,7 @@ export class Scanner extends EventEmitter {
     if (!liveRoots.length) return 0;
     const db = this.store.db;
     const rows = db.prepare('SELECT path FROM files WHERE tool = ?').all(tool);
-    const gone = rows.filter(r => !seen.has(r.path) && liveRoots.some(root => r.path.startsWith(root)));
+    const gone = rows.filter(r => !seen.has(r.path) && liveRoots.some(root => isInside(root, r.path)));
     if (!gone.length) return 0;
     const del = db.prepare('DELETE FROM files WHERE path = ?');
     db.exec('BEGIN');
