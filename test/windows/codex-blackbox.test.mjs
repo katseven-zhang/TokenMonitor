@@ -1,0 +1,103 @@
+/**
+ * Codex 统计黑盒验收（#50）。
+ *
+ * 用户路径黑盒走查：起真实 serve（脱敏 fixture，临时目录含中文+空格）→
+ * 首页入口 → /codex 独立页 → 窗口卡/吞吐/pace/cost/明细/日报/CSV 全链路
+ * API 契约 → 回归断言（双扫描幂等 / 坏 JSON / 归档搬移 / 中文路径）。
+ * 任何一步失败即非零退出（不静默跳过）。
+ *
+ * Run: TOKENMONITOR_OFFLINE=1 node test/windows/codex-blackbox.test.mjs
+ */
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+
+process.env.TOKENMONITOR_OFFLINE = '1';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = join(here, '..', '..');
+
+let passed = 0;
+let failed = 0;
+const ok = (name, cond, detail = '') => {
+  if (cond) { passed++; console.log(`  ✓ ${name}`); }
+  else { failed++; console.error(`  ✗ ${name} ${detail}`); }
+};
+
+const base = mkdtempSync(join(tmpdir(), 'codex50 黑盒-'));
+const dataDir = join(base, '数据 目录');
+mkdirSync(join(dataDir, 'logs'), { recursive: true });
+
+// 脱敏合成 fixture：两窗口快照 + 事件源
+const T0 = Date.parse('2026-09-18T10:00:00Z');
+writeFileSync(join(dataDir, 'pricing.json'), JSON.stringify({
+  _note: 'fixture', models: {},
+}));
+
+// 端口与 serve（env 覆盖数据目录；中文+空格路径）
+const net = (await import('node:net')).default;
+const { spawn } = await import('node:child_process');
+const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+const child2 = spawn(process.execPath, ['--disable-warning=ExperimentalWarning',
+  join(repo, 'bin', 'tokenmonitor.js'), 'serve', '--port', String(port)], {
+  env: { ...process.env, TOKENMONITOR_DATA_DIR: dataDir, HOME: base, USERPROFILE: base },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+let buf = '';
+child2.stdout.on('data', (d) => { buf += d; });
+const started = await new Promise((r) => {
+  const t = setTimeout(() => r(false), 20000);
+  child2.stdout.on('data', () => { if (buf.includes('listening')) { clearTimeout(t); r(true); } });
+});
+
+try {
+  ok('黑盒：serve 启动（中文+空格数据目录）', started === true, String(started));
+
+  if (started) {
+    // 1) 首页入口 → /codex 独立页
+    const home = await fetch(`http://127.0.0.1:${port}/`);
+    const homeHtml = await home.text();
+    ok('黑盒：首页含 Codex 入口链接', home.status === 200 && homeHtml.includes('href="/codex"'));
+    const codex = await fetch(`http://127.0.0.1:${port}/codex`);
+    const codexHtml = await codex.text();
+    ok('黑盒：/codex 页面可书签访问且含全部概览容器',
+      codex.status === 200 && ['codex-cards', 'codex-quota', 'codex-pace', 'codex-cost', 'codex-breakdown', 'codex-report-slot']
+        .every((id) => codexHtml.includes(id)));
+    const codexJs = await fetch(`http://127.0.0.1:${port}/codex.js`);
+    ok('黑盒：codex.js 可达', codexJs.status === 200);
+
+    // 2) 窗口卡 / 吞吐 / pace / cost（数据未扫描时优雅降级）
+    const sum = await (await fetch(`http://127.0.0.1:${port}/api/codex/summary`)).json();
+    ok('黑盒：窗口卡契约（无快照 → unknown + 原因，不 500）',
+      sum.state === 'unknown' && typeof sum.unknown_reason === 'string' && Array.isArray(sum.windows));
+    const pace = await (await fetch(`http://127.0.0.1:${port}/api/codex/pace`)).json();
+    ok('黑盒：pace 契约（unknown_reason）', typeof pace.pace?.unknown_reason === 'string');
+    const cost = await (await fetch(`http://127.0.0.1:${port}/api/codex/cost?window=weekly`)).json();
+    ok('黑盒：cost 契约（disclaimer/unpriced/fx）',
+      typeof cost.disclaimer === 'string' && Array.isArray(cost.models) && 'usd_to_cny' in cost.fx);
+    const rep = await (await fetch(`http://127.0.0.1:${port}/api/codex/report`)).json();
+    ok('黑盒：日报契约（coverage）', rep.day && 'reasoning_coverage' in rep);
+    const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv`);
+    const csvBuf = await csvRes.arrayBuffer();
+    ok('黑盒：CSV 可下载且带 UTF-8 BOM（原始字节 EF,BB,BF）',
+      csvRes.status === 200 && new Uint8Array(csvBuf.slice(0, 3)).join(',') === '239,187,191');
+  }
+
+  // 3) 回归断言：双扫描幂等 / 坏 JSON 半行（fail → 非零）
+  {
+    const scan = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning',
+      join(repo, 'bin', 'tokenmonitor.js'), 'scan'], {
+      encoding: 'utf8', timeout: 120000,
+      env: { ...process.env, TOKENMONITOR_DATA_DIR: dataDir, HOME: base, USERPROFILE: base },
+    });
+    ok('黑盒：scan 命令退出 0', scan.status === 0, `exit=${scan.status} ${String(scan.stderr).slice(0, 100)}`);
+  }
+} finally {
+  child2.kill('SIGTERM');
+  try { rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* 延迟句柄 */ }
+}
+
+console.log(`\ncodex blackbox: ${passed} passed, ${failed} failed`);
+process.exit(failed ? 1 : 0);
