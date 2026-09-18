@@ -1,4 +1,3 @@
-# .NET build artifacts (fixed publish dir, never committed)
-bin/
-obj/
+# Rust build artifacts (never committed)
+target/
 publish/
