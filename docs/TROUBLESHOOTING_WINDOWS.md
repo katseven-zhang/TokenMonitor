@@ -7,11 +7,22 @@
 ```powershell
 cd <仓库目录>
 node bin\tokenmonitor.js status      # 后台在线/离线、端口、数据目录、数据库在否、离线模式
-Get-Content "$env:LOCALAPPDATA\TokenMonitor\logs\tokenmonitor.log" -Tail 50 -ErrorAction SilentlyContinue
+Get-Content "<日志路径见下表>\tokenmonitor.log" -Tail 50 -ErrorAction SilentlyContinue
 schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 核对自启任务（装了自启才有）
 ```
 
-- `status` 的 `backend: online` 表示面板服务在指定端口存活；`offline` 表示未启动或端口不同。
+日志固定名为 `tokenmonitor.log`，位置随运行形态而变（与 [#23 的三级数据目录解析](../src/config.js) 一致）：
+
+| 运行形态 | 日志目录 |
+|---|---|
+| 打包/安装（应用根存在 `manifest.json`） | `<应用根>\data\logs` |
+| 源码运行（Windows） | `%LOCALAPPDATA%\TokenMonitor\logs` |
+| 设了 `TOKENMONITOR_DATA_DIR` | `%TOKENMONITOR_DATA_DIR%\logs` |
+| 非 Windows 或缺 `LOCALAPPDATA` 的源码运行 | `~\.tokenmonitor\logs` |
+
+- `status` 输出的 `data_dir` 是**数据库**目录。打包与强制形态下它与日志同根，可直接拼 `\logs\tokenmonitor.log`；**源码形态下数据库在 `~\.tokenmonitor` 而日志在 `%LOCALAPPDATA%\TokenMonitor`，两者不同根**，请按上表取日志路径。
+- 只有真正执行动作的命令才写日志（`scan`/`serve`/`today`/`install-agent`/`uninstall-agent`/`bar`）；`--help`/`--version`/`status` 是零副作用的只读诊断，不会创建日志目录。因此刚装好就看到日志不存在，通常只是还没跑过后台。
+- 日志按 5 MiB 轮转，最多留 5 份备份（`tokenmonitor.log.1` … `.5`）。
 - 日志中的敏感信息统一显示为 `[REDACTED]`，这是**预期行为**，不是日志损坏（见第 8 节）。
 - 所有排查命令都**不要求、也不要**关闭所有 node.exe；需要结束进程时，先按第 1 节确认 PID 归属。
 

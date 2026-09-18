@@ -19,9 +19,19 @@ import { Scanner } from '../src/scanner.js';
 import { startServer } from '../src/server.js';
 import { BalancePoller } from '../src/balance.js';
 import { DB_PATH, DEFAULT_PORT, DATA_DIR } from '../src/config.js';
+import { RuntimeLogger, getDefaultLogDir } from '../src/platform/runtime.js';
 
-const log = (msg) => console.log(`[tokenmonitor] ${msg}`);
-const err = (msg) => console.error(`[tokenmonitor] ${msg}`);
+// --help / --version / status 必须零副作用（不建目录，stdout 只有所规定的行），
+// 所以文件日志延迟装配；装配失败就降级为仅 stdout，不能让日志把主流程带崩。
+let fileLogger = null;
+const log = (msg) => {
+  if (fileLogger) fileLogger.info(msg);
+  else console.log(`[tokenmonitor] ${msg}`);
+};
+const err = (msg) => {
+  if (fileLogger) fileLogger.error(msg);
+  else console.error(`[tokenmonitor] ${msg}`);
+};
 
 const COMMANDS = ['scan', 'serve', 'today', 'install-agent', 'uninstall-agent', 'bar', 'status'];
 const PKG = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'));
@@ -167,6 +177,14 @@ if (cmd === 'status') {
   process.exit(0);
 }
 
+// 到这里才是会真正执行动作的命令：按 #23 的三级数据目录解析装配文件日志，
+// stdout 输出保持不变（consoleOutput），同时落 <数据根>\logs\tokenmonitor.log 供 GUI tail。
+try {
+  fileLogger = new RuntimeLogger({ logDir: getDefaultLogDir(), consoleOutput: true });
+} catch (e) {
+  err(`文件日志不可用，仅输出到 stdout：${e.message}`);
+}
+
 // 装卸服务与数据无关，必须在 new Store 之前返回：否则仅仅为了装个开机自启
 // 就会在用户机器上建出数据库文件。
 if (cmd === 'install-agent' || cmd === 'uninstall-agent' || cmd === 'bar') {
@@ -221,7 +239,7 @@ if (cmd === 'scan') {
   const shutdown = (signal) => {
     if (shutting) return;
     shutting = true;
-    process.stderr.write(`[tokenmonitor] shutting down (${signal})\n`);
+    err(`shutting down (${signal})`);
     try { scanner.stop(); } catch { /* already stopped */ }
     try { balancePoller.stop?.(); } catch { /* optional */ }
     try { server.close(); } catch { /* listen failed */ }

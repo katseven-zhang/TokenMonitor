@@ -90,6 +90,37 @@ console.log('\n[status] 不读会话、不建库');
   ok('status 未创建数据库', !existsSync(dbFile));
 }
 
+console.log('\n[#51 文件日志] 真实命令落 logs\\tokenmonitor.log，只读诊断保持零副作用');
+{
+  // 空的 HOME/LOCALAPPDATA 让枚举找不到任何来源目录：扫描 0 文件但仍会写一行汇总，
+  // 于是能在毫秒级验证「日志确实落盘」，而不必真扫用户数据。
+  const EMPTY_HOME = mkdtempSync(join(tmpdir(), 'cli-empty-home-中文 空格-'));
+  const LOGDIR = mkdtempSync(join(tmpdir(), 'cli-logdir-中文 空格-'));
+  const logFile = join(LOGDIR, 'logs', 'tokenmonitor.log');
+  const iso = { extraEnv: { TOKENMONITOR_DATA_DIR: LOGDIR, LOCALAPPDATA: EMPTY_HOME, APPDATA: EMPTY_HOME } };
+
+  run(['status'], { home: EMPTY_HOME, ...iso });
+  ok('status 不创建日志目录', !existsSync(join(LOGDIR, 'logs')));
+  const v = run(['--version'], { home: EMPTY_HOME, ...iso });
+  ok('--version 不创建日志目录', !existsSync(join(LOGDIR, 'logs')));
+  ok('--version stdout 只有版本号', /^\d+\.\d+\.\d+\s*$/.test(v.stdout), JSON.stringify(v.stdout));
+
+  const s = run(['scan'], { home: EMPTY_HOME, ...iso });
+  ok('scan 退出码 0', s.status === 0, `${s.status} ${s.stderr?.slice(0, 200)}`);
+  ok('scan 已写出日志文件', existsSync(logFile), logFile);
+  if (existsSync(logFile)) {
+    const text = readFileSync(logFile, 'utf8');
+    ok('日志行格式 [ISO] [LEVEL]', /^\[\d{4}-\d{2}-\d{2}T[^\]]+\] \[(INFO|WARN|ERROR)\] /m.test(text), text.slice(0, 140));
+    ok('日志不含明文密钥', !/sk-[a-zA-Z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._~+/-]{8,}/.test(text));
+  }
+  // 落盘的同时 stdout 必须保持原样：GUI 之外的用户与现有 CI 都按这个前缀读输出
+  ok('stdout 仍带 [tokenmonitor] 前缀', /\[tokenmonitor\] /.test(`${s.stdout}${s.stderr}`), `${s.stdout}${s.stderr}`.slice(0, 160));
+  ok('stdout 与文件日志同源', s.stdout.includes('scan:') && existsSync(logFile) && readFileSync(logFile, 'utf8').includes('scan:'));
+
+  rmSync(EMPTY_HOME, { recursive: true, force: true });
+  rmSync(LOGDIR, { recursive: true, force: true });
+}
+
 console.log('\n[agent/bar] Store 创建前分流，bar 按构建物有无给出两种明确行为');
 {
   const src = (await import('node:fs')).readFileSync(CLI, 'utf8');
