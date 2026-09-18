@@ -64,6 +64,48 @@ console.log('\n[source contract] src/main.rs 契约断言（Rust 原生实现）
   ok('窗口关闭只停自己拉起的后台（与托盘一致）', source.includes('stop_own_backend(false)'));
   ok('无写死盘符/用户名', !/[A-Za-z]:\\Users\\|[A-Za-z]:\\AgentData/.test(source));
 }
+
+// ---- #39：WM_DPICHANGED 持锁自锁死 + 日志截断后残留陈旧内容 ----
+console.log('\n[#39] DPI 变更不持锁调窗口 API；日志清空后面板不挂旧内容');
+{
+  const arm = source.slice(source.indexOf('WM_DPICHANGED =>'), source.indexOf('WM_CTLCOLORSTATIC =>'));
+  ok('#39 捕获到 WM_DPICHANGED 分支', arm.includes('WM_DPICHANGED =>') && arm.length > 0);
+  const lockOpen = arm.indexOf('let suggested = with_app(');
+  const bind = arm.indexOf('if let Some(r) = suggested');   // with_app 已返回、锁已释放
+  const setPos = arm.indexOf('SetWindowPos(');
+  ok('#39 SetWindowPos 在 APP 锁释放之后才调用（否则 WM_SIZE 重入非重入 Mutex 即自锁死）',
+    lockOpen >= 0 && bind > lockOpen && setPos > bind,
+    `lockOpen=${lockOpen} bind=${bind} setPos=${setPos}`);
+  const locked = arm.slice(lockOpen, bind);
+  ok('#39 持锁闭包体内不再出现 SetWindowPos / SetWindowTextW',
+    !/SetWindowPos\(/.test(locked) && !/SetWindowTextW\(/.test(locked));
+  ok('#39 锁内只准备字体与 RECT，建议矩形以值取出而非就地使用',
+    /Some\(unsafe \{ \*prc \}\)/.test(arm) && !/let r = \*prc;/.test(arm));
+  ok('#39 布局在解锁后单独取锁执行', /with_app\(\|a\| layout_controls\(hwnd, a\)\)/.test(arm));
+
+  const refresh = source.slice(source.indexOf('fn refresh_log'), source.indexOf('fn poll_status'));
+  ok('#39 空 tail 不再直接 return 保留旧文本，而是写占位行',
+    /if lines\.is_empty\(\)/.test(refresh) && refresh.includes('EMPTY_LOG_TEXT'));
+  ok('#39 占位行只在状态翻转时写一次（不每 2s 重设文本）',
+    /log_shows_placeholder/.test(refresh) && /if !self\.log_shows_placeholder/.test(refresh));
+  ok('#39 有内容时复位占位标记', /self\.log_shows_placeholder = false;/.test(refresh));
+  ok('#39 未越界改正常追加的 offset 算法（tail_file 仍按 TAIL_LINES 取尾部）',
+    /tail_file\(&self\.log_path, TAIL_LINES\)/.test(refresh));
+}
+
+// ---- #54 WM_CTLCOLORSTATIC 取 APP 锁导致首个 2s tick 永久自锁死 ----
+console.log('\n[#54] WM_CTLCOLORSTATIC 不得进 APP 锁（静态控件重绘同步回父窗口）');
+{
+  const arm = source.slice(source.indexOf('WM_CTLCOLORSTATIC =>'), source.indexOf('WM_CTLCOLOREDIT =>'));
+  ok('#54 捕获到 WM_CTLCOLORSTATIC 分支', arm.includes('WM_CTLCOLORSTATIC =>') && arm.length > 0);
+  ok('#54 处理器不调用 with_app（否则与持锁改文本的调用方互锁）', !arm.includes('with_app('), arm.slice(0, 200));
+  ok('#54 颜色/句柄改由原子快照提供', /CTL_STATUS_HWND\.load|CTL_BG_BRUSH\.load/.test(arm));
+  ok('#54 快照在 update_status 中先于改文本发布',
+    /publish_ctl_snapshot\(/.test(source.slice(source.indexOf('fn update_status'), source.indexOf('fn refresh_log'))));
+  ok('#54 WM_CREATE 也给出初值快照', /publish_ctl_snapshot\(status_label, log_header, bg_brush, false\)/.test(source));
+  ok('#54 快照发布函数存在且写四个值',
+    /fn publish_ctl_snapshot/.test(source) && (source.match(/\.store\(/g) || []).length >= 4);
+}
 console.log('\n[behavioral] 已构建 exe 无头自检（中文+空格包布局）');
 if (!existsSync(exe)) {
   console.log('  [skip] 未找到 windows/gui/publish/TokenMonitorGui.exe —— 先执行：');

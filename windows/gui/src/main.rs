@@ -58,6 +58,8 @@ pub const SETTINGS_FILE: &str = "gui-settings.json";
 pub const LOG_FILE: &str = "tokenmonitor.log";
 pub const DEFAULT_PORT: u32 = 8787;
 pub const TAIL_LINES: usize = 400;
+/// 日志为空时面板显示的占位行（#39：截断/轮转后不能继续挂着陈旧内容）
+pub const EMPTY_LOG_TEXT: &str = "（暂无日志）";
 
 pub fn parse_port(text: &str) -> Option<u32> {
     match text.trim().parse::<u32>() {
@@ -432,6 +434,9 @@ struct App {
     backend_exe: Option<PathBuf>,
     backend_script: Option<PathBuf>,
     external_online: bool,
+    /// 面板当前是否已在显示「（暂无日志）」占位行。用于只在状态翻转时改一次文本，
+    /// 免得每 2s 定时都对空日志重设一次窗口文本（#39）。
+    log_shows_placeholder: bool,
 }
 
 
@@ -439,6 +444,25 @@ struct App {
 unsafe impl Send for App {}
 
 static APP: std::sync::Mutex<Option<App>> = std::sync::Mutex::new(None);
+
+// WM_CTLCOLORSTATIC 在子静态控件重绘时被**同步**发回父窗口。若它去取 APP 锁，而某个
+// 调用方正持着 APP 锁改静态文本（WM_TIMER 里的 update_status、按钮的 stop/start 都是），
+// 同一线程就会对非重入的 std::sync::Mutex 二次加锁 —— 首个 2s tick 即永久自锁死：
+// 窗口在、进程活，但消息循环再也不取消息。这里把该处理器需要的四个值改成原子快照，
+// 让它完全不进 APP 锁，从根上消除这一类重入（与 #39 的 SetWindowPos 同源问题）。
+static CTL_STATUS_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CTL_LOGHDR_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CTL_BG_BRUSH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CTL_BACKEND_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 把 APP 锁内算出的值发布给免锁的 WM_CTLCOLORSTATIC 处理器
+fn publish_ctl_snapshot(status_hwnd: HWND, log_header: HWND, bg_brush: HBRUSH, running: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
+    CTL_STATUS_HWND.store(status_hwnd as usize, Relaxed);
+    CTL_LOGHDR_HWND.store(log_header as usize, Relaxed);
+    CTL_BG_BRUSH.store(bg_brush as usize, Relaxed);
+    CTL_BACKEND_RUNNING.store(running, Relaxed);
+}
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     APP.lock().ok().and_then(|mut g| g.as_mut().map(f))
@@ -592,7 +616,12 @@ impl App {
     }
 
     fn update_status(&mut self) {
-        let state = if self.own_backend_alive() {
+        let alive = self.own_backend_alive();
+        let running = alive || self.external_online;
+        // 先发布免锁快照，再改文本：改文本触发的重绘会同步回到 WM_CTLCOLORSTATIC，
+        // 那个处理器只能读原子值，不能再进 APP 锁（本方法常在持锁时被调用）。
+        publish_ctl_snapshot(self.status_label, self.log_header, self.bg_brush, running);
+        let state = if alive {
             format!("运行中（本程序启动，PID {}）", self.backend.map(|(_, pid)| pid).unwrap_or(0))
         } else if self.external_online {
             "运行中（外部启动）".to_string()
@@ -616,8 +645,16 @@ impl App {
     fn refresh_log(&mut self) {
         let lines = tail_file(&self.log_path, TAIL_LINES);
         if lines.is_empty() {
+            // 日志被 truncate / 轮转 / 删除重建后 tail 会变空。此时若直接 return，
+            // 面板会一直挂着上一轮的旧内容，用户以为旧错误还在发生（#39）。
+            // 只在状态翻转时改一次文本，避免每 2s 空转重设窗口文本。
+            if !self.log_shows_placeholder {
+                self.log_shows_placeholder = true;
+                self.set_text(self.log_box, EMPTY_LOG_TEXT);
+            }
             return;
         }
+        self.log_shows_placeholder = false;
         self.set_text(self.log_box, &lines.join("\r\n"));
         unsafe {
             SendMessageW(self.log_box, EM_SETSEL, u32::MAX as usize, 0);
@@ -866,10 +903,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 backend_exe: resolved.as_ref().map(|(e, _)| e.clone()),
                 backend_script: resolved.as_ref().map(|(_, s)| s.clone()),
                 external_online: false,
+                // 文本框初值为空而非占位行，故置 false：首轮空日志会写一次「（暂无日志）」
+                log_shows_placeholder: false,
             };
 
             layout_controls(hwnd, &app);
             *APP.lock().unwrap() = Some(app);
+            // WM_CTLCOLORSTATIC 可能在下一次重绘就到来，先给出免锁快照的初值
+            publish_ctl_snapshot(status_label, log_header, bg_brush, false);
 
             if let Some(saved) = with_app(|a| load_port(&a.settings_path).to_string()) {
                 SetWindowTextW(port_edit, wide(&saved).as_ptr());
@@ -890,7 +931,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
         }
         WM_DPICHANGED => {
             let new_dpi = (wparam >> 16) as u32;
-            with_app(|a| {
+            // 锁内只做「准备」：换字体、把建议矩形拷出来。绝不在持有 APP 锁时调用
+            // SetWindowPos —— 它会同步派发 WM_SIZE，而 WM_SIZE 处理器又进 with_app，
+            // std::sync::Mutex 不可重入，同线程二次加锁就是自锁死（#39，由 #33 引入）。
+            let suggested = with_app(|a| {
                 DeleteObject(a.font_ui as _);
                 DeleteObject(a.font_ui_bold as _);
                 DeleteObject(a.font_log as _);
@@ -908,43 +952,49 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 a.font_log = font_log;
 
                 let prc = lparam as *const RECT;
-                if !prc.is_null() {
-                    let r = *prc;
-                    SetWindowPos(
-                        hwnd,
-                        std::ptr::null_mut(),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_NOACTIVATE | SWP_NOZORDER,
-                    );
+                if prc.is_null() {
+                    None
+                } else {
+                    Some(unsafe { *prc })
                 }
-                layout_controls(hwnd, a);
-            });
+            })
+            .flatten();
+            // 锁已释放，此时 SetWindowPos 引发的 WM_SIZE 能正常取到锁
+            if let Some(r) = suggested {
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            }
+            with_app(|a| layout_controls(hwnd, a));
             0
         }
         WM_CTLCOLORSTATIC => {
             let hdc = wparam as HDC;
             let child = lparam as HWND;
             SetBkMode(hdc, TRANSPARENT as i32);
-            let (color, bg) = with_app(|a| {
-                if child == a.status_label {
-                    let text_color = if a.own_backend_alive() || a.external_online {
-                        COLOR_STATUS_RUNNING
-                    } else {
-                        COLOR_STATUS_STOPPED
-                    };
-                    (text_color, a.bg_brush)
-                } else if child == a.log_header {
-                    (COLOR_TEXT_PRIMARY, a.bg_brush)
+            // 全程不进 APP 锁：本消息是子控件重绘时**同步**发给父窗口的，
+            // 调用方往往正持有 APP 锁，取锁即自锁死（见 CTL_* 注释）。
+            use std::sync::atomic::Ordering::Relaxed;
+            let bg = CTL_BG_BRUSH.load(Relaxed) as isize;
+            let color = if child as usize == CTL_STATUS_HWND.load(Relaxed) {
+                if CTL_BACKEND_RUNNING.load(Relaxed) {
+                    COLOR_STATUS_RUNNING
                 } else {
-                    (COLOR_TEXT_MUTED, a.bg_brush)
+                    COLOR_STATUS_STOPPED
                 }
-            })
-            .unwrap_or((COLOR_TEXT_MUTED, std::ptr::null_mut()));
+            } else if child as usize == CTL_LOGHDR_HWND.load(Relaxed) {
+                COLOR_TEXT_PRIMARY
+            } else {
+                COLOR_TEXT_MUTED
+            };
             SetTextColor(hdc, color);
-            bg as isize
+            bg
         }
         WM_CTLCOLOREDIT => {
             let hdc = wparam as HDC;
