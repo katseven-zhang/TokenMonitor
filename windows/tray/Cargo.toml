@@ -1,0 +1,29 @@
+[package]
+name = "TokenMonitorTray"
+version = "1.4.3"
+edition = "2021"
+description = "TokenMonitor 系统托盘：图标状态/打开面板/启动或重启后台/退出（原生 Win32，目标机零依赖）"
+
+[[bin]]
+name = "TokenMonitorTray"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Networking_WinSock",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Controls",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

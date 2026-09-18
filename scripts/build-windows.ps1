@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   TokenMonitor Windows x64 runtime package builder (task #12 Win-Package; layout v2 by #25).
@@ -106,6 +106,20 @@ try {
 
   Copy-Item -LiteralPath $guiExe -Destination (Join-Path $dist 'TokenMonitor.exe')
   Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $runtime 'node.exe')
+
+  # --- tray (#32): native Rust tray exe into the package at tray\TokenMonitorTray.exe,
+  # matching src/bar.js trayExeCandidates' second candidate (<root>\tray\). Before this
+  # task the packager never built/copied the tray, so the packaged `bar` command could
+  # never find it. Use the published artifact, else build via windows\tray\build.ps1.
+  $trayExe = Join-Path $repoFull 'windows\tray\publish\TokenMonitorTray.exe'
+  if (-not (Test-Path -LiteralPath $trayExe)) {
+    Write-Host '[build] tray exe missing, building windows\tray (Rust toolchain required)...'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoFull 'windows\tray\build.ps1')
+    if ($LASTEXITCODE -ne 0) { Fail 'tray build failed (Rust toolchain required; or run windows\tray\build.ps1 first)' }
+  }
+  if (-not (Test-Path -LiteralPath $trayExe)) { Fail "tray missing after build: $trayExe" }
+  New-Item -ItemType Directory -Path (Join-Path $dist 'tray') -Force | Out-Null
+  Copy-Item -LiteralPath $trayExe -Destination (Join-Path $dist 'tray\TokenMonitorTray.exe')
 
   foreach ($dir in @('bin', 'src', 'web')) {
     Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $runtime $dir) -Recurse

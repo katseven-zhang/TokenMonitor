@@ -10,7 +10,7 @@
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/tray.test.mjs
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -28,11 +28,35 @@ function ok(cond, label, extra = '') {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-if (!existsSync(exe)) {
-  console.log('[skip] 未找到 windows/tray/publish/TokenMonitorTray.exe —— 先执行：');
-  console.log('       powershell -NoProfile -ExecutionPolicy Bypass -File windows/tray/build.ps1');
-  console.log('tray test: skipped (artifact not built)');
+// #32/#41：缺产物不再 skip 绿——默认报错失败；仅本地无工具链时显式 SKIP_TRAY_ARTIFACT=1 放行
+if (!existsSync(exe) && process.env.SKIP_TRAY_ARTIFACT === '1') {
+  console.log('[warn] SKIP_TRAY_ARTIFACT=1 —— tray behavioral 显式放行跳过（无产物）');
+  console.log('tray test: skipped (artifact not built, explicitly allowed)');
   process.exit(0);
+}
+if (!existsSync(exe)) {
+  console.log('  ✗ 未找到 windows/tray/publish/TokenMonitorTray.exe —— 默认必须先构建产物：');
+  console.log('         powershell -NoProfile -ExecutionPolicy Bypass -File windows/tray/build.ps1');
+  console.log('         （仅限本地无 Rust 工具链时，可显式 SKIP_TRAY_ARTIFACT=1 放行）');
+  process.exit(1);
+}
+
+console.log('[0] 源码契约（Rust 原生实现，#32）');
+{
+  const source = readFileSync(join(repo, 'windows', 'tray', 'src', 'main.rs'), 'utf8');
+  const okSrc = (cond, label, extra = '') => ok(cond, label, extra);
+  okSrc(source.includes('MUTEX_NAME') && source.includes('TokenMonitorTray'), '单实例互斥常量（与 .NET 版同名 Local 命名空间）');
+  okSrc(source.includes('Shell_NotifyIconW'), '托盘图标走 Shell_NotifyIconW（原生 Win32，无 .NET）');
+  okSrc(/PROBE_CONNECT_TIMEOUT_MS: u32 = 700/.test(source) && /PROBE_IO_TIMEOUT_MS: u32 = 700/.test(source),
+    '探测分级超时常量（总量 ≤1.5s，不无界阻塞）');
+  okSrc(/ioctlsocket\(sock, ws::FIONBIO/.test(source), 'connect 非阻塞（select 等待）');
+  okSrc(source.includes('POLL_INTERVAL_MS: u32 = 5000'), '约 5s 轮询 /api/status');
+  okSrc(source.includes('重启后台') && source.includes('后台运行中（外部启动）') && source.includes('启动后台'),
+    '菜单标签三态（对齐 .NET 版 StartRestartLabel）');
+  okSrc(source.includes('为免误杀这里不重启'), '外部启动的后台不停止不重启（只管理自有）');
+  okSrc(source.includes('--selfcheck') && source.includes('--probe'), '无头 --selfcheck / --probe 模式');
+  okSrc(!existsSync(join(repo, 'windows', 'tray', 'Program.cs'))
+    && !existsSync(join(repo, 'windows', 'tray', 'TokenMonitorTray.csproj')), '.NET 版已删除（csproj/Program.cs）');
 }
 
 console.log('[1] 中文+空格路径下运行自包含单文件');
