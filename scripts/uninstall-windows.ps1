@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   TokenMonitor per-user uninstaller with data-preservation defaults.
@@ -65,7 +65,30 @@ $installDir = Join-Path $InstallRoot 'TokenMonitor'
 $dataDir = Join-Path $installDir 'data'                  # portable data (inside the install folder)
 $dataKeep = Join-Path $InstallRoot 'TokenMonitor-data'   # where uninstall keeps the data
 
+# Detect a running backend before any destructive operation (#31).
+# Corrupted lock JSON is treated as "no running instance".
+function Assert-BackendStopped {
+  try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+  if (-not (Test-Path -LiteralPath $dataDir)) { return }
+  $locks = Get-ChildItem -LiteralPath $dataDir -Filter 'tokenmonitor-*.lock' -ErrorAction SilentlyContinue
+  foreach ($lock in $locks) {
+    $backendPid = 0
+    try {
+      $raw = Get-Content -LiteralPath $lock.FullName -Raw -ErrorAction Stop
+      $parsed = $raw | ConvertFrom-Json
+      $backendPid = [int]$parsed.pid
+    } catch { continue }
+    if ($backendPid -gt 0 -and (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)) {
+      Write-Host ''
+      Write-Host ("检测到 TokenMonitor 后台正在运行（PID {0}，锁文件 {1}）。" -f $backendPid, $lock.Name)
+      Write-Host '请先停止后台，再执行安装/升级/卸载。'
+      throw ("backend is running (pid {0}, lock {1}) - please stop the backend first" -f $backendPid, $lock.Name)
+    }
+  }
+}
+
 try {
+  Assert-BackendStopped  # :31 refuse to touch data while the backend is running
   # --- 1. this product's scheduled task only ---------------------------------
   if ($SkipScheduledTask) {
     Info 'scheduled task step skipped (-SkipScheduledTask)'

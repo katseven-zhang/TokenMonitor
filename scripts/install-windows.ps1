@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
   TokenMonitor per-user (non-admin) installer.
@@ -114,7 +114,33 @@ function Move-DataBack {
   }
 }
 
+# Detect a running backend before any destructive operation (#31):
+# data	okenmonitor-<port>.lock carries the backend PID. A corrupted or
+# unparsable lock file is treated as "no running instance" (fault tolerance).
+function Assert-BackendStopped {
+  try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+  $dataPath = Join-Path $installDir 'data'
+  if (-not (Test-Path -LiteralPath $dataPath)) { return }
+  $locks = Get-ChildItem -LiteralPath $dataPath -Filter 'tokenmonitor-*.lock' -ErrorAction SilentlyContinue
+  foreach ($lock in $locks) {
+    $backendPid = 0
+    try {
+      $raw = Get-Content -LiteralPath $lock.FullName -Raw -ErrorAction Stop
+      $parsed = $raw | ConvertFrom-Json
+      $backendPid = [int]$parsed.pid
+    } catch { continue }  # corrupted JSON: treat as no running instance
+    if ($backendPid -gt 0 -and (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)) {
+      Write-Host ''
+      Write-Host ("检测到 TokenMonitor 后台正在运行（PID {0}，锁文件 {1}）。" -f $backendPid, $lock.Name)
+      Write-Host '请先停止后台，再执行安装/升级/卸载。'
+      Write-Host '可通过启动器 TokenMonitor.exe 的「停止」按钮停止后台。'
+      throw ("backend is running (pid {0}, lock {1}) - please stop the backend first" -f $backendPid, $lock.Name)
+    }
+  }
+}
+
 try {
+  Assert-BackendStopped  # :41
   if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
   if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
 

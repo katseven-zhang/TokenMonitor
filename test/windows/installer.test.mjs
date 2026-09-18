@@ -132,6 +132,28 @@ try {
     ok(!existsSync(programsRoot + '/TokenMonitor.new'), '失败后暂存目录已清理');
   }
 
+  console.log('[4b] 后台运行中：升级/卸载给出明确中文提示且不动 data\（#31）');
+  {
+    mkdirSync(dataDir, { recursive: true });
+    // 存活 PID = 本测试进程（脚本会用 Get-Process 验证）
+    writeFileSync(join(dataDir, 'tokenmonitor-8787.lock'), JSON.stringify({ pid: process.pid, port: 8787 }));
+    const candRun = makeCandidate(base, '2.1.0-test');
+    const rUp = runPs(INSTALL_PS1, ['-Source', candRun, ...dryRunArgs]);
+    ok(rUp.code !== 0, '后台运行中升级 → 非零退出');
+    ok(rUp.out.includes('请先停止后台'), '升级给出明确中文提示');
+    ok(installedVersion(installDir) === '2.0.0-test', '安装目录未被替换（data 未动）');
+    const rUn = runPs(UNINSTALL_PS1, dryRunArgs);
+    ok(rUn.code !== 0, '后台运行中卸载 → 非零退出');
+    ok(rUn.out.includes('请先停止后台'), '卸载给出明确中文提示');
+    ok(existsSync(dataDir), '卸载未做破坏性操作（data 仍在）');
+    // 损坏 JSON 容错：视为无运行实例
+    rmSync(join(dataDir, 'tokenmonitor-8787.lock'));
+    writeFileSync(join(dataDir, 'tokenmonitor-9999.lock'), 'not-json{{{ broken');
+    const rFix = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '2.2.0-test'), ...dryRunArgs]);
+    ok(rFix.code === 0, '损坏锁文件视为无运行实例（升级照常 exit 0）');
+    ok(installedVersion(installDir) === '2.2.0-test', '损坏锁场景升级后版本 2.2.0-test');
+  }
+
   console.log('[5] 卸载：程序删除，data\\ 移到 TokenMonitor-data 保留');
   {
     const r = runPs(UNINSTALL_PS1, dryRunArgs);
