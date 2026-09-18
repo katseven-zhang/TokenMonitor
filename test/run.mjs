@@ -1945,6 +1945,50 @@ console.log('\n[23] /codex 独立页（#48：路由/入口/状态保持/契约�
   }
 }
 
+/* ---------- [24] Codex 报告子视图（#49） ---------- */
+console.log('\n[24] Codex 报告子视图（#49：明细/日报/CSV 挂载于 #48 路由内部）');
+{
+  const codexJs = read(join(ROOT, 'web/codex.js'));
+  // 挂载边界：使用 #48 的 slot，不新建顶层路由/入口
+  ok('#49 挂载于 #48 的 #codex-report-slot（不注册竞争性顶层路由）',
+    codexJs.includes("getElementById('codex-report-slot')") && !codexJs.includes("href='/codex") && !codexJs.includes('history.pushState'));
+  // 数据只消费 #46 契约
+  ok('#49 消费 events/report/export.csv 三个 #46 接口',
+    codexJs.includes('/api/codex/events') && codexJs.includes('/api/codex/report')
+      && codexJs.includes('/api/codex/export.csv'));
+  // 口径：total 不重复计 cached/reasoning；缺失显示 —
+  ok('#49 UI 明确口径（total = input + output；缺失显示 — 不是 0）',
+    codexJs.includes('total = input + output') && codexJs.includes("const d = (v) => (typeof v === 'number'"));
+  // 筛选三态：加载中（初始 tbody）/空结果/错误
+  ok('#49 支持 day/model/session 筛选与空结果/错误文案',
+    codexJs.includes("rep-day") && codexJs.includes('rep-model') && codexJs.includes('rep-session')
+      && codexJs.includes('无匹配记录') && codexJs.includes('报告加载失败'));
+  // CSV 跟随筛选
+  ok('#49 CSV 导出链接跟随当前筛选', codexJs.includes('rep-csv') && codexJs.includes('/api/codex/export.csv?'));
+  // 真实服务 DOM 证据：页面含报告子视图容器
+  {
+    const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+    const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+    const { EventEmitter } = await import('node:events');
+    const base = mkdtempSync(join(tmpdir(), 'codex49-'));
+    const s = new Store(join(base, 't.db'));
+    const fakeScanner = Object.assign(new EventEmitter(), { stats: {} });
+    const port = await new Promise((r) => { const s2 = net.createServer(); s2.listen(0, '127.0.0.1', () => { const p = s2.address().port; s2.close(() => r(p)); }); });
+    const server = await startServer({ store: s, scanner: fakeScanner, port, log: () => {} });
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      const jsRes = await fetch(`http://127.0.0.1:${port}/codex.js`);
+      const js = await jsRes.text();
+      ok('#49 真实服务下 codex.js 含报告子视图（挂载点/明细表/CSV 链接 DOM 证据）',
+        jsRes.status === 200 && js.includes('codex-report-slot') && js.includes('rep-tbody') && js.includes('rep-csv'));
+    } finally {
+      server.close();
+      try { s.db.close(); } catch { /* 句柄 */ }
+      try { rmSync(base, { recursive: true, force: true }); } catch { /* 延迟 */ }
+    }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

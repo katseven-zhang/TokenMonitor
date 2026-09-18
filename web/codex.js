@@ -210,5 +210,87 @@ document.getElementById('back-home')?.addEventListener('click', (e) => {
 });
 document.getElementById('codex-refresh')?.addEventListener('click', () => load());
 window.addEventListener('resize', () => { for (const c of Object.values(charts)) c.resize(); });
+
+/* ==== 报告子视图（#49）：挂载在 #48 提供的 #codex-report-slot 内部，
+ * 不注册新的顶层路由/入口/返回导航；数据只消费 /api/codex/events、
+ * /api/codex/report、/api/codex/export.csv（#46 契约）。
+ * 口径：total = input + output（cached/reasoning 不重复计入 total），
+ * 缺失值显示 — 绝不伪装成 0。 ==== */
+const reportState = { day: '', model: '', session: '' };
+
+function reportQuery() {
+  const p = new URLSearchParams();
+  if (reportState.day) p.set('day', reportState.day);
+  if (reportState.model) p.set('model', reportState.model);
+  if (reportState.session) p.set('session', reportState.session);
+  return p.toString();
+}
+
+async function loadReport() {
+  const tbody = document.getElementById('rep-tbody');
+  const summaryEl = document.getElementById('rep-summary');
+  if (!tbody) return;
+  try {
+    const qs = reportQuery();
+    const [ev, rep] = await Promise.all([
+      fetch(`/api/codex/events?${qs}&limit=200`).then((r) => r.json()),
+      fetch(`/api/codex/report${reportState.day ? `?day=${reportState.day}` : ''}`).then((r) => r.json()),
+    ]);
+    // 日报摘要（known/unknown coverage；total 口径注明）
+    const cov = rep.reasoning_coverage || {};
+    if (summaryEl) {
+      summaryEl.textContent = `日报 ${rep.day}：${rep.by_model?.length ?? 0} 个模型 · requests ${cov.known + cov.unknown} · reasoning coverage known ${cov.known} / unknown ${cov.unknown} · total = input + output（cached/reasoning 不重复计入）`;
+    }
+    const rows = (ev.events || []).map((e) => {
+      const d = (v) => (typeof v === 'number' && Number.isFinite(v) ? fmt(v) : '—');
+      return `<tr>
+        <td>${esc(new Date(e.ts).toLocaleString('zh-CN'))}</td>
+        <td>${esc(e.model ?? '—')}</td>
+        <td>${esc(e.session_id ?? '—')}</td>
+        <td>${esc(e.project ?? '—')}</td>
+        <td>${d(e.input)}</td><td>${d(e.cached_input)}</td><td>${d(e.cache_write)}</td>
+        <td>${d(e.output)}</td><td>${d(e.reasoning)}</td><td>${d(e.total)}</td>
+      </tr>`;
+    }).join('');
+    tbody.innerHTML = rows || '<tr><td colspan="10" class="dim">无匹配记录（筛选过宽或当日无用量）</td></tr>';
+    // CSV 导出跟随当前筛选
+    const csv = document.getElementById('rep-csv');
+    if (csv) csv.href = `/api/codex/export.csv?${qs}`;
+  } catch {
+    if (summaryEl) summaryEl.textContent = '报告加载失败，可点「刷新」重试。';
+  }
+}
+
+function initReport() {
+  const slot = document.getElementById('codex-report-slot');
+  if (!slot) return;
+  slot.innerHTML = `
+    <h3 style="margin-top:10px">请求明细与日报</h3>
+    <div class="recon">
+      <input id="rep-day" type="date" style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:2px 6px">
+      <input id="rep-model" placeholder="模型（可选）" style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:2px 6px">
+      <input id="rep-session" placeholder="会话（可选）" style="background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:2px 6px">
+      <button id="rep-load" class="on">查询</button>
+      <a id="rep-csv" href="/api/codex/export.csv" download="codex.csv" style="color:#8a8aa0">导出 CSV</a>
+    </div>
+    <div id="rep-summary" class="recon dim" style="margin-top:4px"></div>
+    <div style="overflow-x:auto">
+      <table class="rates-table"><thead><tr>
+        <th>时间</th><th>模型</th><th>会话</th><th>项目</th>
+        <th>input</th><th>cached</th><th>cache write</th><th>output</th><th>reasoning</th><th>total</th>
+      </tr></thead>
+      <tbody id="rep-tbody"><tr><td colspan="10" class="dim">加载中…</td></tr></tbody></table>
+    </div>
+    <div class="recon dim" style="margin-top:2px">total = input + output；cached / reasoning 为并列口径，不重复计入 total；缺失值显示 —（不是 0）。</div>`;
+  document.getElementById('rep-load')?.addEventListener('click', () => {
+    reportState.day = document.getElementById('rep-day')?.value || '';
+    reportState.model = document.getElementById('rep-model')?.value.trim() || '';
+    reportState.session = document.getElementById('rep-session')?.value.trim() || '';
+    loadReport();
+  });
+  loadReport();
+}
+initReport();
+
 load();
 setInterval(load, 60_000);
