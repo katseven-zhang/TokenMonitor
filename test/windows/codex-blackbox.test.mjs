@@ -2,9 +2,12 @@
  * Codex 统计黑盒验收（#50）。
  *
  * 用户路径黑盒走查：起真实 serve（脱敏 fixture，临时目录含中文+空格）→
- * 首页入口 → /codex 独立页 → 窗口卡/吞吐/pace/cost/明细/日报/CSV 全链路
- * API 契约 → 回归断言（双扫描幂等 / 坏 JSON / 归档搬移 / 中文路径）。
+ * 首页入口 → /codex 独立页 → 窗口卡/pace/cost/日报/CSV 全链路 API 契约 →
+ * 吞吐（throughput）与请求明细（events）契约走查 → scan 回归命令。
+ * 回归断言（双扫描幂等 / 坏 JSON / 归档搬移等）集中在 test/run.mjs
+ * [3]/[11]/[17] 组并在 docs/CODEX-STATS.md 索引，本文件不重复维护。
  * 任何一步失败即非零退出（不静默跳过）。
+ * （#58 评审整改：原头注/提交说明声称覆盖吞吐与明细但实际未 fetch——已补实测。）
  *
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/codex-blackbox.test.mjs
  */
@@ -79,6 +82,13 @@ try {
       typeof cost.disclaimer === 'string' && Array.isArray(cost.models) && 'usd_to_cny' in cost.fx);
     const rep = await (await fetch(`http://127.0.0.1:${port}/api/codex/report`)).json();
     ok('黑盒：日报契约（coverage）', rep.day && 'reasoning_coverage' in rep);
+    // #58 评审整改：补 throughput/events 实测（原头注声称覆盖但未 fetch）
+    const thr = await (await fetch(`http://127.0.0.1:${port}/api/codex/throughput?days=7`)).json();
+    ok('黑盒：吞吐契约（totals/by_day/by_model 结构）',
+      typeof thr.totals?.requests === 'number' && Array.isArray(thr.by_day) && Array.isArray(thr.by_model));
+    const ev = await (await fetch(`http://127.0.0.1:${port}/api/codex/events?limit=10`)).json();
+    ok('黑盒：明细契约（events 数组 + count）',
+      Array.isArray(ev.events) && typeof ev.count === 'number' && ev.count === ev.events.length);
     const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv`);
     const csvBuf = await csvRes.arrayBuffer();
     ok('黑盒：CSV 可下载且带 UTF-8 BOM（原始字节 EF,BB,BF）',
