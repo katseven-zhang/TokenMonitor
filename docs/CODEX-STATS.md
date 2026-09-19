@@ -35,7 +35,7 @@ weekly API 等值金额（按本地价表估算）、请求明细 / 日报 / CSV
 | 边界 | 行为 | 断言 |
 |---|---|---|
 | 中文/空格路径 | 采集、fixture、临时目录全链路可用 | run.mjs [3]/[17]/[19] |
-| CRLF / 半行 | 半行不推进游标；CRLF 行尾正确 | [3] 增量组、[17] |
+| CRLF / 半行 | 半行不推进游标；CRLF 行尾正确 | test/windows/jsonl-a.test.mjs、jsonl-b.test.mjs（Grok/WorkBuddy/Pi 黄金数字）、test/sources/antigravity/antigravity.test.mjs |
 | 双扫描 / 版本重扫 | dedup_key 幂等，重复扫描零新增 | [3]（幂等断言）、[17] |
 | 归档搬移 | 会话键+序号 dedup_key，路径变化不重复计数 | [3] 组 codex fixture |
 | 窗口 reset | windowId 变化弃旧窗口样本；历史 window_id 代际切换 | [16] #47、[18] #45 |

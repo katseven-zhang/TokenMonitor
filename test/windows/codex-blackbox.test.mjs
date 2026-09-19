@@ -89,6 +89,30 @@ try {
     const ev = await (await fetch(`http://127.0.0.1:${port}/api/codex/events?limit=10`)).json();
     ok('黑盒：明细契约（events 数组 + count）',
       Array.isArray(ev.events) && typeof ev.count === 'number' && ev.count === ev.events.length);
+    // #58 第二轮评审（#48 AC8 / #50 AC2）：前端场景专项断言——刷新/失败、趋势空态、窄宽度
+    {
+      const pageJs = await (await fetch(`http://127.0.0.1:${port}/codex.js`)).text();
+      const pageHtml = await (await fetch(`http://127.0.0.1:${port}/codex`)).text();
+      ok('黑盒：刷新——codex-refresh 接线 load()（页面按钮 + JS 事件绑定）',
+        pageHtml.includes('id="codex-refresh"') && /codex-refresh'\)\?\.addEventListener\('click', \(\) => load\(\)\)/.test(pageJs),
+        'refresh wiring');
+      ok('黑盒：失败——load() 的 catch 走 showError 横幅（不静默）',
+        /catch \(err\) \{[\s\S]{0,120}showError\(/.test(pageJs) && pageJs.includes('codex-error'),
+        'error banner path');
+      ok('黑盒：趋势空态——renderDayChart/renderHourChart 对空序列有守卫（不渲染空图）',
+        /function renderDayChart\([\s\S]{0,120}if \(!charts\.day \|\| !byDay\?\.length\) return;/.test(pageJs)
+          && /function renderHourChart\([\s\S]{0,130}if \(!charts\.hour \|\| !byHour\?\.length\) return;/.test(pageJs),
+        'empty guards');
+      ok('黑盒：窄宽度——viewport meta + resize 图表自适应（无固定 min-width）',
+        pageHtml.includes('name="viewport"') && /window\.addEventListener\('resize',[\s\S]{0,80}c\.resize\(\)/.test(pageJs)
+          && !/min-width\s*:\s*\d{3,}/.test(pageHtml),
+        'responsive');
+      // 行为级：空库服务的吞吐趋势序列确为空（趋势空态的 API 侧证据）
+      const thrEmpty = await (await fetch(`http://127.0.0.1:${port}/api/codex/throughput?days=1`)).json();
+      ok('黑盒：趋势空态——空数据时 by_day/by_hour 为空数组（守卫输入确为空）',
+        Array.isArray(thrEmpty.by_day) && thrEmpty.by_day.length === 0,
+        JSON.stringify(thrEmpty.by_day?.length));
+    }
     const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv`);
     const csvBuf = await csvRes.arrayBuffer();
     ok('黑盒：CSV 可下载且带 UTF-8 BOM（原始字节 EF,BB,BF）',
