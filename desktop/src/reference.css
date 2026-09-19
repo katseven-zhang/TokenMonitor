@@ -1,0 +1,412 @@
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 250 250 250;
+    --foreground: 10 10 10;
+    --surface: 255 255 255;
+    --primary: 99 102 241;
+    --primary-foreground: 255 255 255;
+    --secondary: 32 151 11;
+    --secondary-foreground: 255 255 255;
+    --muted: 245 245 247;
+    --muted-foreground: 107 107 107;
+    --border: 232 232 236;
+    --ring: 99 102 241;
+    --success: 16 185 129;
+    --warning: 245 158 11;
+    --error: 239 68 68;
+  }
+
+  .dark {
+      --background: 14 14 17;
+      --foreground: 250 250 250;
+      --surface: 24 24 27;
+      --muted: 30 30 34;
+      --muted-foreground: 161 161 170;
+      --border: 48 48 54;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    font-family: "DM Sans", sans-serif;
+    background: rgb(var(--background));
+    color: rgb(var(--foreground));
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground antialiased;
+  }
+
+  button {
+    @apply outline-none;
+  }
+}
+
+@layer utilities {
+  .session-markdown {
+    @apply break-words text-sm leading-relaxed text-foreground;
+  }
+
+  .session-markdown > :first-child {
+    margin-top: 0;
+  }
+
+  .session-markdown > :last-child {
+    margin-bottom: 0;
+  }
+
+  .session-markdown p,
+  .session-markdown ul,
+  .session-markdown ol,
+  .session-markdown blockquote,
+  .session-markdown pre,
+  .session-markdown-table,
+  .session-markdown .katex-display {
+    @apply my-3;
+  }
+
+  .session-markdown h1,
+  .session-markdown h2,
+  .session-markdown h3,
+  .session-markdown h4,
+  .session-markdown h5,
+  .session-markdown h6 {
+    @apply mb-2 mt-4 font-bold leading-tight;
+  }
+
+  .session-markdown h1 {
+    @apply text-xl;
+  }
+
+  .session-markdown h2 {
+    @apply text-lg;
+  }
+
+  .session-markdown h3 {
+    @apply text-base;
+  }
+
+  .session-markdown ul {
+    @apply list-disc pl-6;
+  }
+
+  .session-markdown ol {
+    @apply list-decimal pl-6;
+  }
+
+  .session-markdown li + li {
+    @apply mt-1;
+  }
+
+  .session-markdown li > ul,
+  .session-markdown li > ol {
+    @apply my-1;
+  }
+
+  .session-markdown blockquote {
+    @apply border-l-4 border-primary/40 pl-4 text-muted-foreground;
+  }
+
+  .session-markdown a {
+    @apply text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary;
+  }
+
+  .session-markdown strong {
+    @apply font-bold;
+  }
+
+  .session-markdown hr {
+    @apply my-4 border-border/70;
+  }
+
+  .session-markdown :not(pre) > code {
+    @apply rounded bg-background/70 px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+
+  .session-markdown pre {
+    @apply overflow-x-auto rounded-md border border-border/60 bg-background/75 p-3;
+  }
+
+  .session-markdown pre code {
+    @apply font-mono text-xs leading-relaxed;
+  }
+
+  .session-markdown-table {
+    @apply overflow-x-auto rounded-md border border-border/60;
+  }
+
+  .session-markdown table {
+    @apply min-w-full border-collapse text-left text-xs;
+  }
+
+  .session-markdown th {
+    @apply bg-background/70 font-semibold;
+  }
+
+  .session-markdown th,
+  .session-markdown td {
+    @apply border-b border-r border-border/60 px-3 py-2 last:border-r-0;
+  }
+
+  .session-markdown tr:last-child td {
+    @apply border-b-0;
+  }
+
+  .session-markdown input[type="checkbox"] {
+    @apply mr-2 align-middle accent-primary;
+  }
+
+  .session-markdown .katex-display {
+    @apply overflow-x-auto overflow-y-hidden py-1;
+  }
+
+  .session-markdown .hljs-comment,
+  .session-markdown .hljs-quote {
+    color: rgb(var(--muted-foreground));
+  }
+
+  .session-markdown .hljs-keyword,
+  .session-markdown .hljs-selector-tag,
+  .session-markdown .hljs-literal,
+  .session-markdown .hljs-section,
+  .session-markdown .hljs-link {
+    color: #8250df;
+  }
+
+  .session-markdown .hljs-string,
+  .session-markdown .hljs-title,
+  .session-markdown .hljs-name,
+  .session-markdown .hljs-type,
+  .session-markdown .hljs-attribute,
+  .session-markdown .hljs-symbol,
+  .session-markdown .hljs-bullet,
+  .session-markdown .hljs-addition,
+  .session-markdown .hljs-variable,
+  .session-markdown .hljs-template-tag,
+  .session-markdown .hljs-template-variable {
+    color: #116329;
+  }
+
+  .session-markdown .hljs-number,
+  .session-markdown .hljs-meta,
+  .session-markdown .hljs-built_in,
+  .session-markdown .hljs-builtin-name,
+  .session-markdown .hljs-params {
+    color: #0550ae;
+  }
+
+  .session-markdown .hljs-deletion {
+    color: #cf222e;
+  }
+
+  .dark .session-markdown .hljs-keyword,
+  .dark .session-markdown .hljs-selector-tag,
+  .dark .session-markdown .hljs-literal,
+  .dark .session-markdown .hljs-section,
+  .dark .session-markdown .hljs-link {
+      color: #d2a8ff;
+    }
+
+  .dark .session-markdown .hljs-string,
+  .dark .session-markdown .hljs-title,
+  .dark .session-markdown .hljs-name,
+  .dark .session-markdown .hljs-type,
+  .dark .session-markdown .hljs-attribute,
+  .dark .session-markdown .hljs-symbol,
+  .dark .session-markdown .hljs-bullet,
+  .dark .session-markdown .hljs-addition,
+  .dark .session-markdown .hljs-variable,
+  .dark .session-markdown .hljs-template-tag,
+  .dark .session-markdown .hljs-template-variable {
+      color: #7ee787;
+    }
+
+  .dark .session-markdown .hljs-number,
+  .dark .session-markdown .hljs-meta,
+  .dark .session-markdown .hljs-built_in,
+  .dark .session-markdown .hljs-builtin-name,
+  .dark .session-markdown .hljs-params {
+      color: #79c0ff;
+    }
+
+  .dark .session-markdown .hljs-deletion {
+      color: #ff7b72;
+    }
+
+
+  .daily-usage-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 112px;
+  }
+
+  .session-usage-card {
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) minmax(210px, 0.48fr) 156px;
+    min-height: 88px;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 88px;
+    align-items: center;
+  }
+
+  .session-card-subagents {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    margin-bottom: 8px;
+  }
+
+  .session-usage-card.has-subagents .session-card-summary,
+  .session-usage-card.has-subagents .session-card-tokens,
+  .session-usage-card.has-subagents .session-card-quota {
+    grid-row: 2;
+  }
+
+  .session-agent-branch,
+  .session-agent-rail,
+  .session-agent-child-stem,
+  .session-agent-sibling-stem {
+    pointer-events: none;
+    position: absolute;
+    border-color: rgb(var(--primary) / 0.35);
+  }
+
+  .session-agent-branch {
+    top: -8px;
+    width: 12px;
+    height: calc(50% + 8px);
+    border-inline-start-width: 1px;
+    border-bottom-width: 1px;
+  }
+
+  .session-agent-branch::after {
+    position: absolute;
+    inset-inline-end: -3px;
+    bottom: -3px;
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: rgb(var(--primary) / 0.6);
+    content: "";
+  }
+
+  .session-agent-rail {
+    top: -8px;
+    bottom: -8px;
+    border-inline-start-width: 1px;
+  }
+
+  .session-agent-child-stem {
+    top: 100%;
+    height: 8px;
+    border-inline-start-width: 1px;
+  }
+
+  .session-agent-sibling-stem {
+    top: 50%;
+    bottom: -8px;
+    border-inline-start-width: 1px;
+  }
+
+  @media (min-width: 901px) {
+    .session-usage-card[data-language="en"] {
+      grid-template-columns: minmax(280px, 1fr) minmax(210px, 0.48fr) 212px;
+    }
+  }
+
+  .session-card-tokens,
+  .session-card-quota {
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    border-left: 1px solid rgb(var(--border) / 0.55);
+    padding-left: 16px;
+    margin-left: 16px;
+  }
+
+  @media (max-width: 900px) {
+    .session-usage-card {
+      grid-template-columns: minmax(220px, 1fr) minmax(220px, 0.8fr);
+      min-height: 104px;
+    }
+
+    .session-card-quota {
+      grid-column: 1 / 3;
+      grid-row: 2;
+      display: block;
+      border-left: 0;
+      border-top: 1px solid rgb(var(--border) / 0.55);
+      margin: 8px 0 0;
+      padding: 8px 0 0;
+    }
+
+    .session-usage-card.has-subagents .session-card-quota {
+      grid-row: 3;
+    }
+  }
+
+  @media (max-width: 620px) {
+    .session-usage-card {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .session-card-tokens,
+    .session-card-quota {
+      grid-column: 1;
+      grid-row: auto;
+      border-left: 0;
+      border-top: 1px solid rgb(var(--border) / 0.55);
+      margin: 8px 0 0;
+      padding: 8px 0 0;
+    }
+
+    .session-usage-card.has-subagents .session-card-summary {
+      grid-row: 2;
+    }
+
+    .session-usage-card.has-subagents .session-card-tokens {
+      grid-row: 3;
+    }
+
+    .session-usage-card.has-subagents .session-card-quota {
+      grid-row: 4;
+    }
+  }
+
+  @keyframes loading-scan {
+    0% {
+      transform: translateX(-4px);
+      opacity: 0.2;
+    }
+    50% {
+      opacity: 0.45;
+    }
+    100% {
+      transform: translateX(100vw);
+      opacity: 0.2;
+    }
+  }
+
+  @keyframes loading-meter {
+    0% {
+      transform: translateX(-120%);
+    }
+    100% {
+      transform: translateX(320%);
+    }
+  }
+
+  .animate-loading-scan {
+    animation: loading-scan 2.4s ease-in-out infinite;
+  }
+
+  .animate-loading-meter {
+    animation: loading-meter 1.6s ease-in-out infinite;
+  }
+}

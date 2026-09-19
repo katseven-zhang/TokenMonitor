@@ -1,0 +1,221 @@
+use crate::{
+    collectors,
+    config::{self, Settings},
+    db,
+};
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Instant, UNIX_EPOCH},
+};
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanStatus {
+    pub agent: String,
+    pub state: String,
+    pub files: usize,
+    pub parsed: usize,
+    pub reused: usize,
+    pub events: usize,
+    pub malformed_lines: usize,
+    pub errors: Vec<String>,
+    pub updated_at: i64,
+    pub duration_ms: u128,
+}
+fn fingerprint(path: &Path) -> Result<(i64, i64), String> {
+    let m = fs::metadata(path).map_err(|e| e.to_string())?;
+    Ok((
+        m.len() as i64,
+        m.modified()
+            .map_err(|e| e.to_string())?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis() as i64,
+    ))
+}
+fn set_status(db: &Connection, s: &ScanStatus) -> Result<(), String> {
+    db.execute(
+        "INSERT OR REPLACE INTO scan_status VALUES(?1,?2)",
+        params![
+            s.agent,
+            serde_json::to_string(s).map_err(|e| e.to_string())?
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+fn indexed_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+fn collect_file(
+    db: &mut Connection,
+    agent: &str,
+    path: &Path,
+    project: Option<&str>,
+    s: &mut ScanStatus,
+) -> Result<(), String> {
+    let path = PathBuf::from(indexed_path(path));
+    let path_text = path.display().to_string();
+    let (size, mtime) = fingerprint(&path)?;
+    s.files += 1;
+    // SQLite may change only in WAL; never skip it using the main file fingerprint.
+    let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
+    if !sqlite && db::unchanged(db, &path_text, agent, size, mtime) {
+        s.reused += 1;
+        return Ok(());
+    }
+    let parsed = if agent == "antigravity" {
+        collectors::read_antigravity(&path, project.unwrap_or(""))
+    } else if sqlite {
+        collectors::read_sqlite(agent, &path)
+    } else {
+        collectors::read_jsonl(agent, &path)
+    }?;
+    db::replace_file(db, &path_text, agent, size, mtime, &parsed)?;
+    s.parsed += 1;
+    s.events += parsed.events.len();
+    s.malformed_lines += parsed.malformed_lines;
+    Ok(())
+}
+pub fn scan(root: &Path, settings: &Settings) -> Result<Vec<ScanStatus>, String> {
+    scan_cancellable(root, settings, &AtomicBool::new(false))
+}
+pub fn scan_cancellable(
+    root: &Path,
+    settings: &Settings,
+    stop: &AtomicBool,
+) -> Result<Vec<ScanStatus>, String> {
+    let mut db = db::open(root)?;
+    let mut results = vec![];
+    for &(agent, _) in config::AGENTS {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let began = Instant::now();
+        let mut s = ScanStatus {
+            agent: agent.into(),
+            state: "scanning".into(),
+            updated_at: chrono::Utc::now().timestamp_millis(),
+            ..Default::default()
+        };
+        if settings.disabled_agents.iter().any(|a| a == agent) {
+            s.state = "disabled".into();
+            set_status(&db, &s)?;
+            results.push(s);
+            continue;
+        }
+        set_status(&db, &s)?;
+        let mut seen = BTreeSet::new();
+        for source in settings.roots.get(agent).into_iter().flatten() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let path = Path::new(source);
+            if !path.exists() {
+                continue;
+            }
+            if agent == "antigravity" {
+                let projects = match collectors::antigravity_projects(path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        s.errors.push(format!("{source}: {e}"));
+                        continue;
+                    }
+                };
+                let Some(parent) = path.parent() else {
+                    continue;
+                };
+                for entry in walkdir::WalkDir::new(parent.join("conversations"))
+                    .min_depth(1)
+                    .max_depth(1)
+                {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match entry {
+                        Ok(e)
+                            if e.file_type().is_file()
+                                && e.path().extension().is_some_and(|x| x == "db") =>
+                        {
+                            let name = e
+                                .path()
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            let key = indexed_path(e.path()).to_lowercase();
+                            if !seen.insert(key) {
+                                continue;
+                            }
+                            if let Err(err) = collect_file(
+                                &mut db,
+                                agent,
+                                e.path(),
+                                projects.get(&name).map(String::as_str),
+                                &mut s,
+                            ) {
+                                s.errors.push(format!("{}: {err}", e.path().display()));
+                            }
+                        }
+                        Err(e) => s.errors.push(e.to_string()),
+                        _ => {}
+                    }
+                }
+            } else if matches!(agent, "zcode" | "opencode") {
+                if !seen.insert(indexed_path(path).to_lowercase()) {
+                    continue;
+                }
+                if let Err(e) = collect_file(&mut db, agent, path, None, &mut s) {
+                    s.errors.push(format!("{source}: {e}"));
+                }
+            } else {
+                for entry in walkdir::WalkDir::new(path).follow_links(false) {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    match entry {
+                        Ok(e) if e.file_type().is_file() => {
+                            let ext = e.path().extension().unwrap_or_default().to_string_lossy();
+                            if ext != "jsonl"
+                                && !(agent == "dsh" && (ext == "zstd" || ext == "zst"))
+                            {
+                                continue;
+                            }
+                            if !seen.insert(indexed_path(e.path()).to_lowercase()) {
+                                continue;
+                            }
+                            if let Err(err) = collect_file(&mut db, agent, e.path(), None, &mut s) {
+                                s.errors.push(format!("{}: {err}", e.path().display()));
+                            }
+                        }
+                        Err(e) => s.errors.push(e.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        s.state = if stop.load(Ordering::Relaxed) {
+            "stopped"
+        } else if !s.errors.is_empty() {
+            "error"
+        } else if s.files == 0 {
+            "missing"
+        } else {
+            "ready"
+        }
+        .into();
+        s.updated_at = chrono::Utc::now().timestamp_millis();
+        s.duration_ms = began.elapsed().as_millis();
+        set_status(&db, &s)?;
+        results.push(s);
+    }
+    Ok(results)
+}

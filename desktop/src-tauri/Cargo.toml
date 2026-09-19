@@ -1,0 +1,43 @@
+[package]
+name = "tokenmonitor-desktop"
+version = "2.0.0"
+edition = "2021"
+license = "MIT"
+default-run = "TokenMonitor"
+
+[lib]
+name = "tokenmonitor_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "TokenMonitor"
+path = "src/main.rs"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-autostart"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+uuid = { version = "1", features = ["v4"] }
+zstd = "0.13"
+percent-encoding = "2"
+rust_xlsxwriter = "0.94.1"
+tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-autostart = { version = "2", optional = true }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = "s"
