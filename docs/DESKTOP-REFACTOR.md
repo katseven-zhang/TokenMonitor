@@ -6,7 +6,7 @@ Branch: `codex/desktop-refactor`. Independent development; Room messages only.
 
 - Tauri + React + native Rust; no Node in distribution. Complete GUI inside desktop.
 - Light (default), dark, system themes; legible Chinese and long labels, DPI validation.
-- User-level background service: start/stop/restart, configurable loopback port, tray, login startup.
+- User-level background service: start/stop/restart from the GUI, configurable loopback port, tray residence and current-user login startup, without administrator privileges. This is the user's confirmed service mode.
 - Pure local runtime: no telemetry, network pricing, account requests, reset actions, updater, remote fonts/images.
 - Minute-precise half-open `[start, end)` time selection for every agent, rolling 5h and 7d presets.
 - Select all or any individual agent, then overview/model/project/day/month/session/request/tool details.

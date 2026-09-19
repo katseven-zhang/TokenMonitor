@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildConversation, buildSessionConversation, classifyExploration, summarizeOutput, type ReplayItem } from "./session-conversation";
+import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, type ReplayItem } from "./session-conversation";
 import type { SessionReplayDetail } from "./api";
 
 function replayTurn(items: ReplayItem[]): SessionReplayDetail["turns"][number] {
@@ -13,6 +13,18 @@ function usage(totalTokens: number): ReplayItem {
 }
 
 describe("conversation projection", () => {
+  it("counts direct and nested patches without counting mirrored legacy results twice", () => {
+    const patch = "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch";
+    const direct = command("", { name: "functions.apply_patch", callId: "direct", arguments: patch });
+    const mirror: ReplayItem = { kind: "patch", callId: "direct", success: true, isError: false, output: "ok", timestamp: null };
+    const nested = command("", { name: "exec", callId: "nested", arguments: `text(await tools.apply_patch(${JSON.stringify(patch)})); text(await tools.apply_patch(${JSON.stringify(patch)}));` });
+    expect(countTurnPatches(replayTurn([direct, mirror, nested]))).toBe(3);
+    expect(countTurnPatches(replayTurn([mirror, direct, nested]))).toBe(3);
+    expect(countTurnPatches(replayTurn([mirror]))).toBe(1);
+    expect(countTurnPatches(replayTurn([command("echo apply_patch")]))).toBe(0);
+    expect(countTurnPatches(replayTurn([command("", { name: "exec", arguments: 'text("tools.apply_patch(example)");' })]))).toBe(0);
+  });
+
   it("groups adjacent exploration without losing calls, raw provenance or token attribution", () => {
     const blocks = buildConversation(replayTurn([
       command("rg -n shimmer src", { rawJsonlLineNumbers: [1, 2] }), usage(100),

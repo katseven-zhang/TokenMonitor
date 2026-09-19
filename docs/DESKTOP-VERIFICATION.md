@@ -52,6 +52,12 @@ No final completion claim until every remaining acceptance cell has concrete evi
 - Native negative-price save returned a validation error and the original price-file SHA-256 stayed unchanged. Restoring and saving valid JSON succeeded; parsed prices remained identical after normalizing omitted `effectiveFrom` to the serializer's null value. No model rate was changed by this test. The loaded frontend was refreshed successfully afterward.
 - This walkthrough found that save errors were only visible in the top-page banner. Source now also shows the exact save error beside the JSON editor; production frontend build passes. This final small feedback change still needs inclusion in the next native package and visual verification. Small-window/DPI acceptance remains open: an attempted native border drag did not change the window size.
 
+## Native service controls and patch-count follow-up
+
+- Native GUI port changes from 18787 to 18788 and back persisted successfully; the old listener closed and the new listener answered authenticated status. GUI restart replaced the worker process, and GUI stop closed the listener while cached session replay remained available. Test configuration was restored to port 18787; the worker was left stopped.
+- A real tool-containing replay rendered 575,570 tokens, 14 usage events and $2.0514 consistently with its selected-range summary. Its timeline displayed two patch operations while the header incorrectly showed zero. The frontend now counts the same direct/nested patch activities used by the timeline, deduplicating mirrored legacy results by call ID; both header and turn counters use this projection. The native API's legacy patchCount field is unchanged and is no longer used for these display counters.
+- Twenty-one frontend tests and the production TypeScript/Vite build pass, including direct/nested patches, multiple patches within one exec, mirrored result ordering and non-call text. This patch-count change still needs native packaging and real-session visual verification. Full reference parity and final acceptance remain open.
+
 ## Duplicate-snapshot and replay consistency follow-up
 
 - Duplicate event/activity snapshots now prefer the latest observation timestamp, then source modification time, then a deterministic path tie-break. A path-first archive no longer shadows a newer streamed update. Both raw copies remain available; replacing one with an empty snapshot can reveal the other. Existing cache views migrate atomically.

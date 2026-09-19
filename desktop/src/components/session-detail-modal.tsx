@@ -1,5 +1,5 @@
 import {
-  buildSessionConversation, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
+  buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
   parseToolContentBlocks, parseUserInputAnswers, processExitCode, processSignal, splitWebSearchResults, summarizeOutput,
   type ConversationBlock, type DisplayTokenUsageItem, type NestedActivity, type ReplayItem, type TimelineEntry, type TokenUsageItem, type ToolActivity, type UserInputQuestion, type WebSearchResult,
 } from "@/lib/session-conversation";
@@ -1242,6 +1242,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const rawPreview = detail ? buildRawPreview(detail.rawJsonl) : "";
   const rawJsonlLines = useMemo(() => detail?.rawJsonl.split("\n") ?? [], [detail?.rawJsonl]);
   const conversation = useMemo(() => detail ? buildSessionConversation(detail.turns) : [], [detail]);
+  const patchCounts = useMemo(() => detail?.turns.map(countTurnPatches) ?? [], [detail]);
 
   async function copySessionId() {
     await navigator.clipboard?.writeText(displayedSessionId);
@@ -1352,7 +1353,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             {metric(t("sessions.detail.cost"), detail ? formatCurrency(detail.summary.costUSD) : "加载中…", <Coins className="h-3.5 w-3.5" />, "emerald")}
             {metric(t("sessions.detail.cache"), formatPercent(cacheRate), <Database className="h-3.5 w-3.5" />, "cyan")}
             {metric(t("sessions.detail.tool_calls"), formatNumber(detail?.summary.toolCallCount ?? 0), <Wrench className="h-3.5 w-3.5" />, "amber")}
-            {metric(t("sessions.detail.patches"), formatNumber(detail?.summary.patchCount ?? 0), <FileDiff className="h-3.5 w-3.5" />, "green")}
+            {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
             {metric(t("sessions.detail.errors"), formatNumber(detail?.summary.errorCount ?? 0), <AlertTriangle className="h-3.5 w-3.5" />, "red")}
           </div>
           {showDetails ? (
@@ -1501,7 +1502,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                       <div className="mt-1 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
                         <span className="px-1 py-0.5">{t("sessions.detail.message_count", { count: countMessages(turn) })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.tool_count", { count: turn.toolCalls.length })}</span>
-                        <span className="px-1 py-0.5">{t("sessions.detail.patch_count", { count: turn.patchResults.length })}</span>
+                        <span className="px-1 py-0.5">{t("sessions.detail.patch_count", { count: countTurnPatches(turn) })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.error_count", { count: turn.errors.length })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.token_event_count", { count: turn.tokenEvents.length })}</span>
                       </div>

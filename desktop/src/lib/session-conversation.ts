@@ -649,6 +649,26 @@ function buildToolActivity(item: Extract<ReplayItem, { kind: "toolCall" }>) {
 
 export type ToolActivity = ReturnType<typeof buildToolActivity>;
 
+// Count the same patch operations that the timeline renders, including tools
+// nested inside exec. Legacy result events may mirror a modern call.
+export function countTurnPatches(turn: SessionReplayDetail["turns"][number]): number {
+  const counts = new Map<string, number>();
+  let anonymous = 0;
+  for (const item of orderedItems(turn)) {
+    let count = 0;
+    if (item.kind === "patch") count = 1;
+    else if (item.kind === "toolCall") {
+      const activity = buildToolActivity(item);
+      count = activity.nestedActivities?.filter((entry) => entry.kind === "patch").length ?? 0;
+      if (!count && baseToolName(activity.displayToolName) === "apply_patch") count = 1;
+    } else continue;
+    if (!count) continue;
+    if (item.callId) counts.set(item.callId, Math.max(counts.get(item.callId) ?? 0, count));
+    else anonymous += count;
+  }
+  return anonymous + [...counts.values()].reduce((sum, count) => sum + count, 0);
+}
+
 export type Exploration = { label: "Read" | "Search" | "List"; text: string };
 export type ConversationBlock =
   | { kind: "item"; entry: TimelineEntry }
