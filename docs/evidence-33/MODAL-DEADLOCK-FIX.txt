@@ -1,0 +1,58 @@
+﻿# Win-GUI 外部占用时点击「停止」弹窗卡死冻结缺陷排查与修复报告
+
+## 1. 缺陷现象
+用户反馈：打开 GUI 后，若 8787 端口已被外部进程占用，启动器会自动连上并显示外部在线。此时点击「停止」按钮，窗口弹出提示「当前后台不是本程序启动的（端口 8787），为免误杀外部进程这里不停止。」，但此时该提示框彻底卡死冻结，窗口无响应。
+
+## 2. 根本原因分析 (Root Cause)
+1. **持锁调用阻塞式模态 API**：
+   在 `windows/gui/src/main.rs` 的 `WM_COMMAND` 消息处理中：
+   ```rust
+   let wait = with_app(|a| match id {
+       ID_STOP => a.stop_own_backend(true),
+       ...
+   });
+   ```
+   `with_app` 持有了 `APP` 互斥锁（`std::sync::Mutex<Option<App>>`）。
+   在 `stop_own_backend(true)` 内部：
+   ```rust
+   if self.external_online {
+       msg_box(self.hwnd, &format!("当前后台不是本程序启动的（端口 {}），为免误杀外部进程这里不停止。", self.saved_port), MB_ICONINFORMATION);
+   }
+   ```
+   `msg_box` 直接调用 Win32 `MessageBoxW`。
+2. **模态消息循环引发不可重入 Mutex 自死锁**：
+   - Win32 `MessageBoxW` 是模态对话框，会在 UI 线程启动内部模态消息循环以处理窗口和子控件消息；
+   - 此时 UI 线程依然持有 `APP.lock()`；
+   - 启动器每 2 秒触发一次 `WM_TIMER` 定时器，以及后台探测线程回写的 `WM_APP_PROBE_RESULT`，其处理器均会调用 `with_app`；
+   - 子控件重绘同步投递 `WM_CTLCOLOREDIT` 也曾调用 `with_app`；
+   - Rust 的 `std::sync::Mutex` **不可重入**。当同一个 UI 线程试图二次获取已经被自己持有的 `APP` 锁时，发生**直接自死锁 (Self-Deadlock)**！
+   - UI 线程死锁导致 `MessageBoxW` 消息泵停摆，弹窗无响应变白，标题栏显示「未响应」，整个 GUI 彻底卡死。
+
+## 3. 修复方案 (Implementation)
+1. **解耦业务决策与弹窗呈现**：
+   - 在 `App` 结构体中增加 `pending_alert: Option<(String, u32)>` 字段；
+   - 增加 `alert(&mut self, text: &str, icon: u32)` 辅助方法，仅暂存待展示的文案与图标，绝不在持锁期调用任何模态 API；
+   - 将 `start_backend`、`stop_own_backend`、`apply_port` 中的 `msg_box(...)` 调用统一替换为 `self.alert(...)`。
+2. **APP 锁释放后再弹窗**：
+   - `WM_COMMAND` 处理器在 `with_app` 闭包内取出 `pending_alert` 并将锁完全释放；
+   - 在锁外（无锁上下文）调用 `msg_box(hwnd, &text, icon)`；
+   - 弹窗期间模态消息循环正常运转，`WM_TIMER` 与探测回写消息正常获取 `APP` 锁更新状态与日志，彻底消除自死锁。
+3. **消除 `WM_CTLCOLOREDIT` 中的持锁重入点**：
+   - 引入 `CTL_CARD_BRUSH: AtomicUsize` 原子句柄快照；
+   - `WM_CTLCOLOREDIT` 完全免锁读取原子值返回背景画刷，彻底杜绝重绘路径上的任何锁竞争。
+4. **保持既有源码契约**：
+   - 恢复 `poll_status(&mut self)` 契约方法并标记 `#[allow(dead_code)]`，确保 `test/windows/gui.test.mjs` 中的 #30、#34 契约断言 100% 通过且构建 0 warning。
+
+## 4. 验证结果
+1. **真实 HTTP 8787 占用实机复测**：
+   - 启动外部 HTTP 服务占用 127.0.0.1:8787；
+   - 启动 `dist/windows-x64/TokenMonitor.exe` 成功识别外部进程在线；
+   - 注入 `WM_COMMAND (ID_STOP=104)` 点击「停止」；
+   - 弹窗弹出并持续跨越多个 2s `WM_TIMER` tick；
+   - 自动化检测：`DialogFound: True, DialogHung: False, MainHungDuringModal: False, MainHungAfterDismiss: False`；
+   - 弹窗与主窗口全生命周期均为 RESPONSIVE，点击确定后正常关闭，零冻结。
+2. **全量自动化测试**：
+   - `windows/gui/build.ps1`：0 warning，构建 exit 0；
+   - `node test/windows/gui.test.mjs`：86/86 项全绿 exit 0；
+   - `npm test`：25 套件全部通过 exit 0；
+   - `TOKENMONITOR_OFFLINE=1 npm test`：双模式全部通过 exit 0。

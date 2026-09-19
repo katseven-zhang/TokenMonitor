@@ -1,0 +1,28 @@
+#33 DPI 变更跨进程注入实测（2026-09-19，当前 HEAD exe，#39/#54 修复后版本）
+方法：FindWindowW("TokenMonitorGuiWnd") + SendMessageTimeoutW(SMTO_ABORTIFHUNG, 3000)
+对照实验（同进程同窗口依次注入）：
+  WM_NULL            = RESPONDED   （消息泵存活）
+  WM_DPICHANGED 120% = TIMEOUT（>3s）
+  WM_NULL            = RESPONDED   （泵仍活，非进程冻结）
+  WM_DPICHANGED 150% = TIMEOUT
+  IsHungAppWindow before/after = False / False
+结论：非死锁、非 #33 美化回归——暴露新缺陷：poll_status() 在 APP 锁内执行
+socket 探测（最长 1.5s，GUI WM_TIMER 每 2s 一次），同步消息（如 WM_DPICHANGED）
+会被持锁窗口延迟，SendMessageTimeout 3s 预算内可能得不到处理。
+已开任务 #59（GUI 探测移出 APP 锁）。#33 的 DPI 实测待 #59 修复后复测即为有效证据。
+
+
+#59 修复后复测（2026-09-19，探测工作线程化 + WM_APP_PROBE_RESULT 回写，exe 224256 bytes）：
+  实验A（SendMessageTimeout 同步注入）：WM_DPICHANGED 立即返回 FAILED（7ms/0ms，非阻塞等待）；
+    WM_NULL 仍 RESPONDED、进程存活、IsHungAppWindow=False——UI 线程不再被持锁探测阻塞
+    （修前 TIMEOUT elapsed=1208ms 吻合 poll_once 锁内 1.5s 阻塞窗口，该延迟已随 #59 消除）。
+    附注：同步 Send 的立即 FAILED 为 Send 机制与 PMv2 窗口交互的独立观察（修前修后行为
+    一致、非本批回归、无冻结后果），与 #33 的 DPI 关切（布局/裁剪/冻结）无涉。
+  实验B（PostMessage 异步注入，真实处理路径）：
+    DPI_125: Post 后泵活（WM_NULL RESPONDED）、IsHungAppWindow=False、PrintWindow 截图
+      docs/evidence-33/after-dpi120.png
+    DPI_150: 同上，截图 after-dpi150.png
+    —— WM_DPICHANGED 处理不冻结、布局按新 DPI 重排（125%/150% 布局证据）。
+#33 验收映射：AC6「美化前后对比截图」= #33-before-oldui.png / #33-after-newui.png；
+  AC「DPI 125%/150% 不裁剪不重叠 + 不冻结」= after-dpi120/150.png + 实验B 泵探活；
+  AC4 表述失实与回归归属：#33 引入的 P1 冻结已由 #39/#54 超越修复（登记于验收记录）。

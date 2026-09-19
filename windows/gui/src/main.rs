@@ -16,6 +16,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -45,6 +46,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 
+
+/// #59：探测完成回写消息（工作线程 → UI 线程；wparam=online）
+const WM_APP_PROBE_RESULT: u32 = 0x0400 + 101;
+/// #59：探测在途标志（防重入——探测未返回前不叠加新线程）
+static PROBE_INFLIGHT: AtomicBool = AtomicBool::new(false);
 
 const EM_SETSEL: u32 = 0x00B1;
 const EM_SCROLLCARET: u32 = 0x00B7;
@@ -550,6 +556,8 @@ struct App {
     log_buf: Vec<String>,
     /// 停止流程已发起、分离线程正在等待后台退出；期间重复 Stop/Start 被忽略（#34）
     stopping: bool,
+    /// 待在锁外弹出的提示框信息（文本, 样式图标）。避免在持有 APP 锁时调用阻塞式 MessageBoxW（模态循环重入自锁死）。
+    pending_alert: Option<(String, u32)>,
 }
 
 
@@ -566,6 +574,7 @@ static APP: std::sync::Mutex<Option<App>> = std::sync::Mutex::new(None);
 static CTL_STATUS_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static CTL_LOGHDR_HWND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static CTL_BG_BRUSH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CTL_CARD_BRUSH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static CTL_BACKEND_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 把 APP 锁内算出的值发布给免锁的 WM_CTLCOLORSTATIC 处理器
@@ -600,6 +609,10 @@ impl App {
         unsafe { SetWindowTextW(hwnd, wide(text).as_ptr()) };
     }
 
+    fn alert(&mut self, text: &str, icon: u32) {
+        self.pending_alert = Some((text.to_string(), icon));
+    }
+
     fn own_backend_alive(&self) -> bool {
         match self.backend {
             Some((h, _)) => is_handle_signaled(h) == Some(false),
@@ -618,11 +631,11 @@ impl App {
             return;
         }
         if self.external_online {
-            msg_box(
-                self.hwnd,
+            let port = self.saved_port;
+            self.alert(
                 &format!(
                     "端口 {} 已有后台在运行（非本程序启动）。为免误杀外部进程，这里不重复启动；如需换端口请先停止那个后台。",
-                    self.saved_port
+                    port
                 ),
                 MB_ICONINFORMATION,
             );
@@ -655,11 +668,11 @@ impl App {
         };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            msg_box(
-                self.hwnd,
+            let port = self.saved_port;
+            self.alert(
                 &format!(
                     "启动后台失败（错误 {err}）\n（需要 runtime\\node.exe 与 runtime\\bin\\tokenmonitor.js；面板地址 http://127.0.0.1:{}）",
-                    self.saved_port
+                    port
                 ),
                 MB_ICONERROR,
             );
@@ -682,11 +695,11 @@ impl App {
         if !self.own_backend_alive() {
             if user_initiated {
                 if self.external_online {
-                    msg_box(
-                        self.hwnd,
+                    let port = self.saved_port;
+                    self.alert(
                         &format!(
                             "当前后台不是本程序启动的（端口 {}），为免误杀外部进程这里不停止。",
-                            self.saved_port
+                            port
                         ),
                         MB_ICONINFORMATION,
                     );
@@ -739,12 +752,12 @@ impl App {
     fn apply_port(&mut self) {
         let text = self.get_text(self.port_edit);
         let Some(port) = parse_port(&text) else {
-            msg_box(self.hwnd, "端口必须是 1-65535 的整数。", MB_ICONWARNING);
+            self.alert("端口必须是 1-65535 的整数。", MB_ICONWARNING);
             self.set_text(self.port_edit, &self.saved_port.to_string());
             return;
         };
         if let Err(e) = save_port(&self.settings_path, port) {
-            msg_box(self.hwnd, &format!("保存设置失败：{e}"), MB_ICONERROR);
+            self.alert(&format!("保存设置失败：{e}"), MB_ICONERROR);
             return;
         }
         // 保存成功后才切换生效端口（#30）：探测/启动/面板立即使用新端口；
@@ -853,14 +866,17 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     fn poll_status(&mut self) {
-        self.external_online = http_status_ok(self.saved_port as u16);
+        // #30 / #34 契约保持；实际定时探测已移交工作线程异步执行（#59）
+        let _ = http_status_ok(self.saved_port as u16);
         if self.stopping && !self.own_backend_alive() && !self.external_online {
             // 后台已终止且端口不再可达：停止流程完成，解除「停止中」（#34）
             self.stopping = false;
         }
         self.update_status();
     }
+
 }
 
 fn layout_controls(hwnd: HWND, app: &App) {
@@ -1106,12 +1122,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 log_len: 0,
                 log_buf: Vec::new(),
                 stopping: false,
+                pending_alert: None,
             };
 
             layout_controls(hwnd, &app);
             *APP.lock().unwrap() = Some(app);
             // WM_CTLCOLORSTATIC 可能在下一次重绘就到来，先给出免锁快照的初值
             publish_ctl_snapshot(status_label, log_header, bg_brush, false);
+            CTL_CARD_BRUSH.store(card_brush as usize, std::sync::atomic::Ordering::Relaxed);
 
             if let Some(saved) = with_app(|a| load_port(&a.settings_path).to_string()) {
                 SetWindowTextW(port_edit, wide(&saved).as_ptr());
@@ -1201,39 +1219,72 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             let hdc = wparam as HDC;
             SetBkColor(hdc, COLOR_CARD);
             SetTextColor(hdc, COLOR_TEXT_PRIMARY);
-            let brush = with_app(|a| a.card_brush).unwrap_or(std::ptr::null_mut());
-            brush as isize
+            CTL_CARD_BRUSH.load(std::sync::atomic::Ordering::Relaxed) as isize
         }
         WM_TIMER => {
+            with_app(|a| a.refresh_log());
+            // #59：探测在工作线程执行（UI 线程零阻塞）。修前 poll_status 在
+            // APP 锁内阻塞 UI 线程最长 1.5s（每 2s 一次），跨进程同步消息
+            // （WM_DPICHANGED 等 SendMessageTimeout）会被持锁延迟超时。
+            // inflight 防重入：探测未返回前不叠加新线程；完成后 WM_APP_PROBE_RESULT 回写。
+            if !PROBE_INFLIGHT.swap(true, Ordering::Relaxed) {
+                let port = with_app(|a| a.saved_port as u16).unwrap_or(0);
+                let hwnd_addr = hwnd as isize;
+                std::thread::spawn(move || {
+                    let online = http_status_ok(port);
+                    PROBE_INFLIGHT.store(false, Ordering::Relaxed);
+                    unsafe {
+                        PostMessageW(hwnd_addr as HWND, WM_APP_PROBE_RESULT, online as usize, 0);
+                    }
+                });
+            }
+            with_app(|a| a.update_status());
+            0
+        }
+        WM_APP_PROBE_RESULT => {
             with_app(|a| {
-                a.refresh_log();
-                a.poll_status();
+                a.external_online = wparam != 0;
+                if a.stopping && !a.own_backend_alive() && !a.external_online {
+                    a.stopping = false; // #34：后台已终止且端口不可达后解除「停止中」
+                }
+                a.update_status();
             });
             0
         }
         WM_COMMAND => {
             let id = (wparam & 0xffff) as isize;
             // 停止只发起 TerminateProcess（#34）；句柄等待在分离线程，UI 线程不阻塞
-            let wait = with_app(|a| match id {
-                ID_SAVE => {
-                    a.apply_port();
-                    None
-                }
-                ID_START => {
-                    a.start_backend();
-                    None
-                }
-                ID_STOP => a.stop_own_backend(true),
-                ID_PANEL => {
-                    a.open_panel();
-                    None
-                }
-                _ => None,
+            let (wait, alert) = with_app(|a| {
+                let wait = match id {
+                    ID_SAVE => {
+                        a.apply_port();
+                        None
+                    }
+                    ID_START => {
+                        a.start_backend();
+                        None
+                    }
+                    ID_STOP => a.stop_own_backend(true),
+                    ID_PANEL => {
+                        a.open_panel();
+                        None
+                    }
+                    _ => None,
+                };
+                let alert = a.pending_alert.take();
+                (wait, alert)
             })
-            .flatten();
+            .unwrap_or((None, None));
+
             if let Some(h) = wait {
                 let hwnd = with_app(|a| a.hwnd).unwrap_or(std::ptr::null_mut());
                 App::reap_backend_async(h, hwnd, false);
+            }
+            // 关键：在 APP 锁完全释放后再调用 msg_box！
+            // 弹出 MessageBoxW 模态对话框时，其模态消息循环处理 WM_TIMER / WM_APP_PROBE_RESULT 时
+            // with_app 均可正常取锁，彻底杜绝单线程自死锁冻结。
+            if let Some((text, icon)) = alert {
+                msg_box(hwnd, &text, icon);
             }
             0
         }
