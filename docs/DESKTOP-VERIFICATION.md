@@ -54,6 +54,8 @@ No final completion claim until every remaining acceptance cell has concrete evi
 
 ## Native service controls and patch-count follow-up
 
+- Reference trend comparison identified missing local cost line, series toggles and expanded viewing. Commit `4facd0a` adds these, with a tooltip showing total/composition/reasoning/events and explicit unknown pricing plus known-price subtotal. Native package EXE is 7,079,936 bytes, ZIP 4,310,965 bytes. Native populated seven-day view, expanded chart, cache-series toggle (green bars disappear and token axis rescales) and Escape dismissal were exercised. Unknown-cost intervals remain gaps. Twenty-one existing frontend tests and production build pass; chart interaction evidence is native GUI observation.
+
 - Native Excel and Markdown Save As flows also completed into `.dev-data/native-session-export.xlsx` / `.md`. Independent ZIP/XML and Markdown parsing matched every CSV cell (numeric comparison for Excel numbers): all three formats contain 14 rows, 575,570 tokens and $2.05136400. Excel freezes its header row. These are real GUI exports for the selected Codex session, not direct backend-only calls.
 - Native window resizing now succeeds when dragging the outermost border: 951×992 and 951×651 screenshots verified wrapping navigation, rearranged heading/filter controls, a horizontally scrollable detail table and vertical content scrolling. At low height the settings/service navigation was offscreen and the automation did not successfully scroll that sidebar. Source now puts agent navigation in its own scrollable region and pins service/settings at the bottom; production build passes, native package follow-up is pending. This does not establish OS DPI coverage.
 

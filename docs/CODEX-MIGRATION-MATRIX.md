@@ -4,9 +4,9 @@ Reference: local `codex-usage-desktop-main` v3.3.0. This is a coverage checklist
 
 | Reference area | Desktop implementation | Work still required |
 | --- | --- | --- |
-| Dashboard hero and usage trends | Total/input/cache/output/reasoning/cost cards and native charts; selectable minute ranges; dense zero-usage buckets preserve inactive periods, bounded aggregation for very long ranges | Compare detailed trend interactions and pace statistics |
+| Dashboard hero and usage trends | Total/input/cache/output/reasoning/cost cards; minute ranges; dense empty buckets; bounded aggregation; local cost curve with unknown-price gaps, keyboard-accessible series toggles, expanded dialog and detailed tooltip | Native verification of newly added chart controls; average-per-minute metric already exists |
 | Daily and monthly tables | Both groupings, column sorting, pagination and range-intersecting drilldown | Native usability comparison |
-| Models and project analytics | Grouped totals, price completeness and drilldown into sessions | Compare distribution/detail fields with reference components |
+| Models and project analytics | Grouped totals, price completeness and drilldown into sessions | Reference code comparison identifies remaining usage/cost shares, token composition bars, model effective unit prices and project cache-hit/last-activity presentation |
 | Session usage and titles | Local titles, text search, session totals, timestamps, sortable columns and 25/50/100-row pagination; native sorting/paging and long-title wrapping verified | Smaller-window and large-source performance checks |
 | Conversation replay | Reference parser and modal adapted; messages, tool calls, patches, process continuations and child hierarchy | Real native UI walkthrough; reconcile replay versus queried totals in reset/cumulative cases |
 | Subscription limits | Local log observations with timestamps; half-open, archive-deduplicated history and window selector; disclosed 500-observation display cap; native table/filter/empty-state walkthrough passed | Window rollover presentation; never imply live account limits |
