@@ -195,6 +195,23 @@ console.log('\n[#54] WM_CTLCOLORSTATIC 不得进 APP 锁（静态控件重绘同
   ok('#54 快照发布函数存在且写四个值',
     /fn publish_ctl_snapshot/.test(source) && (source.match(/\.store\(/g) || []).length >= 4);
 }
+
+// ---- #59：探测工作线程化（评审新发现缺陷：poll_status 在 APP 锁内 socket 阻塞
+// 最长 1.5s，跨进程同步消息被持锁延迟——docs/evidence-33/DPI-INJECTION-RESULT.txt）----
+console.log('\n[#59] 探测移出 APP 锁/UI 线程（同步消息不再被持锁阻塞）');
+{
+  ok('#59 探测在工作线程（WM_TIMER 分支 spawn + PROBE_INFLIGHT 防重入）',
+    /WM_TIMER =>[\s\S]{0,600}thread::spawn/.test(source) && source.includes('PROBE_INFLIGHT'));
+  ok('#59 探测完成经 PostMessage 回写（WM_APP_PROBE_RESULT）',
+    /WM_APP_PROBE_RESULT/.test(source) && /PostMessageW\(hwnd_addr as HWND, WM_APP_PROBE_RESULT/.test(source));
+  const timerArm = source.slice(source.indexOf('WM_TIMER =>'), source.indexOf('WM_APP_PROBE_RESULT =>'));
+  ok('#59 WM_TIMER 探测在工作线程闭包内（不在 with_app 锁内）',
+    timerArm.includes('thread::spawn') && /let online = http_status_ok\(port\)/.test(timerArm)
+      && !/with_app\([^)]*\)[^;]*http_status_ok/.test(timerArm),
+    timerArm.slice(0, 120));
+  ok('#59 WM_TIMER 不再直接调 poll_status（已工作线程化）',
+    !/poll_status\(\)/.test(timerArm));
+}
 console.log('\n[behavioral] 已构建 exe 无头自检（中文+空格包布局）');
 if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
   // 仅限本地无 Rust 工具链时的显式放行（#41）：CI 与默认本地环境不得借此跳绿
@@ -335,6 +352,41 @@ if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
   } finally {
     try { rmSync(base, { recursive: true, force: true }); } catch { /* Windows 句柄延迟时容忍 */ }
   }
+}
+
+// ---- #59: 行为级 DPI 注入（Post 125% 真实处理路径 → 泵探活，评审 AC2）----
+console.log('\n[#59 dpi-inject] WM_DPICHANGED Post 注入后消息泵仍存活');
+{
+  const sleepE = (ms) => new Promise((r) => setTimeout(r, ms));
+  const gui = spawn(exe, [], { stdio: 'ignore' });
+  await sleepE(2500);
+  const psSrc = [
+    '$src = @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public class W59 {',
+    '  [DllImport("user32.dll")] public static extern IntPtr FindWindowW([MarshalAs(UnmanagedType.LPWStr)] string cls, IntPtr win);',
+    '  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, UIntPtr wp, IntPtr lp);',
+    '  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, UIntPtr wp, IntPtr lp, uint flags, uint timeout, out UIntPtr result);',
+    '}',
+    '"@',
+    'Add-Type -TypeDefinition $src',
+    '$h = [W59]::FindWindowW("TokenMonitorGuiWnd", [IntPtr]::Zero)',
+    'if ($h -eq [IntPtr]::Zero) { Write-Output "INJECT_PUMP=NO_WINDOW"; exit 1 }',
+    '[W59]::PostMessageW($h, 0x02E0, [UIntPtr]::new([uint32](120 -bor (120 -shl 16))), [IntPtr]::Zero) | Out-Null',
+    'Start-Sleep -Milliseconds 1000',
+    '$res = [UIntPtr]::Zero',
+    '$okr = [W59]::SendMessageTimeoutW($h, 0, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 2000, [ref]$res)',
+    'Write-Output ("INJECT_PUMP=" + $(if ($okr -ne [IntPtr]::Zero) { "ALIVE" } else { "DEAD" }))',
+  ]
+  const psFile = join(tmpdir(), 'dpi59-inject.ps1');
+  writeFileSync(psFile, psSrc.join('\r\n'), 'utf8');
+  const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', psFile],
+    { encoding: 'utf8', timeout: 20000 });
+  gui.kill();
+  ok('#59 WM_DPICHANGED(125%) Post 注入后泵仍存活（探测已出 UI 线程/APP 锁）',
+    String(r.stdout).includes('INJECT_PUMP=ALIVE'),
+    'exit=' + r.status + ' out=' + String(r.stdout).slice(0, 80));
+  try { rmSync(psFile, { force: true }); } catch { }
 }
 
 console.log(`\ngui test: ${passed} 项通过${failed ? `，FAILED ${failed}` : '，全部通过'}`);
