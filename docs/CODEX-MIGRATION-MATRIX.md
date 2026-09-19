@@ -9,7 +9,7 @@ Reference: local `codex-usage-desktop-main` v3.3.0. This is a coverage checklist
 | Models and project analytics | Grouped totals, price completeness and drilldown into sessions | Compare distribution/detail fields with reference components |
 | Session usage and titles | Local titles, text search, session totals and timestamps | Large-table paging/sorting and title overflow checks |
 | Conversation replay | Reference parser and modal adapted; messages, tool calls, patches, process continuations and child hierarchy | Real native UI walkthrough; reconcile replay versus queried totals in reset/cumulative cases |
-| Subscription limits | Local log observations with timestamps; half-open, archive-deduplicated history and window selector; disclosed 500-observation display cap | Native history walkthrough and window rollover presentation; never imply live account limits |
+| Subscription limits | Local log observations with timestamps; half-open, archive-deduplicated history and window selector; disclosed 500-observation display cap; native table/filter/empty-state walkthrough passed | Window rollover presentation; never imply live account limits |
 | Reset history and credits | Online retrieval/redemption deliberately excluded by user requirements | Show reset history only when supported by actual local observations; distinguish inferred window rollover from explicit reset records |
 | Quota forecast | No remote forecast service | Assess which useful metrics can be computed transparently from local observations |
 | Model catalog and prices | Offline JSON snapshot, editable rates, aliases and effective dates | Searchable local catalog and clear active/historical price presentation |
