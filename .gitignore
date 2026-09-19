@@ -18,3 +18,7 @@ learnings/
 .workbuddy/
 # Windows 构建产物（固定覆盖目录，不入库）
 dist/
+
+# 下载的外部源码，不纳入主仓库
+/codex-lb-main/
+/claude-codex-usage-dashboard-main/

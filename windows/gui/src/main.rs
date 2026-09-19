@@ -16,7 +16,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -51,6 +51,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 const WM_APP_PROBE_RESULT: u32 = 0x0400 + 101;
 /// #59：探测在途标志（防重入——探测未返回前不叠加新线程）
 static PROBE_INFLIGHT: AtomicBool = AtomicBool::new(false);
+/// 支持通过命令行 `--dpi <val>` 覆盖初始 DPI（如 96/120/144），供测试与多 DPI 取证渲染
+static INITIAL_DPI: AtomicU32 = AtomicU32::new(0);
 
 const EM_SETSEL: u32 = 0x00B1;
 const EM_SCROLLCARET: u32 = 0x00B7;
@@ -558,6 +560,8 @@ struct App {
     stopping: bool,
     /// 待在锁外弹出的提示框信息（文本, 样式图标）。避免在持有 APP 锁时调用阻塞式 MessageBoxW（模态循环重入自锁死）。
     pending_alert: Option<(String, u32)>,
+    /// 当前窗口 DPI（WM_DPICHANGED 下记录新 DPI，供 layout_controls 使用）
+    dpi: u32,
 }
 
 
@@ -888,7 +892,7 @@ fn layout_controls(hwnd: HWND, app: &App) {
         return;
     }
 
-    let dpi = get_window_dpi(hwnd);
+    let dpi = if app.dpi > 0 { app.dpi } else { get_window_dpi(hwnd) };
     let pad_x = scale(18, dpi);
     let pad_y = scale(16, dpi);
     let row1_y = pad_y;
@@ -1034,7 +1038,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             let resolved = resolve_backend(app_root.as_deref(), &exe_dir);
             let saved_port = load_port(&settings_path);
 
-            let dpi = get_window_dpi(hwnd);
+            let init_dpi = INITIAL_DPI.load(Ordering::Relaxed);
+            let dpi = if init_dpi > 0 { init_dpi } else { get_window_dpi(hwnd) };
             let font_ui = create_segoe_font(dpi, 10, FW_NORMAL as i32);
             let font_ui_bold = create_segoe_font(dpi, 10, FW_SEMIBOLD as i32);
             let font_log = create_segoe_font(dpi, 10, FW_NORMAL as i32);
@@ -1123,6 +1128,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 log_buf: Vec::new(),
                 stopping: false,
                 pending_alert: None,
+                dpi,
             };
 
             layout_controls(hwnd, &app);
@@ -1166,6 +1172,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 }
                 SendMessageW(a.log_header, WM_SETFONT, font_ui_bold as usize, 1);
                 SendMessageW(a.log_box, WM_SETFONT, font_log as usize, 1);
+                a.dpi = new_dpi;
                 a.font_ui = font_ui;
                 a.font_ui_bold = font_ui_bold;
                 a.font_log = font_log;
@@ -1359,6 +1366,10 @@ unsafe fn create_main_window() -> HWND {
         return std::ptr::null_mut();
     }
     let title = wide("TokenMonitor 控制台");
+    let init_dpi = INITIAL_DPI.load(Ordering::Relaxed);
+    let dpi = if init_dpi > 0 { init_dpi } else { 96 };
+    let win_w = scale(780, dpi);
+    let win_h = scale(560, dpi);
     CreateWindowExW(
         0,
         class_name.as_ptr(),
@@ -1366,8 +1377,8 @@ unsafe fn create_main_window() -> HWND {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        780,
-        560,
+        win_w,
+        win_h,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         hinstance,
@@ -1458,6 +1469,25 @@ fn probe_headless(port: u16) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    for arg in &args {
+        if let Some(rest) = arg.strip_prefix("--dpi=") {
+            if let Ok(val) = rest.parse::<u32>() {
+                if (48..=480).contains(&val) {
+                    INITIAL_DPI.store(val, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--dpi") {
+        if let Some(val_str) = args.get(pos + 1) {
+            if let Ok(val) = val_str.parse::<u32>() {
+                if (48..=480).contains(&val) {
+                    INITIAL_DPI.store(val, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
     if args.iter().any(|a| a == "--selfcheck" || a == "-selfcheck") {
         std::process::exit(selfcheck(args.get(2).map(|s| s.as_str())));
     }

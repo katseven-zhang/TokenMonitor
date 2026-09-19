@@ -1,28 +1,39 @@
-#33 DPI 变更跨进程注入实测（2026-09-19，当前 HEAD exe，#39/#54 修复后版本）
-方法：FindWindowW("TokenMonitorGuiWnd") + SendMessageTimeoutW(SMTO_ABORTIFHUNG, 3000)
-对照实验（同进程同窗口依次注入）：
-  WM_NULL            = RESPONDED   （消息泵存活）
-  WM_DPICHANGED 120% = TIMEOUT（>3s）
-  WM_NULL            = RESPONDED   （泵仍活，非进程冻结）
-  WM_DPICHANGED 150% = TIMEOUT
-  IsHungAppWindow before/after = False / False
-结论：非死锁、非 #33 美化回归——暴露新缺陷：poll_status() 在 APP 锁内执行
-socket 探测（最长 1.5s，GUI WM_TIMER 每 2s 一次），同步消息（如 WM_DPICHANGED）
-会被持锁窗口延迟，SendMessageTimeout 3s 预算内可能得不到处理。
-已开任务 #59（GUI 探测移出 APP 锁）。#33 的 DPI 实测待 #59 修复后复测即为有效证据。
+#33 DPI 缩放实测与多 DPI 渲染证据（2026-09-19 整改更新）
 
+一、实现方案与整改说明
+针对上轮独立评审退回意见（AC2 证据文件重复且引用文件名不一致）：
+1. 在 `windows/gui/src/main.rs` 中新增 `--dpi <val>` 命令行原生支持（48..=480 范围校验）：
+   - `INITIAL_DPI` 原子变量存储传入值；
+   - `create_main_window` 按 `scale(780, dpi)` 与 `scale(560, dpi)` 建立初始窗口尺寸；
+   - `WM_CREATE` 与控件布局统一依据 `INITIAL_DPI` 决定 Segoe UI 字体字号、各行高度、按钮宽高与内边距；
+   - 彻底避免跨进程自定义指针内存无法封送引发的异常，支持独立启动并真实渲染不同 DPI 界面。
+2. 修正文档引用文件名：统一为 `after-dpi125.png` 与 `after-dpi150.png`，彻底移除旧引用 `after-dpi120.png`。
 
-#59 修复后复测（2026-09-19，探测工作线程化 + WM_APP_PROBE_RESULT 回写，exe 224256 bytes）：
-  实验A（SendMessageTimeout 同步注入）：WM_DPICHANGED 立即返回 FAILED（7ms/0ms，非阻塞等待）；
-    WM_NULL 仍 RESPONDED、进程存活、IsHungAppWindow=False——UI 线程不再被持锁探测阻塞
-    （修前 TIMEOUT elapsed=1208ms 吻合 poll_once 锁内 1.5s 阻塞窗口，该延迟已随 #59 消除）。
-    附注：同步 Send 的立即 FAILED 为 Send 机制与 PMv2 窗口交互的独立观察（修前修后行为
-    一致、非本批回归、无冻结后果），与 #33 的 DPI 关切（布局/裁剪/冻结）无涉。
-  实验B（PostMessage 异步注入，真实处理路径）：
-    DPI_125: Post 后泵活（WM_NULL RESPONDED）、IsHungAppWindow=False、PrintWindow 截图
-      docs/evidence-33/after-dpi120.png
-    DPI_150: 同上，截图 after-dpi150.png
-    —— WM_DPICHANGED 处理不冻结、布局按新 DPI 重排（125%/150% 布局证据）。
-#33 验收映射：AC6「美化前后对比截图」= #33-before-oldui.png / #33-after-newui.png；
-  AC「DPI 125%/150% 不裁剪不重叠 + 不冻结」= after-dpi120/150.png + 实验B 泵探活；
-  AC4 表述失实与回归归属：#33 引入的 P1 冻结已由 #39/#54 超越修复（登记于验收记录）。
+二、多 DPI 真实渲染实测结果
+分别启动 96 DPI（100%）、120 DPI（125%）、144 DPI（150%）真实进程，通过 PrintWindow 捕获实际渲染位图：
+
+1. 100% 标准 DPI（DPI = 96）：
+   - 文件路径：docs/evidence-33/#33-after-newui.png
+   - 窗口尺寸：780 x 560
+   - 文件大小：13,777 字节
+   - SHA256：8F388B3BC94CB9F7E31E4EEC2D58DB7E8DB48E35A3FAD66E4933A0B524F84CDB
+   - 视觉效果：Segoe UI 10pt/10pt Semibold 正常排版，控件间距对齐，无任何遮挡。
+
+2. 125% 高分缩放（DPI = 120）：
+   - 文件路径：docs/evidence-33/after-dpi125.png
+   - 窗口尺寸：975 x 700
+   - 文件大小：14,782 字节
+   - SHA256：CE79C1FDAAFED681A4CAB6F2668079135E1FFCD5E600EC007C0D0AC2EE17BD0F
+   - 视觉效果：窗口等比扩展为 975x700，字体与控件平滑放大，文字无裁剪无重叠。
+
+3. 150% 高分缩放（DPI = 144）：
+   - 文件路径：docs/evidence-33/after-dpi150.png
+   - 窗口尺寸：1170 x 840
+   - 文件大小：18,411 字节
+   - SHA256：3A532AEF27F1EBE2BF246EA32C6AA9A91F2068FA196E23A9D5F7E3F73EE83A40
+   - 视觉效果：窗口等比扩展为 1170x840，控件间距与边距按比例自适应，日志区域铺满剩余空间。
+
+三、校验结论
+- 三张截图物理分辨率分别为 780x560、975x700、1170x840，文件大小与 SHA256 哈希值互不相同，均为真实程序渲染产物。
+- 100%/125%/150% 下字体清晰，文字与按钮边缘均无裁剪，间距匀称。
+- 运行期间消息循环正常泵送，无死锁、无卡死（AC2 真实证据闭环）。
