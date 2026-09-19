@@ -1701,6 +1701,16 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
         && Array.isArray(cost.body.models) && Array.isArray(cost.body.unpriced_models)
         && 'usd_to_cny' in cost.body.fx,
       JSON.stringify(cost.body).slice(0, 140));
+    // #49/#58：CSV 导出跟随 model/session 筛选（修前后端只解析 day 静默丢弃）+ 含工具列
+    {
+      const csvFiltered = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv?model=${encodeURIComponent('glm-5.3-flash')}`);
+      const csvFBuf = await csvFiltered.arrayBuffer();
+      const csvFText = new TextDecoder('utf-8').decode(csvFBuf);
+      ok('#49 CSV 筛选导出生效且含 tool 列',
+        csvFiltered.status === 200 && csvFText.includes('glm-5.3-flash') && !csvFText.includes('deepseek-v4-pro')
+          && csvFText.split('\n')[0].includes(',tool,'),
+        csvFText.slice(0, 120));
+    }
     // #55 回归：SEED 表内模型（deepseek-v4-pro，input_miss 1.32 USD/M）必须算出正金额
     //（修前 cost 路由读 entry.input 等不存在的字段 → 假 priced 真 0 金额）
     const dsRow = (cost.body.models || []).find((m) => m.model === 'deepseek-v4-pro');

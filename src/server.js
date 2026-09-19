@@ -584,18 +584,24 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       });
     }
     if (p === '/api/codex/export.csv') {
+      // #58 评审整改（#49）：与 /api/codex/events 同款筛选（day/model/session）——
+      // 修前前端带 model/session 三参而后端只解析 day，筛选导出静默得全量
       const day = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('day') || '')
         ? url.searchParams.get('day') : null;
+      const model = url.searchParams.get('model') || '';
+      const session = url.searchParams.get('session') || '';
       const conds = ["tool = 'codex'"];
       const args = [];
       if (day) { conds.push("date(ts/1000, 'unixepoch', 'localtime') = ?"); args.push(day); }
+      if (model) { conds.push('model = ?'); args.push(model); }
+      if (session) { conds.push('session_id = ?'); args.push(session); }
       const rows = db_safe(store).prepare(`
-        SELECT ts, model, session_id, project, input_tokens, cached_input, cache_write,
+        SELECT ts, tool, model, session_id, project, input_tokens, cached_input, cache_write,
                output_tokens, reasoning_tokens, total_tokens
         FROM events WHERE ${conds.join(' AND ')} ORDER BY ts DESC LIMIT 5000`).all(...args);
       const esc = (v) => (/[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : (v ?? ''));
-      const header = 'timestamp,model,session_id,project,input,cached_input,cache_write,output,reasoning,total';
-      const body = rows.map((r) => [new Date(r.ts).toISOString(), r.model, r.session_id, r.project,
+      const header = 'timestamp,tool,model,session_id,project,input,cached_input,cache_write,output,reasoning,total';
+      const body = rows.map((r) => [new Date(r.ts).toISOString(), r.tool, r.model, r.session_id, r.project,
         r.input_tokens, r.cached_input, r.cache_write, r.output_tokens, r.reasoning_tokens, r.total_tokens]
         .map(esc).join(',')).join('\n');
       // UTF-8 BOM：Excel 直接打开中文不乱码（#49 CSV 契约）
