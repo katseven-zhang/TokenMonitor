@@ -69,6 +69,31 @@ pub const DEFAULT_PORT: u32 = 8787;
 pub const TAIL_LINES: usize = 400;
 /// 日志为空时面板显示的占位行（#39：截断/轮转后不能继续挂着陈旧内容）
 pub const EMPTY_LOG_TEXT: &str = "（暂无日志）";
+/// #60：候选数据根（混用场景）：打包形态根优先，其后是源码形态 runtimeDir 根。
+/// GUI 与后台可能不同形态启动；主根优先，主根无日志时 refresh_log 切换到备用根，绝不混写游标
+/// （每个根独立 tail，切换时清空缓冲重来，#34/#39 语义不变）。
+pub fn candidate_data_roots(
+    app_root: Option<&Path>,
+    env_data_dir: Option<&str>,
+    local_app_data: Option<&str>,
+    home: &str,
+    is_windows: bool,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let primary = resolve_data_root(app_root, env_data_dir, local_app_data, home, is_windows);
+    roots.push(primary);
+    if is_windows {
+        if let Some(la) = local_app_data {
+            if !la.trim().is_empty() {
+                let alt = Path::new(la).join("TokenMonitor").to_path_buf();
+                if !roots.iter().any(|r| r == &alt) {
+                    roots.push(alt);
+                }
+            }
+        }
+    }
+    roots
+}
 
 pub fn parse_port(text: &str) -> Option<u32> {
     match text.trim().parse::<u32>() {
@@ -285,6 +310,20 @@ fn selfcheck(app_root_arg: Option<&str>) -> i32 {
         app_root.as_deref().map_or_else(|| "(null)".to_string(), |p| p.display().to_string())
     );
     println!("dataRoot={}", data_root.display());
+    // #60：备用候选根与 GUI 自动切换 tail 的探测同源——混用诊断时直接可比对主/备两根
+    let alt_root = candidate_data_roots(
+        app_root.as_deref(),
+        std::env::var("TOKENMONITOR_DATA_DIR").ok().as_deref(),
+        std::env::var("LOCALAPPDATA").ok().as_deref(),
+        &std::env::var("USERPROFILE").unwrap_or_default(),
+        cfg!(windows),
+    )
+    .into_iter()
+    .find(|r| r != &data_root);
+    println!(
+        "altDataRoot={}",
+        alt_root.map_or_else(|| "(none)".to_string(), |p| p.display().to_string())
+    );
     println!("logPath={}", log_path_for(&data_root).display());
     println!("settingsPath={}", settings_path_for(&data_root).display());
     println!(
@@ -540,6 +579,10 @@ struct App {
     data_root: PathBuf,
     settings_path: PathBuf,
     log_path: PathBuf,
+    /// #60：备用候选数据根（源码形态 runtimeDir 等）；主根无日志时自动切换 tail
+    alt_log_root: Option<PathBuf>,
+    /// #60：当前 tail 实际来源（显示在状态行，标明读的是哪个根）
+    log_source: Option<PathBuf>,
     /// 已保存/已生效端口（#30）：探测、启动、打开面板一律用它；
     /// 端口输入框的未保存文本不改变任何后台交互目标。
     saved_port: u32,
@@ -793,12 +836,18 @@ impl App {
         } else {
             "已停止".to_string()
         };
+        // #60：混用场景下若日志实际来自备用根，状态行标明，避免「数据目录≠日志目录」误导
+        let log_note = match &self.log_source {
+            Some(alt) => format!("    日志根：{}", alt.display()),
+            None => String::new(),
+        };
         self.set_text(
             self.status_label,
             &format!(
-                "状态：{state}    面板：http://127.0.0.1:{}    数据：{}",
+                "状态：{state}    面板：http://127.0.0.1:{}    数据：{}{}",
                 self.saved_port,
-                self.data_root.display()
+                self.data_root.display(),
+                log_note
             ),
         );
         unsafe {
@@ -807,24 +856,56 @@ impl App {
     }
 
 
-    /// 空日志占位：只在状态翻转时写一次文本（#39 语义，#34 保持）
+    /// 空日志占位：只在状态翻转时写一次文本（#39 语义，#34 保持）。
+    /// #60：占位必须同时显示 tail 的完整路径（区分「路径不对」与「真的没日志」）。
     fn show_log_placeholder(&mut self) {
         self.log_buf.clear();
         self.log_offset = 0;
         self.log_len = 0;
         if !self.log_shows_placeholder {
             self.log_shows_placeholder = true;
-            self.set_text(self.log_box, EMPTY_LOG_TEXT);
+            // #60：占位必须同时显示当前 tail 的完整路径（区分「路径不对」与「真的没日志」），
+            // 路径与 --selfcheck 的 logPath 同源（log_path_for）；混用切换到备用根后
+            // 备用根日志消失时，也如实显示备用根（实际 tail 的根）。
+            let root = self.log_source.clone().unwrap_or_else(|| self.data_root.clone());
+            self.set_text(
+                self.log_box,
+                &format!(
+                    "{}\r\n当前 tail 的日志路径：{}\r\n（若后台以其他形态启动，日志可能在另一数据根——见状态行的数据目录与 TROUBLESHOOTING_WINDOWS.md §0）",
+                    EMPTY_LOG_TEXT,
+                    log_path_for(&root).display()
+                ),
+            );
         }
     }
 
     /// 增量刷新日志面板（#34）：文件大小未变化时零 IO、不碰控件；
     /// 有追加时只读新增字节；truncate/轮转时清空后重读并保持 #39 的占位语义。
     fn refresh_log(&mut self) {
-        let Ok(meta) = std::fs::metadata(&self.log_path) else {
-            // 文件不存在（尚未产生/被删除重建）：等同空日志占位语义
-            self.show_log_placeholder();
-            return;
+        let meta = match std::fs::metadata(&self.log_path) {
+            Ok(m) => m,
+            Err(_) => {
+                // #60 混用场景：主根无日志文件时，探测备用根是否有日志——
+                // 有则自动切换 tail 到备用根（每个根独立缓冲/游标，切换即清空重来，
+                // #34/#39 语义不变；绝不混写）；都没有则显示含完整路径的空态占位。
+                if let Some(alt) = self.alt_log_root.clone() {
+                    let alt_log = log_path_for(&alt);
+                    if let Ok(alt_meta) = std::fs::metadata(&alt_log) {
+                        if alt_meta.len() > 0 {
+                            self.log_path = alt_log;
+                            self.log_source = Some(alt);
+                            self.log_buf.clear();
+                            self.log_offset = 0;
+                            self.log_len = 0;
+                            self.log_shows_placeholder = false;
+                            self.update_status(); // 状态行标明实际 tail 的来源根
+                            return;
+                        }
+                    }
+                }
+                self.show_log_placeholder();
+                return;
+            }
         };
         let size = meta.len();
         match log_refresh_plan(self.log_offset, self.log_len, size) {
@@ -1035,6 +1116,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
             );
             let settings_path = settings_path_for(&data_root);
             let log_path = log_path_for(&data_root);
+            // #60：候选根（主根 + 源码形态 runtimeDir），主根无日志时 refresh_log 自动切换
+            let alt_log_root = candidate_data_roots(
+                app_root.as_deref(),
+                std::env::var("TOKENMONITOR_DATA_DIR").ok().as_deref(),
+                std::env::var("LOCALAPPDATA").ok().as_deref(),
+                &std::env::var("USERPROFILE").unwrap_or_default(),
+                cfg!(windows),
+            )
+            .into_iter()
+            .find(|r| r != &data_root);
             let resolved = resolve_backend(app_root.as_deref(), &exe_dir);
             let saved_port = load_port(&settings_path);
 
@@ -1116,6 +1207,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: usize, lparam: 
                 data_root,
                 settings_path,
                 log_path,
+                alt_log_root,
+                log_source: None,
                 saved_port,
                 backend: None,
                 backend_exe: resolved.as_ref().map(|(e, _)| e.clone()),

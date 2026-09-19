@@ -234,7 +234,7 @@ if (cmd === 'scan') {
   scanner.startWatching();
   const balancePoller = new BalancePoller(store, { log });
   const server = await startServer({ store, scanner, balancePoller, port, log });
-  log('实时监听已启动（FSEvents + 60s 兜底轮询），余额每 30 分钟轮询，Ctrl+C 退出');
+  log('实时监听已启动（fs.watch 目录监听 + 60s 兜底轮询），余额每 30 分钟轮询，Ctrl+C 退出');
   let shutting = false;
   // #31：serve 运行锁（数据目录 tokenmonitor-<port>.lock，含 PID）——
   // 安装/卸载脚本据此识别运行中后台；锁目录与数据目录同层（打包/安装形态=appRoot\data）

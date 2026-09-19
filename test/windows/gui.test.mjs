@@ -212,6 +212,28 @@ console.log('\n[#59] 探测移出 APP 锁/UI 线程（同步消息不再被持�
   ok('#59 WM_TIMER 不再直接调 poll_status（已工作线程化）',
     !/poll_status\(\)/.test(timerArm));
 }
+
+// ---- #60：打包形态日志面板恒空（跨形态混用时无法诊断）----
+console.log('\n[#60] 空态显示完整 tail 路径 + 多候选根探测（混用可诊断）');
+{
+  const ph60 = source.slice(source.indexOf('fn show_log_placeholder'), source.indexOf('fn refresh_log'));
+  ok('#60 空态提示带完整日志路径（与 selfcheck 同源 log_path_for）',
+    /EMPTY_LOG_TEXT/.test(ph60) && /log_path_for\(&root\)/.test(ph60) && /当前 tail 的日志路径/.test(ph60));
+  const cand60 = source.slice(source.indexOf('fn candidate_data_roots'), source.indexOf('pub fn parse_port'));
+  ok('#60 候选根 = 主根 + %LOCALAPPDATA%\\TokenMonitor（源码形态 runtimeDir）',
+    cand60.includes('fn candidate_data_roots') && /join\("TokenMonitor"\)/.test(cand60));
+  ok('#60 App 记录备用根与实际 tail 来源字段',
+    /alt_log_root: Option<PathBuf>/.test(source) && /log_source: Option<PathBuf>/.test(source));
+  const refresh60 = source.slice(source.indexOf('fn refresh_log'), source.indexOf('fn poll_status'));
+  ok('#60 主根无日志时探测备用根、切换 tail 并标明来源',
+    /alt_log_root\.clone\(\)/.test(refresh60) && /log_source = Some\(alt\)/.test(refresh60)
+      && /update_status\(\)/.test(refresh60));
+  ok('#60 切换根时清空缓冲与游标（不静默合并 #34/#39 语义）',
+    /log_buf\.clear\(\)/.test(refresh60) && /log_offset = 0/.test(refresh60) && /log_len = 0/.test(refresh60));
+  const status60 = source.slice(source.indexOf('fn update_status'), source.indexOf('fn show_log_placeholder'));
+  ok('#60 状态行标明实际日志根（数据目录≠日志根时不再误导）',
+    /日志根：/.test(status60));
+}
 console.log('\n[behavioral] 已构建 exe 无头自检（中文+空格包布局）');
 if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
   // 仅限本地无 Rust 工具链时的显式放行（#41）：CI 与默认本地环境不得借此跳绿
@@ -263,6 +285,25 @@ if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
     const forcedDir = join(base, '强制数据 目录');
     const forced = run({ TOKENMONITOR_DATA_DIR: forcedDir }, pkg);
     ok('env 覆盖优先于打包形态', parse(forced.stdout).dataRoot === forcedDir, parse(forced.stdout).dataRoot);
+    // ---- #60: 打包 dataRoot 无 logs 目录 + 备用根探测（跨形态混用诊断）----
+    console.log('\n[#60 mixed] 打包 dataRoot 无 logs 目录：自检标注主/备日志根');
+    {
+      // pkg 只建了 runtime\bin，data\logs 从未创建——正是任务报告的打包形态现场
+      ok('#60 打包 dataRoot 无 logs 目录（场景成立）', !existsSync(join(pkg, 'data', 'logs')));
+      ok('#60 自检 logPath 与 GUI 空态提示同源（同一 log_path_for(data_root)）',
+        /当前 tail 的日志路径/.test(source)
+          && pkgInfo.logPath === join(pkg, 'data', 'logs', 'tokenmonitor.log'),
+        pkgInfo.logPath);
+      const laRoot = join(process.env.LOCALAPPDATA || '', 'TokenMonitor');
+      ok('#60 打包形态自检列出备用根（%LOCALAPPDATA%\\TokenMonitor）',
+        pkgInfo.altDataRoot === laRoot, pkgInfo.altDataRoot);
+      ok('#60 源码形态主根即 runtimeDir：无第二候选（空态完整路径+§0 文档兜底诊断）',
+        bareInfo.altDataRoot === '(none)' && bareInfo.dataRoot === laRoot,
+        bareInfo.dataRoot + ' | ' + bareInfo.altDataRoot);
+      ok('#60 env 覆盖主根时备用根不受影响',
+        parse(forced.stdout).altDataRoot === laRoot, parse(forced.stdout).altDataRoot);
+    }
+
 
     // ---- Part C: 进程常驻 + 单实例（#26 回归：重复互斥锁曾致窗体 Load 即 Close）----
     console.log('\n[stay-alive] GUI 进程常驻与单实例（#26 回归）');

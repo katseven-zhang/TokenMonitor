@@ -1,0 +1,13 @@
+﻿端口：
+----
+保存端口
+----
+启动
+----
+停止
+----
+打开面板
+----
+状态：已停止    面板：http://127.0.0.1:8787    数据：C:\Users\ZWX\AppData\Local\Temp\gui60-empty-data    日志根：C:\Users\ZWX\AppData\Local\TokenMonitor
+----
+输出日志（最近 400 行，自动刷新）：
