@@ -1,7 +1,7 @@
 import { useMemo,useState } from 'react';
 import { localInput } from '../lib/range';
 
-type Rate={effectiveFrom?:string;input:number;cached:number;cacheWrite:number;output:number};
+type Rate={effectiveFrom?:string|null;input:number;cached:number;cacheWrite:number;output:number};
 type Catalog={description?:string;models:Record<string,Rate[]>;aliases?:Record<string,string>};
 const price=(value:number|undefined)=>value===undefined?'未定价':`$${value.toLocaleString('en',{maximumFractionDigits:8})}`;
 export function PriceCatalog({text}:{text:string}) {
