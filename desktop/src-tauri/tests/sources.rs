@@ -124,6 +124,10 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
     .unwrap();
     z.execute("INSERT INTO tool_usage VALUES('z-session','Bash',?1)", [TS])
         .unwrap();
+    // Pending, missing and invalid negative usage must not inflate request counts.
+    for (id, value) in [("z-empty", Some(0)), ("z-null", None), ("z-negative", Some(-20))] {
+        z.execute("INSERT INTO model_usage VALUES(?1,'z-session','unknown',?2,?3,?3,?3,?3,?3)", params![id, TS, value]).unwrap();
+    }
     roots.insert("zcode".into(), vec![zpath.display().to_string()]);
 
     let opath = f.0.join("sources/opencode/db.sqlite");

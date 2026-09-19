@@ -35,7 +35,7 @@ pub fn open(root: &Path) -> Result<Connection, String> {
       CREATE VIEW IF NOT EXISTS activities AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_activities) WHERE rank=1;").map_err(|e|e.to_string())?;
     // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
     // while preserving cached data until each replacement transaction is ready.
-    const COLLECTOR_REVISION: &str = "2";
+    const COLLECTOR_REVISION: &str = "3";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",

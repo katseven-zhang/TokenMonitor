@@ -492,9 +492,9 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                     tokens: Tokens {
                         input: input - cached,
                         cached,
-                        output: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                        reasoning: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                        cache_write: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                        output: r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0),
+                        reasoning: r.get::<_, Option<i64>>(6)?.unwrap_or(0).max(0),
+                        cache_write: r.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0),
                     },
                     path: source.clone(),
                     line: 0,
@@ -502,7 +502,11 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            out.events.push(row.map_err(|e| e.to_string())?);
+            let event = row.map_err(|e| e.to_string())?;
+            // Empty/in-progress rows are not usage requests, as in the other adapters.
+            if event.tokens.total() > 0 {
+                out.events.push(event);
+            }
         }
         let mut stmt = db
             .prepare("SELECT rowid,session_id,tool_name,started_at FROM tool_usage")

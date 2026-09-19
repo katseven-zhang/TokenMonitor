@@ -1,4 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#[cfg(all(
+    not(debug_assertions),
+    feature = "desktop",
+    not(feature = "custom-protocol")
+))]
+compile_error!(
+    "Desktop release requires custom-protocol to embed the frontend; use the default features."
+);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let root = tokenmonitor_core::config::data_dir();

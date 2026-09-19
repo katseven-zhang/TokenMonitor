@@ -108,7 +108,8 @@ pub fn run() {
                 .data_directory(root.join("webview"))
                 .additional_browser_args("--disable-background-networking --disable-component-update --disable-sync --disable-domain-reliability --no-first-run")
                 .on_navigation(|url| {
-                    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+                    url.as_str() == "about:blank"
+                        || (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
                         || (matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost"))
                         || (cfg!(debug_assertions) && url.scheme() == "http" && url.host_str() == Some("localhost") && url.port() == Some(5173))
                 })

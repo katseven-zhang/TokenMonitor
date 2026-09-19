@@ -14,8 +14,9 @@ name = "TokenMonitor"
 path = "src/main.rs"
 
 [features]
-default = ["desktop"]
+default = ["desktop", "custom-protocol"]
 desktop = ["dep:tauri", "dep:tauri-plugin-dialog", "dep:tauri-plugin-autostart"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

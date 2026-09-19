@@ -312,6 +312,9 @@ pub fn run(root: &Path) -> Result<(), String> {
     while !stop.load(Ordering::Relaxed) || !worker.is_finished() {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Winsock inherits the listener's nonblocking mode on accepted sockets.
+                // The listener polls, but each worker must wait for a complete request.
+                stream.set_nonblocking(false).map_err(|e| e.to_string())?;
                 let root = root.to_path_buf();
                 let stop = stop.clone();
                 let request_scan = request_scan.clone();
@@ -535,6 +538,26 @@ mod tests {
         }
         assert!(ready);
         assert!(run(&root).unwrap_err().contains("运行"));
+        let mut delayed = TcpStream::connect((Ipv4Addr::LOCALHOST, settings.port)).unwrap();
+        delayed
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let request = format!(
+            "{}\n",
+            json!({"token":fs::read_to_string(root.join("service-token")).unwrap(),"method":"status","args":{}})
+        );
+        let midpoint = request.len() / 2;
+        delayed.write_all(&request.as_bytes()[..midpoint]).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        delayed.write_all(&request.as_bytes()[midpoint..]).unwrap();
+        delayed.shutdown(Shutdown::Write).unwrap();
+        let mut delayed_response = String::new();
+        delayed.read_to_string(&mut delayed_response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&delayed_response).unwrap()["result"]["running"],
+            true
+        );
         let mut bad = TcpStream::connect((Ipv4Addr::LOCALHOST, settings.port)).unwrap();
         bad.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         writeln!(bad, "{}", json!({"token":"wrong","method":"stop"})).unwrap();
