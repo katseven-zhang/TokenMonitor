@@ -55,8 +55,20 @@ console.log('[0] 源码契约（Rust 原生实现，#32）');
     '菜单标签三态（对齐 .NET 版 StartRestartLabel）');
   okSrc(source.includes('为免误杀这里不重启'), '外部启动的后台不停止不重启（只管理自有）');
   okSrc(source.includes('--selfcheck') && source.includes('--probe'), '无头 --selfcheck / --probe 模式');
+  // #58 评审发现的活缺陷回归门：SetTimer 投递 WM_TIMER，wnd_proc 必须处理它（修前只处理 WM_APP_POLL → 定时器 tick 永不触发）
+  okSrc(/wm::WM_TIMER => \{[\s\S]{0,80}poll_once\(\);/.test(source), 'WM_TIMER 分支存在并触发 poll_once（定时器接线）');
+  okSrc(source.includes('--pollcheck'), '--pollcheck 无头轮询自检模式');
   okSrc(!existsSync(join(repo, 'windows', 'tray', 'Program.cs'))
     && !existsSync(join(repo, 'windows', 'tray', 'TokenMonitorTray.csproj')), '.NET 版已删除（csproj/Program.cs）');
+
+  // #58 行为级轮询断言：--pollcheck 在 5.5s 内应被定时器 tick 多次驱动（≥2 = 接线正常；断裂时恒为 1）
+  {
+    const pc = spawnSync(exe, ['--pollcheck'], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+    const m = /POLLCHECK=(\d+)/.exec(String(pc.stdout));
+    const n = m ? Number(m[1]) : 0;
+    ok(pc.status === 0 && n >= 2, '--pollcheck 轮询接线（首轮 + 定时器 tick 均驱动 poll_once）',
+      `exit=${pc.status} POLLCHECK=${n}`);
+  }
 }
 
 console.log('[1] 中文+空格路径下运行自包含单文件');

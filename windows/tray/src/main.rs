@@ -17,14 +17,15 @@ use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EX
 use windows_sys::Win32::Networking::WinSock as ws;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{
-    CreateMutexW, CreateProcessW, TerminateProcess, WaitForSingleObject, CREATE_NO_WINDOW,
-    PROCESS_INFORMATION, STARTUPINFOW,
+    CreateMutexW, CreateProcessW, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
 };
 use windows_sys::Win32::UI::Shell::{ShellExecuteW, Shell_NotifyIconW, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging as wm;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    DestroyMenu, GetMessageW, GetCursorPos, LoadCursorW, MessageBoxW, ModifyMenuW, PostQuitMessage,
+    DestroyMenu, GetMessageW, GetCursorPos, LoadCursorW, MessageBoxW, ModifyMenuW,
+    PostThreadMessageW, PostQuitMessage,
     RegisterClassExW, SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, HICON,
     HMENU, MSG,
 };
@@ -362,8 +363,12 @@ fn with_tray<R>(f: impl FnOnce(&mut TrayState) -> R) -> Option<R> {
     TRAY.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(f)
 }
 
+/// 轮询次数计数（--pollcheck 自检用；原子计数无锁开销可忽略）
+static POLL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 轮询一次：探测状态 → 更新图标/提示/菜单标签
 fn poll_once() {
+    POLL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     with_tray(|t| unsafe {
         let running_now = http_status_ok(t.app.port() as u16);
         let own = t.app.own_backend_alive();
@@ -423,6 +428,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
     match msg {
         WM_APP_POLL => {
+            poll_once();
+            0
+        }
+        // SetTimer 投递的是 WM_TIMER（#58 评审发现的活缺陷：此前只处理 WM_APP_POLL，
+        // 定时器 tick 永远无人处理 → 启动首帧后图标/tooltip 永不刷新）
+        wm::WM_TIMER => {
             poll_once();
             0
         }
@@ -538,6 +549,68 @@ fn selfcheck() -> i32 {
     if backend.is_some() { 0 } else { 2 }
 }
 
+/// 消息循环+定时器接线自检（#58 评审要求的行为级断言）：
+/// 正常创建窗口与定时器并进入消息循环，5.5s 后统计 poll_once 实际执行次数。
+/// SetTimer 投递 WM_TIMER → wnd_proc 的 WM_TIMER 分支 → poll_once；
+/// 若轮询接线断裂（如只处理自定义消息），计数停留在首轮 1 次 → exit 1。
+fn pollcheck() -> i32 {
+    unsafe {
+        let hinstance = GetModuleHandleW(std::ptr::null());
+        let class_name = wide("TokenMonitorTrayWnd");
+        let mut wc: wm::WNDCLASSEXW = std::mem::zeroed();
+        wc.cbSize = std::mem::size_of::<wm::WNDCLASSEXW>() as u32;
+        wc.lpfnWndProc = Some(wnd_proc);
+        wc.hInstance = hinstance;
+        wc.lpszClassName = class_name.as_ptr();
+        if RegisterClassExW(&wc) == 0 {
+            println!("POLLCHECK=0 (register failed)");
+            return 2;
+        }
+        let hwnd = CreateWindowExW(
+            0, class_name.as_ptr(), wide("TokenMonitorTray pollcheck").as_ptr(),
+            0, 0, 0, 0, 0,
+            std::ptr::null_mut(), std::ptr::null_mut(), hinstance, std::ptr::null(),
+        );
+        if hwnd.is_null() {
+            println!("POLLCHECK=0 (create failed)");
+            return 2;
+        }
+        // 注册一个最小 TRAY 状态供 poll_once 消费（无图标，仅探测计数）
+        let state = TrayState {
+            ui_hwnd: hwnd,
+            hicon_run: std::ptr::null_mut(),
+            hicon_stop: std::ptr::null_mut(),
+            nid: std::mem::zeroed(),
+            menu: std::ptr::null_mut(),
+            app: TrayApp {
+                saved_port: DEFAULT_PORT,
+                port_override: None,
+                backend: None,
+                backend_exe: None,
+                backend_script: None,
+                external_online: false,
+                stopping: false,
+            },
+        };
+        *TRAY.lock().unwrap() = Some(state);
+        SetTimer(hwnd, 1, 2000, None); // 2s tick，与真实托盘一致
+        poll_once(); // 首轮立即
+        let main_tid = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5500));
+            PostThreadMessageW(main_tid, 0x0012 /* WM_QUIT */, 0, 0);
+        });
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let n = POLL_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        println!("POLLCHECK={}", n);
+        if n >= 2 { 0 } else { 1 } // ≥2 = 首轮 + 至少一个 timer tick 被处理
+    }
+}
+
 fn probe_headless(port: u16) -> i32 {
     let start = std::time::Instant::now();
     let ok = http_status_ok(port);
@@ -650,6 +723,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--selfcheck") {
         std::process::exit(selfcheck());
+    }
+    if args.iter().any(|a| a == "--pollcheck") {
+        // --pollcheck：无头轮询接线自检（#58 评审），exit 0 = 定时器 tick 被处理
+        std::process::exit(pollcheck());
     }
     if args.iter().any(|a| a == "--probe") {
         let port = args
