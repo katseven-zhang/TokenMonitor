@@ -611,7 +611,7 @@ impl ReplayParseState {
                 || self
                     .previous_totals
                     .as_ref()
-                    .is_some_and(|p| current.total_tokens < p.total_tokens)
+                    .is_some_and(|p| current.input_tokens < p.input_tokens || current.output_tokens < p.output_tokens)
             {
                 last_usage.or_else(|| Some(current.clone()))
             } else {
@@ -629,11 +629,7 @@ impl ReplayParseState {
             return;
         };
         let usage = convert_to_delta(&raw);
-        if usage.input_tokens == 0
-            && usage.cached_input_tokens == 0
-            && usage.output_tokens == 0
-            && usage.reasoning_output_tokens == 0
-        {
+        if usage.total_tokens == 0 {
             return;
         }
 
@@ -1692,24 +1688,19 @@ fn normalize_raw_usage(value: Option<&Value>) -> Option<RawUsage> {
         return None;
     }
 
-    let input = number_field(value, "input_tokens");
+    let input = number_field(value, "input_tokens").unwrap_or(0).max(0);
     let cached = number_field(value, "cached_input_tokens")
-        .or_else(|| number_field(value, "cache_read_input_tokens"))
-        .unwrap_or(0);
-    let output = number_field(value, "output_tokens").unwrap_or(0);
-    let reasoning = number_field(value, "reasoning_output_tokens").unwrap_or(0);
-    let total = number_field(value, "total_tokens").unwrap_or(0);
+        .unwrap_or(0).max(number_field(value, "cache_read_input_tokens").unwrap_or(0)).clamp(0,input);
+    let output = number_field(value, "output_tokens").unwrap_or(0).max(0);
+    let reasoning = number_field(value, "reasoning_output_tokens").unwrap_or(0).max(0);
 
     Some(RawUsage {
-        input_tokens: input.unwrap_or(0),
+        input_tokens: input,
         cached_input_tokens: cached,
         output_tokens: output,
         reasoning_output_tokens: reasoning,
-        total_tokens: if total > 0 {
-            total
-        } else {
-            input.unwrap_or(0) + output
-        },
+        // Same accounting as the event cache: reasoning is already in output.
+        total_tokens: input + output,
     })
 }
 
@@ -2265,6 +2256,31 @@ mod tests {
         assert_eq!(detail.turns[0].token_events[1].cached_input_tokens, 20);
         assert_eq!(detail.turns[0].token_events[1].output_tokens, 40);
         assert_eq!(detail.turns[0].token_events[1].total_tokens, 120);
+    }
+
+    #[test]
+    fn replay_and_collector_agree_on_resets_corrections_and_stale_reported_totals() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            event_msg("2026-06-01T00:00:02.000Z", token_payload_without_last("turn-1", "gpt-5", 100, 20, 50, 999)),
+            // Input drops while output grows: combined total still grows, but counters reset.
+            event_msg("2026-06-01T00:00:03.000Z", token_payload("turn-1", "gpt-5", 80, 40, 200, 999, 30, 10, 20, 999)),
+            event_msg("2026-06-01T00:00:04.000Z", token_payload_without_last("turn-1", "gpt-5", 90, 60, 210, 999)),
+            // Identical counters must not create a second request.
+            event_msg("2026-06-01T00:00:05.000Z", token_payload_without_last("turn-1", "gpt-5", 90, 60, 210, 999)),
+        ].join("\n");
+        let collected = crate::collectors::parse_jsonl("codex", "/tmp/session.jsonl", &raw);
+        let replay = parse_session_detail(record("/tmp/session.jsonl"),raw);
+        let events: Vec<_> = replay.turns.iter().flat_map(|turn| &turn.token_events).collect();
+        assert_eq!(events.len(),collected.events.len());
+        assert_eq!(events.len(),3);
+        for (display,event) in events.iter().zip(&collected.events) {
+            assert_eq!(display.input_tokens,event.tokens.input+event.tokens.cached);
+            assert_eq!(display.cached_input_tokens,event.tokens.cached);
+            assert_eq!(display.output_tokens,event.tokens.output);
+            assert_eq!(display.total_tokens,event.tokens.total());
+        }
+        assert_eq!(events.iter().map(|event|event.total_tokens).sum::<i64>(),220);
     }
 
     #[test]

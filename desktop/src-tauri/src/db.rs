@@ -33,6 +33,21 @@ pub fn open(root: &Path) -> Result<Connection, String> {
       CREATE TABLE IF NOT EXISTS cache_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE VIEW IF NOT EXISTS events AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_events) WHERE rank=1;
       CREATE VIEW IF NOT EXISTS activities AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_activities) WHERE rank=1;").map_err(|e|e.to_string())?;
+    let view_revision: Option<String> = db.query_row(
+        "SELECT value FROM cache_metadata WHERE key='view_revision'", [], |r|r.get(0)
+    ).ok();
+    if view_revision.as_deref() != Some("2") {
+        // A partial archive must not win merely because its pathname sorts first.
+        // Prefer the latest observation, then the most recently modified source.
+        // Keep both snapshots so deletion of one copy never deletes the other.
+        db.execute_batch("BEGIN IMMEDIATE;
+          DROP VIEW events;
+          DROP VIEW activities;
+          CREATE VIEW events AS SELECT * FROM (SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.agent,e.id ORDER BY e.ts DESC,COALESCE(f.mtime,0) DESC,e.path) AS rank FROM raw_events e LEFT JOIN source_files f ON f.path=e.path AND f.agent=e.agent) WHERE rank=1;
+          CREATE VIEW activities AS SELECT * FROM (SELECT e.*,ROW_NUMBER() OVER(PARTITION BY e.agent,e.id ORDER BY e.ts DESC,COALESCE(f.mtime,0) DESC,e.path) AS rank FROM raw_activities e LEFT JOIN source_files f ON f.path=e.path AND f.agent=e.agent) WHERE rank=1;
+          INSERT OR REPLACE INTO cache_metadata VALUES('view_revision','2');
+          COMMIT;").map_err(|e|e.to_string())?;
+    }
     // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
     // while preserving cached data until each replacement transaction is ready.
     const COLLECTOR_REVISION: &str = "3";
