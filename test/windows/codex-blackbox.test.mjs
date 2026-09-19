@@ -112,6 +112,28 @@ try {
       ok('黑盒：趋势空态——空数据时 by_day/by_hour 为空数组（守卫输入确为空）',
         Array.isArray(thrEmpty.by_day) && thrEmpty.by_day.length === 0,
         JSON.stringify(thrEmpty.by_day?.length));
+      // #50 三轮评审：窗口 reset 前端级断言——从真实 serve 的 codex.js 提取 countdown
+      // 函数本体并实际执行（非纯 grep）：过去时刻→「已重置」、未来时刻→时/分倒计时、
+      // 缺失/非数值→「—」（reset 显示不误报、不伪装）
+      {
+        const fnStart = pageJs.indexOf('function countdown');
+        const fnEnd = pageJs.indexOf('function renderQuota');
+        const fnSrc = fnStart >= 0 && fnEnd > fnStart ? pageJs.slice(fnStart, fnEnd) : '';
+        ok('黑盒：窗口 reset——countdown 函数存在于服务端返回的 codex.js', fnSrc.includes('function countdown'));
+        if (fnSrc) {
+          const countdown = new Function(fnSrc + '; return countdown;')();
+          const NOW = Date.now();
+          ok('黑盒：窗口 reset——过去时刻显示「已重置」（d<=0 分支，行为级）',
+            countdown(NOW - 60000, NOW) === '已重置', String(countdown(NOW - 60000, NOW)));
+          ok('黑盒：窗口 reset——未来时刻显示时/分倒计时（行为级）',
+            /^\d+时\d+分$|^\d+分$/.test(String(countdown(NOW + 5400000, NOW))),
+            String(countdown(NOW + 5400000, NOW)));
+          ok('黑盒：窗口 reset——resets_at 缺失/非数值显示「—」不伪装（行为级）',
+            countdown(null, NOW) === '—' && countdown(NaN, NOW) === '—', String(countdown(null, NOW)));
+        }
+        ok('黑盒：窗口 reset——配额卡倒计时接线 countdown(w.resets_at_ms, now)',
+          pageJs.includes('countdown(w.resets_at_ms, now)'));
+      }
     }
     const csvRes = await fetch(`http://127.0.0.1:${port}/api/codex/export.csv`);
     const csvBuf = await csvRes.arrayBuffer();
