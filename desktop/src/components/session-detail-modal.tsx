@@ -1503,7 +1503,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                         <span className="px-1 py-0.5">{t("sessions.detail.message_count", { count: countMessages(turn) })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.tool_count", { count: turn.toolCalls.length })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.patch_count", { count: countTurnPatches(turn) })}</span>
-                        <span className="px-1 py-0.5">{t("sessions.detail.error_count", { count: turn.errors.length })}</span>
+                        <span className="px-1 py-0.5">{t("sessions.detail.error_count", { count: turn.errors.length + turn.toolCalls.filter((tool) => tool.isError).length + turn.patchResults.filter((patch) => patch.isError).length })}</span>
                         <span className="px-1 py-0.5">{t("sessions.detail.token_event_count", { count: turn.tokenEvents.length })}</span>
                       </div>
                     </div>
