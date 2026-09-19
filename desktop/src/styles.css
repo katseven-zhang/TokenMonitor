@@ -3,3 +3,7 @@
 @media(max-width:1000px){.sidebar{width:160px;min-width:160px;padding-left:10px;padding-right:10px}.brand small{display:none}.brand b{font-size:14px}.brand-icon{width:29px;height:29px}.workspace{margin-left:160px;padding:0 18px}.hero{grid-template-columns:1fr}.hero-summary{padding-right:0}.hero-chart{margin-top:22px}.distribution{display:none}.metrics{grid-template-columns:repeat(2,1fr)}.page-heading{align-items:flex-start;flex-direction:column;gap:14px}h1{font-size:25px}.status{display:none}.agent-grid{grid-template-columns:repeat(3,1fr)}.source-setting{grid-template-columns:110px 1fr}}
 
 .dark .recharts-cartesian-axis-tick-value { fill: rgb(var(--muted-foreground)); }
+
+.quota-history { border-top:1px solid rgb(var(--border)); padding:16px 22px; }
+.quota-history summary { cursor:pointer; font-size:12px; line-height:1.8; }
+.quota-history-table { max-height:420px; }

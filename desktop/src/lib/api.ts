@@ -1,3 +1,4 @@
+import type { QuotaObservation } from './quota-observations';
 import { invoke } from '@tauri-apps/api/core';
 export type * from './reference-types';
 import type { SessionReplayDetail } from './reference-types';
@@ -9,7 +10,7 @@ export type Query = { start:number; end:number; agent:string|null; model:string|
 export type Summary = { key:string; label:string; tokens:Tokens; totalTokens:number; knownCostUsd:number; costUsd:number|null; unpricedEvents:number; events:number; firstTs:number; lastTs:number; agent:string; session:string; path:string };
 export type ScanStatus = {agent:string; state:string; files:number; parsed:number; reused:number; events:number; malformedLines:number; errors:string[]; updatedAt:number; durationMs:number};
 export type Activity = {id:string; agent:string; session:string; ts:number; name:string; path:string; line:number};
-export type Dashboard = {query:Query; totals:Summary; models:Summary[]; projects:Summary[]; sessions:Summary[]; agents:Summary[]; days:Summary[]; months:Summary[]; series:Summary[]; bucketMs:number; tools:Record<string,number>; activities:Activity[]; quotas:{agent:string; session:string; ts:number; payload:Record<string,any>}[]; status:ScanStatus[]; availableModels:string[]; availableProjects:string[]; eventCount:number};
+export type Dashboard = {query:Query; totals:Summary; models:Summary[]; projects:Summary[]; sessions:Summary[]; agents:Summary[]; days:Summary[]; months:Summary[]; series:Summary[]; bucketMs:number; tools:Record<string,number>; activities:Activity[]; quotas:QuotaObservation[]; quotaHistory:{total:number;items:QuotaObservation[]}; status:ScanStatus[]; availableModels:string[]; availableProjects:string[]; eventCount:number};
 export type UsageEvent={id:string;agent:string;session:string;project:string;model:string;ts:number;tokens:Tokens;path:string;line:number};
 export type EventPage={total:number;items:{event:UsageEvent;costUSD:number|null}[]};
 export type Settings={port:number;refreshSeconds:number;roots:Record<string,string[]>;disabledAgents:string[]};

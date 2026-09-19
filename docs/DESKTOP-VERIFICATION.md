@@ -36,3 +36,9 @@ This is an implementation/acceptance record, not a release approval. Branch: `co
 Latest stage commit: `97ba994`. The rebuilt EXE is 7,064,064 bytes and ZIP is 4,301,477 bytes; manifest file hashes/sizes and the six-file ZIP whitelist passed. Dark chart axis labels visibly render with the corrected contrast. These are stage artifacts, not a final release approval.
 
 No final completion claim until every remaining acceptance cell has concrete evidence or an explicitly user-approved scope adjustment.
+
+## Detailed trend and quota history follow-up
+
+- Trends now include empty time buckets across the exact queried range. Tests cover empty periods, summed totals, the exclusive end boundary and bounded bucket counts over very long ranges. Empty usage totals have a known zero cost; missing prices on actual events remain unknown.
+- Added local quota observation history with exact start/end boundaries, archive deduplication, optional session scope, newest-first ordering, a disclosed 500-observation display cap and per-window UI filtering. Account-wide observations are explicitly not model/project attribution or real-time balances. No reset-credit action exists.
+- Quota normalization tests cover missing values, invalid timestamps, percentages outside the display range and seconds-to-milliseconds conversion. Frontend 14 tests and production build, Rust 36 unit tests plus the ten-source integration test pass. Native inspection of this follow-up remains pending.
