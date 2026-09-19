@@ -10,7 +10,7 @@
  *
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/installer.test.mjs
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -132,22 +132,44 @@ try {
     ok(!existsSync(programsRoot + '/TokenMonitor.new'), '失败后暂存目录已清理');
   }
 
-  console.log('[4b] 后台运行中：升级/卸载给出明确中文提示且不动 data\（#31）');
+  console.log('[4b] 后台运行中：升级/卸载给出明确中文提示且不动 data\（#31，真实 serve 写锁）');
   {
     mkdirSync(dataDir, { recursive: true });
-    // 存活 PID = 本测试进程（脚本会用 Get-Process 验证）
-    writeFileSync(join(dataDir, 'tokenmonitor-8787.lock'), JSON.stringify({ pid: process.pid, port: 8787 }));
-    const candRun = makeCandidate(base, '2.1.0-test');
-    const rUp = runPs(INSTALL_PS1, ['-Source', candRun, ...dryRunArgs]);
-    ok(rUp.code !== 0, '后台运行中升级 → 非零退出');
-    ok(rUp.out.includes('请先停止后台'), '升级给出明确中文提示');
-    ok(installedVersion(installDir) === '2.0.0-test', '安装目录未被替换（data 未动）');
-    const rUn = runPs(UNINSTALL_PS1, dryRunArgs);
-    ok(rUn.code !== 0, '后台运行中卸载 → 非零退出');
-    ok(rUn.out.includes('请先停止后台'), '卸载给出明确中文提示');
-    ok(existsSync(dataDir), '卸载未做破坏性操作（data 仍在）');
-    // 损坏 JSON 容错：视为无运行实例
-    rmSync(join(dataDir, 'tokenmonitor-8787.lock'));
+    // #58 评审整改：锁文件必须由生产路径写出——起真实 serve（TOKENMONITOR_DATA_DIR
+    // 指向本场景 data\），其启动即写 tokenmonitor-<port>.lock（含 PID）
+    const serveEnv = { ...process.env, TOKENMONITOR_DATA_DIR: dataDir, HOME: base, USERPROFILE: base };
+    const serve = spawn(process.execPath,
+      ['--disable-warning=ExperimentalWarning', join(repo, 'bin', 'tokenmonitor.js'), 'serve', '--port', '18877'],
+      { env: serveEnv, stdio: 'ignore' });
+    let lockName = null;
+    for (let i = 0; i < 60 && !lockName; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+      try {
+        const hit = readdirSync(dataDir).filter((n) => n.startsWith('tokenmonitor-') && n.endsWith('.lock'));
+        if (hit.length) lockName = hit[0];
+      } catch { /* dir not ready */ }
+    }
+    ok(!!lockName, 'serve 生产路径写出 tokenmonitor-<port>.lock（含 PID）');
+    if (!lockName) {
+      try { serve.kill(); } catch { /* already gone */ }
+    } else {
+      const candRun = makeCandidate(base, '2.1.0-test');
+      const rUp = runPs(INSTALL_PS1, ['-Source', candRun, ...dryRunArgs]);
+      ok(rUp.code !== 0, '后台运行中升级 → 非零退出');
+      ok(rUp.out.includes('请先停止后台'), '升级给出明确中文提示');
+      ok(installedVersion(installDir) === '2.0.0-test', '安装目录未被替换（data 未动）');
+      const rUn = runPs(UNINSTALL_PS1, dryRunArgs);
+      ok(rUn.code !== 0, '后台运行中卸载 → 非零退出');
+      ok(rUn.out.includes('请先停止后台'), '卸载给出明确中文提示');
+      ok(existsSync(dataDir), '卸载未做破坏性操作（data 仍在）');
+      serve.kill();
+      // 进程退出后锁由 exit 钩子清理（或 PID 不存活被守卫容错放行）
+      for (let i = 0; i < 20; i++) {
+        if (!existsSync(join(dataDir, lockName))) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    // 损坏 JSON 容错：视为无运行实例（守卫自身的容错语义，独立于生产写锁路径）
     writeFileSync(join(dataDir, 'tokenmonitor-9999.lock'), 'not-json{{{ broken');
     const rFix = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '2.2.0-test'), ...dryRunArgs]);
     ok(rFix.code === 0, '损坏锁文件视为无运行实例（升级照常 exit 0）');

@@ -11,7 +11,7 @@
  *   tokenmonitor uninstall-agent
  *   tokenmonitor bar [--port 8787]
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import http from 'node:http';
 import { Store } from '../src/store.js';
@@ -236,6 +236,19 @@ if (cmd === 'scan') {
   const server = await startServer({ store, scanner, balancePoller, port, log });
   log('实时监听已启动（FSEvents + 60s 兜底轮询），余额每 30 分钟轮询，Ctrl+C 退出');
   let shutting = false;
+  // #31：serve 运行锁（数据目录 tokenmonitor-<port>.lock，含 PID）——
+  // 安装/卸载脚本据此识别运行中后台；锁目录与数据目录同层（打包/安装形态=appRoot\data）
+  const runtimeLockPath = join(DATA_DIR, `tokenmonitor-${port}.lock`);
+  const writeRuntimeLock = () => {
+    try {
+      writeFileSync(runtimeLockPath, JSON.stringify({ pid: process.pid, port, started: new Date().toISOString() }));
+    } catch { /* 数据目录不可写时跳过（守卫会因无锁放行，行为同修前） */ }
+  };
+  const removeRuntimeLock = () => {
+    try { rmSync(runtimeLockPath, { force: true }); } catch { /* best effort */ }
+  };
+  writeRuntimeLock();
+  process.on('exit', removeRuntimeLock); // 正常/异常退出兜底清理；异常残留由守卫的 PID 存活检查容错
   const shutdown = (signal) => {
     if (shutting) return;
     shutting = true;
@@ -244,6 +257,7 @@ if (cmd === 'scan') {
     try { balancePoller.stop?.(); } catch { /* optional */ }
     try { server.close(); } catch { /* listen failed */ }
     try { store.close(); } catch { /* already closed */ }
+    removeRuntimeLock();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
