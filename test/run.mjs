@@ -1711,6 +1711,16 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
           && csvFText.split('\n')[0].includes(',tool,'),
         csvFText.slice(0, 120));
     }
+    // #58 评审整改（#46 AC2）：完整周额度外推——有百分比+已配价用量 → ok 且 ≥ 已用金额
+    ok('#46 外推：state ok 且 full_window_cny >= 已用金额（40% 线性放大）',
+      typeof cost.body.extrapolation === 'object' && cost.body.extrapolation.state === 'ok'
+        && cost.body.extrapolation.full_window_cny >= cost.body.total_cny
+        && cost.body.extrapolation.basis === 'used_percent_linear',
+      JSON.stringify(cost.body.extrapolation));
+    // #48 AC3 峰值指标经 #46 契约可得
+    ok('#48 吞吐含单请求峰值 peak', typeof thr.body.totals.peak === 'number' && thr.body.totals.peak > 0,
+      String(thr.body.totals.peak));
+
     // #55 回归：SEED 表内模型（deepseek-v4-pro，input_miss 1.32 USD/M）必须算出正金额
     //（修前 cost 路由读 entry.input 等不存在的字段 → 假 priced 真 0 金额）
     const dsRow = (cost.body.models || []).find((m) => m.model === 'deepseek-v4-pro');
@@ -1749,6 +1759,12 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
       const e2 = await fetch(`http://127.0.0.1:${port2}/api/codex/pace`);
       ok('#46 空库 pace 优雅降级（no_samples）',
         e2.status === 200 && (await e2.json()).pace.unknown_reason === 'no_samples');
+      const e3 = await fetch(`http://127.0.0.1:${port2}/api/codex/cost?window=weekly`);
+      const e3b = await e3.json();
+      ok('#46 空库外推优雅降级（no_window_usage_percent——窗口条件先于金额条件）',
+        e3.status === 200 && e3b.extrapolation?.state === 'unknown'
+          && e3b.extrapolation.unknown_reason === 'no_window_usage_percent',
+        JSON.stringify(e3b.extrapolation));
     } finally {
       server2.close();
       try { emptyStore.db.close(); } catch { /* 句柄 */ }

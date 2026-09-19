@@ -449,10 +449,12 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     if (p === '/api/codex/throughput') {
       const days = parseDays(url.searchParams.get('days'), 7);
       const since = days > 0 ? startOfDay() - (days - 1) * 86_400_000 : 0;
+      // peak = 单请求最大 total_tokens（#58 评审整改：#48 AC3 明列「峰值」指标）
       const totals = db_safe(store).prepare(`
         SELECT COUNT(*) requests, COUNT(DISTINCT session_id) sessions,
                SUM(input_tokens) input, SUM(cached_input) cached_input, SUM(cache_write) cache_write,
-               SUM(output_tokens) output, SUM(reasoning_tokens) reasoning, SUM(total_tokens) total
+               SUM(output_tokens) output, SUM(reasoning_tokens) reasoning, SUM(total_tokens) total,
+               MAX(total_tokens) peak
         FROM events WHERE tool = 'codex' AND ts >= ?`).get(since) ?? {};
       const byDay = db_safe(store).prepare(`
         SELECT date(ts/1000, 'unixepoch', 'localtime') day,
@@ -526,12 +528,41 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
         totalCny += cny;
         models.push({ ...r, cost_cny: Math.round(cny * 100) / 100, priced: true });
       }
+      // #58 评审整改（#46 AC2）：完整周额度外推——按当前窗口已用百分比线性放大
+      // 已用金额到 100%；条件不足（无百分比/刚重置/无已配价用量）时给 unknown
+      // reason，绝不伪装数值。
+      const quotaSnap = store.getQuota('codex');
+      const pctWindow = (quotaSnap?.data?.windows || [])
+        .find((w) => typeof w.used_percent === 'number' && w.used_percent > 0) ?? null;
+      let extrapolation;
+      if (!pctWindow) {
+        extrapolation = {
+          state: 'unknown',
+          unknown_reason: (quotaSnap?.data?.windows || []).some((w) => w.used_percent === 0)
+            ? 'window_just_reset' : 'no_window_usage_percent',
+          full_window_cny: null,
+          basis: 'used_percent_linear',
+        };
+      } else if (totalCny <= 0) {
+        extrapolation = {
+          state: 'unknown', unknown_reason: 'no_priced_usage',
+          full_window_cny: null, basis: 'used_percent_linear',
+        };
+      } else {
+        const full = totalCny * (100 / pctWindow.used_percent);
+        extrapolation = {
+          state: 'ok', unknown_reason: null,
+          full_window_cny: Math.round(full * 100) / 100,
+          basis: 'used_percent_linear',
+        };
+      }
       return json(res, 200, {
         window,
         // 语义声明：API 等值估算，不是订阅真实账单（#48 页面必须展示此说明）
         disclaimer: 'API-equivalent estimate, not the real subscription bill',
         models, unpriced_models: unpriced,
         total_cny: Math.round(totalCny * 100) / 100,
+        extrapolation,
         fx: { usd_to_cny: pricing?.usd_to_cny ?? null, source: pricing?._fx_source ?? null, ts: pricing?._fx_ts ?? null },
       });
     }

@@ -108,6 +108,9 @@ function renderCost(cost) {
       </div>
       ${rows ? `<table class="rates-table"><thead><tr><th>模型</th><th>Tokens</th><th>金额</th></tr></thead><tbody>${rows}</tbody></table>` : ''}
       ${(cost.unpriced_models || []).length ? `<div class="recon dim">⚠ ${cost.unpriced_models.length} 个未配价模型未计入金额</div>` : ''}
+      ${cost.extrapolation?.state === 'ok'
+        ? `<div class="recon dim">完整周额度外推估算：${formatMoney(cost.extrapolation.full_window_cny)}（按已用比例线性放大）</div>`
+        : `<div class="recon dim">完整周额度外推不可用（${esc(cost.extrapolation?.unknown_reason || 'unknown')}）</div>`}
       <div class="recon dim" style="margin-top:4px">⚠ API 等值估算，不是订阅真实账单。</div>
     </div>`;
 }
@@ -123,7 +126,8 @@ function renderBreakdown(throughput) {
     <tr><td>Input</td><td>${fmt(t.input)}</td><td>Cached input</td><td>${fmt(t.cached_input)}</td></tr>
     <tr><td>Cache write</td><td>${fmt(t.cache_write)}</td><td>Output</td><td>${fmt(t.output)}</td></tr>
     <tr><td>Reasoning</td><td>${fmt(t.reasoning)}</td><td>Total</td><td>${fmt(t.total)}</td></tr>
-    <tr><td>平均/请求</td><td>${avg != null ? fmt(avg) : '—'}</td><td>口径</td><td>total = input + output（cached/reasoning 不重复计）</td></tr>
+    <tr><td>平均/请求</td><td>${avg != null ? fmt(avg) : '—'}</td><td>单请求峰值</td><td>${typeof t.peak === 'number' ? fmt(t.peak) : '—'}</td></tr>
+    <tr><td colspan="4" class="dim">口径：total = input + output（cached/reasoning 不重复计入 total）</td></tr>
   </tbody></table>`;
 }
 
