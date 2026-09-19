@@ -17,3 +17,6 @@
 .catalog-filters { display:flex; flex-wrap:wrap; gap:20px; margin:16px 0; }
 .catalog-filters label { display:flex; flex-direction:column; gap:8px; font-size:11px; }
 .catalog-rate { display:flex; flex-direction:column; gap:5px; padding:9px 0; font-size:10px; overflow-wrap:anywhere; }
+
+/* Keep service/settings reachable while agent navigation scrolls on short windows. */
+.sidebar{overflow:hidden;height:100dvh}.sidebar>.brand{flex-shrink:0}.sidebar-nav{min-height:0;flex:1;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain}.sidebar-bottom{margin-top:0;flex-shrink:0;padding-top:12px}.sidebar-nav .sidebar-label:first-child{margin-top:0}
