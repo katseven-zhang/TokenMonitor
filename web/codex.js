@@ -240,15 +240,29 @@ async function loadReport() {
       fetch(`/api/codex/events?${qs}&limit=200`).then((r) => r.json()),
       fetch(`/api/codex/report${reportState.day ? `?day=${reportState.day}` : ''}`).then((r) => r.json()),
     ]);
-    // 日报摘要（known/unknown coverage；total 口径注明）
+    // #58 评审整改（#49）：日报渲染按日 token/breakdown 汇总数值 + 未配价提示（此前仅一行文字摘要）
     const cov = rep.reasoning_coverage || {};
+    const byModel = rep.by_model || [];
+    const sum = (k) => byModel.reduce((s, m) => s + (Number.isFinite(m[k]) ? m[k] : 0), 0);
+    const dayTotals = byModel.length
+      ? `<table class="rates-table"><tbody>
+          <tr><td>Tokens</td><td>${fmt(sum('total'))}</td><td>Requests</td><td>${sum('requests')}</td></tr>
+          <tr><td>Input</td><td>${fmt(sum('input'))}</td><td>Cached</td><td>${fmt(sum('cached_input'))}</td></tr>
+          <tr><td>Cache write</td><td>${fmt(sum('cache_write'))}</td><td>Output</td><td>${fmt(sum('output'))}</td></tr>
+          <tr><td>Reasoning</td><td>${fmt(sum('reasoning'))}</td><td>reasoning coverage</td><td>known ${cov.known ?? 0} / unknown ${cov.unknown ?? 0}</td></tr>
+        </tbody></table>`
+      : '<div class="dim">当日无 Codex 用量（趋势空态）</div>';
+    const unpricedHint = (rep.unpriced_models || []).length
+      ? `<div class="recon dim">⚠ ${rep.unpriced_models.length} 个模型未配价（${esc(rep.unpriced_models.slice(0, 5).join('、'))}${rep.unpriced_models.length > 5 ? ' 等' : ''}），不计入金额</div>`
+      : '';
     if (summaryEl) {
-      summaryEl.textContent = `日报 ${rep.day}：${rep.by_model?.length ?? 0} 个模型 · requests ${cov.known + cov.unknown} · reasoning coverage known ${cov.known} / unknown ${cov.unknown} · total = input + output（cached/reasoning 不重复计入）`;
+      summaryEl.innerHTML = `日报 ${esc(rep.day)}：${byModel.length} 个模型 · total = input + output（cached/reasoning 不重复计入）${dayTotals}${unpricedHint}`;
     }
     const rows = (ev.events || []).map((e) => {
       const d = (v) => (typeof v === 'number' && Number.isFinite(v) ? fmt(v) : '—');
       return `<tr>
         <td>${esc(new Date(e.ts).toLocaleString('zh-CN'))}</td>
+        <td>${esc(e.tool ?? 'codex')}</td>
         <td>${esc(e.model ?? '—')}</td>
         <td>${esc(e.session_id ?? '—')}</td>
         <td>${esc(e.project ?? '—')}</td>
@@ -256,7 +270,7 @@ async function loadReport() {
         <td>${d(e.output)}</td><td>${d(e.reasoning)}</td><td>${d(e.total)}</td>
       </tr>`;
     }).join('');
-    tbody.innerHTML = rows || '<tr><td colspan="10" class="dim">无匹配记录（筛选过宽或当日无用量）</td></tr>';
+    tbody.innerHTML = rows || '<tr><td colspan="11" class="dim">无匹配记录（筛选过宽或当日无用量）</td></tr>';
     // CSV 导出跟随当前筛选
     const csv = document.getElementById('rep-csv');
     if (csv) csv.href = `/api/codex/export.csv?${qs}`;
@@ -280,10 +294,10 @@ function initReport() {
     <div id="rep-summary" class="recon dim" style="margin-top:4px"></div>
     <div style="overflow-x:auto">
       <table class="rates-table"><thead><tr>
-        <th>时间</th><th>模型</th><th>会话</th><th>项目</th>
+        <th>时间</th><th>工具</th><th>模型</th><th>会话</th><th>项目</th>
         <th>input</th><th>cached</th><th>cache write</th><th>output</th><th>reasoning</th><th>total</th>
       </tr></thead>
-      <tbody id="rep-tbody"><tr><td colspan="10" class="dim">加载中…</td></tr></tbody></table>
+      <tbody id="rep-tbody"><tr><td colspan="11" class="dim">加载中…</td></tr></tbody></table>
     </div>
     <div class="recon dim" style="margin-top:2px">total = input + output；cached / reasoning 为并列口径，不重复计入 total；缺失值显示 —（不是 0）。</div>`;
   document.getElementById('rep-load')?.addEventListener('click', () => {

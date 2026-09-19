@@ -578,7 +578,7 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
       if (model) { conds.push('model = ?'); args.push(model); }
       if (session) { conds.push('session_id = ?'); args.push(session); }
       const rows = db_safe(store).prepare(`
-        SELECT ts, model, session_id, project, input_tokens input, cached_input,
+        SELECT ts, tool, model, session_id, project, input_tokens input, cached_input,
                cache_write, output_tokens output, reasoning_tokens reasoning,
                total_tokens total
         FROM events WHERE ${conds.join(' AND ')} ORDER BY ts DESC LIMIT ?`).all(...args, limit);
@@ -601,17 +601,22 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
                SUM(CASE WHEN reasoning_tokens IS NULL OR reasoning_tokens = 0 THEN 1 ELSE 0 END) unknown_reasoning
         FROM events WHERE tool = 'codex'
           AND date(ts/1000, 'unixepoch', 'localtime') = ?`).get(day) ?? {};
-      const unpriced = db_safe(store).prepare(`
+      const modelsSeen = db_safe(store).prepare(`
         SELECT DISTINCT model FROM events
         WHERE tool = 'codex' AND date(ts/1000, 'unixepoch', 'localtime') = ?`).all(day)
         .map((r) => r.model).filter(Boolean);
+      // #49：真·未配价模型（与 /api/unpriced 同一 priceOf/isPriced 判定），供日报提示
+      const pricing = await loadPricing();
+      const table = pricing?.models && typeof pricing.models === 'object' ? pricing.models : pricing;
+      const unpricedModels = modelsSeen.filter((m) => m !== '(unknown)' && !isPriced(m, table, 1));
       return json(res, 200, {
         day,
         by_model: agg,
         reasoning_coverage: {
           known: cov.known ?? 0, unknown: cov.unknown_reasoning ?? 0,
         },
-        models_seen: unpriced,
+        models_seen: modelsSeen,
+        unpriced_models: unpricedModels,
       });
     }
     if (p === '/api/codex/export.csv') {

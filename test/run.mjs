@@ -1727,6 +1727,13 @@ console.log('\n[19] /api/codex/* 契约（#46：窗口/吞吐/pace/cost/明细/�
     ok('#55 表内模型 cost_cny 为正数（不再 0 金额假 priced）',
       !!dsRow && dsRow.priced === true && dsRow.cost_cny > 0,
       JSON.stringify(dsRow));
+    const evAll = await get('/api/codex/events?limit=10');
+    ok('#49 events 返回 tool 字段（前端明细表工具列数据源）',
+      (evAll.body.events || []).length > 0 && evAll.body.events.every((e) => e.tool === 'codex'),
+      JSON.stringify((evAll.body.events || [])[0]));
+    const repAll = await get('/api/codex/report');
+    ok('#49 report 返回 unpriced_models 数组（真未配价判定，日报提示数据源）',
+      Array.isArray(repAll.body.unpriced_models) && Array.isArray(repAll.body.models_seen));
     const ev = await get(`/api/codex/events?model=${encodeURIComponent('glm-5.3-flash')}`);
     ok('#46 events：按 model 筛选（中文 session/project 原样返回）',
       ev.status === 200 && ev.body.count === 1 && ev.body.events[0].session_id === 'sess-中文 1'
