@@ -1,9 +1,10 @@
-import { useCallback,useEffect,useRef,useState } from 'react';
+import { useCallback,useEffect,useState } from 'react';
 import { Activity,ArrowDownToLine,BarChart3,ChevronRight,Clock3,Coins,Cpu,Database,Folder,HardDrive,Layers,Loader2,Moon,Play,RefreshCw,Search,Settings2,ShieldCheck,Square,Sun,Terminal,X } from 'lucide-react';
 import { Bar,CartesianGrid,ComposedChart,Line,ResponsiveContainer,Tooltip,XAxis,YAxis } from 'recharts';
 import { save } from '@tauri-apps/plugin-dialog';
 import { request,type Bootstrap,type Dashboard,type EventPage,type Query,type Settings,type Status,type Summary,type SessionDetailRow } from './lib/api';
 import { localInput,preset,initialQuery,dateRange } from './lib/range';
+import { latestLoader } from './lib/latest-loader';
 import { sameQuery } from './lib/query-identity';
 import { SummaryTable,type SummaryKind } from './components/summary-table';
 import { PriceCatalog } from './components/price-catalog';
@@ -27,15 +28,16 @@ export default function App(){
  const [pageResponse,setPage]=useState<{query:Query;offset:number;result:EventPage}|null>(null),[offset,setOffset]=useState(0),[priceText,setPriceText]=useState(''),[settings,setSettings]=useState<Settings|null>(null),[logs,setLogs]=useState('');
  const page=pageResponse&&sameQuery(pageResponse.query,q)&&pageResponse.offset===offset?pageResponse.result:null;
  const [priceError,setPriceError]=useState('');
- const [startText,setStartText]=useState(localInput(q.start)),[endText,setEndText]=useState(localInput(q.end));const sequence=useRef(0);
+ const [startText,setStartText]=useState(localInput(q.start)),[endText,setEndText]=useState(localInput(q.end));
  useEffect(()=>{const m=matchMedia('(prefers-color-scheme: dark)');const apply=()=>{document.documentElement.classList.toggle('dark',theme==='dark'||(theme==='system'&&m.matches));document.documentElement.style.colorScheme=theme==='system'?(m.matches?'dark':'light'):theme;};apply();m.addEventListener('change',apply);localStorage.setItem('tm-theme',theme);return()=>m.removeEventListener('change',apply);},[theme]);
- const refresh=useCallback(async()=>{const id=++sequence.current;try{const result=await request<Dashboard>('dashboard',{query:q});if(id===sequence.current)setData(result);}catch(e){if(id===sequence.current)setError(String(e));}},[q]);
+ const [loader]=useState(()=>latestLoader<Query,Dashboard>(sameQuery,query=>request<Dashboard>('dashboard',{query}),setData,e=>setError(String(e))));
+ const refresh=useCallback((force=false)=>loader.run(q,force),[q,loader]);
  useEffect(()=>{request<Bootstrap>('bootstrap').then(b=>{setBoot(b);setPriceText(b.prices);setSettings(b.settings);}).catch(e=>setError(String(e)));},[]);
  useEffect(()=>{setStartText(localInput(q.start));setEndText(localInput(q.end));setOffset(0);void refresh();},[q,refresh]);
  useEffect(()=>{const poll=()=>{void request<Status>('status').then(setStatus).catch(e=>setError(String(e)));};poll();const timer=setInterval(poll,2000);return()=>clearInterval(timer);},[]);
  useEffect(()=>{const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
  useEffect(()=>{let cancelled=false;if(tab==='requests')request<EventPage>('events',{query:q,offset,limit:100}).then(result=>{if(!cancelled)setPage({query:q,offset,result});}).catch(e=>{if(!cancelled)setError(String(e));});if(tab==='service')request<{text:string}>('logs').then(r=>{if(!cancelled)setLogs(r.text);}).catch(e=>{if(!cancelled)setError(String(e));});return()=>{cancelled=true;};},[tab,q,offset,data]);
- async function action(method:string,args:unknown={},onError?:(message:string)=>void){setBusy(true);setError('');try{await request(method,args);await refresh();setStatus(await request<Status>('status'));return true;}catch(e){setError(String(e));onError?.(String(e));return false;}finally{setBusy(false);}}
+ async function action(method:string,args:unknown={},onError?:(message:string)=>void){setBusy(true);setError('');try{await request(method,args);await refresh(true);setStatus(await request<Status>('status'));return true;}catch(e){setError(String(e));onError?.(String(e));return false;}finally{setBusy(false);}}
  function chooseAgent(agent:string|null){setQ({...q,agent,model:null,project:null,session:null,search:''});setTab('overview');}
  function quick(minutes:number){setQ({...q,...preset(minutes)});}
  function applyRange(){const start=new Date(startText).getTime(),end=new Date(endText).getTime();if(!Number.isFinite(start)||!Number.isFinite(end)||start>=end){setError('请选择有效时间范围，开始时间必须早于结束时间。');return;}setError('');setQ({...q,start,end,offsetMinutes:-new Date(start).getTimezoneOffset()});}
