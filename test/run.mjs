@@ -1434,6 +1434,12 @@ console.log('\n[16] codex-pace 消耗节奏与耗尽风险（#47：burn/EWMA/saf
     const bad = pace.computePace([s(0, W1, NaN, 10_000), s(H, W1, -5, 10_000)], H);
     ok('#47 NaN/负值全无效 → invalid_values 且无假 ETA',
       bad.state === 'unknown' && bad.unknown_reason === 'invalid_values' && bad.eta_to_exhaust_ms === null);
+    // #58 评审退回项（AC2「重复样本」pace 级专项断言）：同 ts 双样本的时间差为 0，
+    // 差分段被丢弃 → burn rate 不受污染、计数按有效段计
+    const dup = pace.computePace([s(0, W1, 0, 100_000), s(H, W1, 1_000, 100_000), s(H, W1, 1_000, 100_000)], H);
+    ok('#47 重复样本（同 ts 双样本）不改变 burn rate（dt=0 段丢弃）',
+      dup.state === 'ok' && dup.burn_rate_per_hour === 1000 && dup.samples_used === 2,
+      JSON.stringify({ burn: dup.burn_rate_per_hour, used: dup.samples_used }));
   }
 
   // --- 陈旧样本 / 容量缺失 / 空输入（AC3） ---
