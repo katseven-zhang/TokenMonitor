@@ -31,6 +31,7 @@ pub fn open(root: &Path) -> Result<Connection, String> {
       CREATE TABLE IF NOT EXISTS quota(path TEXT NOT NULL,agent TEXT NOT NULL,session TEXT NOT NULL,ts INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(path,agent,session,ts));
       CREATE TABLE IF NOT EXISTS scan_status(agent TEXT PRIMARY KEY,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cache_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS source_health(path TEXT NOT NULL,agent TEXT NOT NULL,malformed_lines INTEGER NOT NULL,PRIMARY KEY(path,agent));
       CREATE VIEW IF NOT EXISTS events AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_events) WHERE rank=1;
       CREATE VIEW IF NOT EXISTS activities AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_activities) WHERE rank=1;").map_err(|e|e.to_string())?;
     let view_revision: Option<String> = db.query_row(
@@ -50,7 +51,7 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     }
     // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
     // while preserving cached data until each replacement transaction is ready.
-    const COLLECTOR_REVISION: &str = "3";
+    const COLLECTOR_REVISION: &str = "4";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",
@@ -72,6 +73,9 @@ pub fn open(root: &Path) -> Result<Connection, String> {
 }
 pub fn unchanged(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64) -> bool {
     db.query_row("SELECT 1 FROM source_files WHERE path=?1 AND agent=?2 AND size=?3 AND mtime=?4 AND error IS NULL",params![path,agent,size,mtime],|_|Ok(())).is_ok()
+}
+pub fn malformed_lines(db: &Connection, path: &str, agent: &str) -> Result<usize, String> {
+    db.query_row("SELECT malformed_lines FROM source_health WHERE path=?1 AND agent=?2",params![path,agent],|row|row.get(0)).map_err(|e|e.to_string())
 }
 pub fn replace_file(
     db: &mut Connection,
@@ -146,6 +150,7 @@ pub fn replace_file(
         ],
     )
     .map_err(|e| e.to_string())?;
+    tx.execute("INSERT OR REPLACE INTO source_health VALUES(?1,?2,?3)",params![path,agent,parsed.malformed_lines]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 pub fn events(db: &Connection, q: &Query) -> Result<Vec<Event>, String> {

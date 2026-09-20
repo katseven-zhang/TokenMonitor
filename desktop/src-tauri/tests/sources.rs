@@ -205,7 +205,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
                 project: None,
                 session: None,
                 search: String::new(),
-                offset_minutes: 480,
+                time_zone: None, offset_minutes: 480,
             };
             let events = db::events(&cache, &query).unwrap();
             assert_eq!(events.len(), 1, "{agent}");
@@ -226,7 +226,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
             project: None,
             session: None,
             search: String::new(),
-            offset_minutes: 480,
+            time_zone: None, offset_minutes: 480,
         };
         let dashboard = service::query_local(&f.0, "dashboard", &json!({"query":query})).unwrap();
         assert_eq!(dashboard["totals"]["totalTokens"], total, "{agent}");
@@ -322,7 +322,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         project: None,
         session: None,
         search: String::new(),
-        offset_minutes: 0,
+        time_zone: None, offset_minutes: 0,
     };
     let rows = db::events(&cache, &q).unwrap();
     assert_eq!(rows.len(), 1);

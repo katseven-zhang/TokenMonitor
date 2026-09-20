@@ -73,7 +73,7 @@ fn replay(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
         model: None,
         project: None,
         search: String::new(),
-        offset_minutes: 0,
+        time_zone: None, offset_minutes: 0,
     };
     let totals = query::summarize(&db::events(db, &lifetime)?, &prices);
     detail["summary"]["costUSD"] = json!(totals.cost_usd);

@@ -1022,7 +1022,7 @@ console.log('\n[9] LaunchAgent 生成');
     cliSrc.indexOf("cmd === 'install-agent'") < cliSrc.indexOf('new Store(DB_PATH)'));
   // README 曾指向 npm run install-agent，而全局安装的用户根本调不到 npm scripts
   ok('README 用 CLI 子命令而非 npm script 指引常驻',
-    /tokenmonitor install-agent/.test(read(join(ROOT, 'README.md'))));
+    /tokenmonitor install-agent/.test(read(join(ROOT, 'docs/LEGACY-CLI.md'))));
 }
 
 /* ---------- 第 10 层：菜单栏胶囊的分发 ----------
@@ -1075,7 +1075,7 @@ console.log('\n[10] 菜单栏胶囊的分发');
   // 写死端口会让 serve --port 的用户拿到一个连不上的胶囊
   ok('菜单栏源码不再写死端口', !/127\.0\.0\.1:8787/.test(read(join(ROOT, 'menubar/main.swift'))));
   ok('README 用 CLI 子命令指引菜单栏',
-    /tokenmonitor bar/.test(read(join(ROOT, 'README.md'))));
+    /tokenmonitor bar/.test(read(join(ROOT, 'docs/LEGACY-CLI.md'))));
 }
 
 /* ---------- [11] Scanner 健壮性（#43） ---------- */

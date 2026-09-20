@@ -21,9 +21,11 @@ Windows 桌面版，本地读取 Agent 日志并统计用量。完整界面位�
 
 ## 构建
 
-在 `desktop/` 安装构建依赖后，从仓库根目录执行：
+首次从仓库根目录准备锁定的构建依赖（需要联网），然后离线打包：
 
 ```powershell
+npm ci --prefix desktop
+cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 pwsh -File desktop/scripts/build-windows.ps1
 ```
 
@@ -36,4 +38,4 @@ cd src-tauri
 cargo test --offline --no-default-features
 ```
 
-参考项目移植代码的许可见 `LICENSE.codex-usage-desktop`，分发依赖许可汇总见发布包中的 `THIRD-PARTY-NOTICES.txt`。
+本项目 MIT 许可见发布包中的 `LICENSE`；参考项目移植代码的许可见 `LICENSE.codex-usage-desktop`，分发依赖许可汇总见 `THIRD-PARTY-NOTICES.txt`。再分发时请保留这些许可文件。

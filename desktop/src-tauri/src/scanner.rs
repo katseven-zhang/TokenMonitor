@@ -69,6 +69,7 @@ fn collect_file(
     // SQLite may change only in WAL; never skip it using the main file fingerprint.
     let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
     if !sqlite && db::unchanged(db, &path_text, agent, size, mtime) {
+        s.malformed_lines += db::malformed_lines(db, &path_text, agent)?;
         s.reused += 1;
         return Ok(());
     }
@@ -206,6 +207,8 @@ pub fn scan_cancellable(
             "stopped"
         } else if !s.errors.is_empty() {
             "error"
+        } else if s.malformed_lines > 0 {
+            "warning"
         } else if s.files == 0 {
             "missing"
         } else {

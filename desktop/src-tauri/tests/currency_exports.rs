@@ -9,7 +9,7 @@ fn mixed_native_prices_export_in_selected_currency_without_changing_tokens() {
     let mut cache=db::open(&root).unwrap();
     let events=["domestic","foreign"].into_iter().map(|model|Event{id:model.into(),model:model.into(),agent:"codex".into(),session:"s".into(),project:"p".into(),path:"fixture".into(),line:1,ts:60_000,tokens:Tokens{input:1_000_000,output:1_000_000,..Default::default()}}).collect();
     db::replace_file(&mut cache,"fixture","codex",1,1,&Parsed{events,..Default::default()}).unwrap();
-    let q=Query{start:60_000,end:120_000,agent:Some("codex".into()),model:None,project:None,session:None,search:String::new(),offset_minutes:0};
+    let q=Query{start:60_000,end:120_000,agent:Some("codex".into()),model:None,project:None,session:None,search:String::new(),time_zone: None, offset_minutes: 0};
     for (currency,expected) in [("CNY","28.00000000"),("USD","4.00000000")] {
         let prices=json!({"version":1,"currency":"USD","displayCurrency":currency,"usdCny":7,"models":{"domestic":[{"currency":"cny","input":7,"cached":0,"cacheWrite":0,"output":21}],"foreign":[{"input":1,"cached":0,"cacheWrite":0,"output":3}]}});
         fs::write(root.join("prices.json"),prices.to_string()).unwrap();

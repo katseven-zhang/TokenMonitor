@@ -35,6 +35,7 @@ rust_xlsxwriter = "0.94.1"
 tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-autostart = { version = "2", optional = true }
+chrono-tz = "0.10"
 
 [profile.release]
 strip = true

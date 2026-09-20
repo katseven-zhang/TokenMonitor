@@ -1,0 +1,49 @@
+name: desktop
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Deliberately empty project dependency cache: exercise the documented first build.
+      CARGO_HOME: ${{ github.workspace }}/.ci-cargo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install repository Rust toolchain
+        run: rustup show active-toolchain
+      - name: Prepare locked frontend dependencies
+        run: npm ci --prefix desktop
+      - name: Prepare locked Rust dependencies
+        run: cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Desktop frontend tests
+        run: npm test --prefix desktop
+      - name: Desktop frontend build
+        run: npm run build --prefix desktop
+      - name: Desktop Rust tests
+        run: cargo test --offline --locked --tests --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Build and package embedded desktop
+        run: pwsh -File desktop/scripts/build-windows.ps1
+      - name: Verify package and licenses
+        run: pwsh -File desktop/scripts/verify-package.ps1
+      - name: Packaged service lifecycle smoke
+        run: node desktop/scripts/service-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenMonitor-desktop-windows-x64
+          path: dist/TokenMonitor-desktop-windows-x64.zip
+          if-no-files-found: error

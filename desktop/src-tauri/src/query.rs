@@ -7,6 +7,31 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use chrono::{Datelike, TimeZone};
+
+fn calendar_rows(rows: BTreeMap<String, Summary>, q: &Query, month: bool) -> Result<Vec<Value>,String> {
+    let zone=q.time_zone.as_deref().map(str::parse::<chrono_tz::Tz>).transpose().map_err(|e|e.to_string())?;
+    rows.into_values().map(|row| {
+        let date=chrono::NaiveDate::parse_from_str(&if month {format!("{}-01",row.key)} else {row.key.clone()},"%Y-%m-%d").map_err(|e|e.to_string())?;
+        let end=if month { if date.month()==12 {chrono::NaiveDate::from_ymd_opt(date.year()+1,1,1)} else {chrono::NaiveDate::from_ymd_opt(date.year(),date.month()+1,1)} } else {date.succ_opt()}.ok_or("Invalid calendar boundary")?;
+        let boundary=|date:chrono::NaiveDate|->Result<i64,String>{
+            let midnight=date.and_hms_opt(0,0,0).ok_or("Invalid midnight")?;
+            match zone {
+                None=>Ok(midnight.and_utc().timestamp_millis()-q.offset_minutes as i64*60_000),
+                Some(zone)=>{
+                    // Some zones advance at midnight or skip a date. Match the first
+                    // representable instant, and choose the earlier repeated midnight.
+                    for minute in 0..=1440 {
+                        if let Some(value)=zone.from_local_datetime(&(midnight+chrono::Duration::minutes(minute))).earliest(){return Ok(value.timestamp_millis());}
+                    }
+                    Err("Cannot resolve calendar boundary".into())
+                }
+            }
+        };
+        let mut value=serde_json::to_value(row).map_err(|e|e.to_string())?;
+        value["rangeStart"]=json!(boundary(date)?);value["rangeEnd"]=json!(boundary(end)?);Ok(value)
+    }).collect()
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,6 +104,7 @@ fn group(map: &mut BTreeMap<String, Summary>, key: &str, label: &str, e: &Event,
 }
 pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, String> {
     let events = db::events(db, q)?;
+    let zone=q.time_zone.as_deref().map(str::parse::<chrono_tz::Tz>).transpose().map_err(|e|e.to_string())?;
     let titles = db::titles(db)?;
     let mut totals = Summary { cost_usd: Some(0.0), ..Default::default() };
     let mut models = BTreeMap::new();
@@ -132,11 +158,13 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
             e,
             prices,
         );
-        let shifted =
-            chrono::DateTime::from_timestamp_millis(e.ts + q.offset_minutes as i64 * 60_000)
-                .ok_or("Invalid timestamp")?;
-        let day = shifted.format("%Y-%m-%d").to_string();
-        let month = shifted.format("%Y-%m").to_string();
+        let utc=chrono::DateTime::from_timestamp_millis(e.ts).ok_or("Invalid timestamp")?;
+        let local=match zone {
+            Some(zone)=>utc.with_timezone(&zone).naive_local(),
+            None=>(utc+chrono::Duration::minutes(q.offset_minutes as i64)).naive_utc(),
+        };
+        let day = local.format("%Y-%m-%d").to_string();
+        let month = local.format("%Y-%m").to_string();
         group(&mut days, &day, &day, e, prices);
         group(&mut months, &month, &month, e, prices);
         let bucket = (e.ts + q.offset_minutes as i64 * 60_000).div_euclid(width) * width
@@ -177,7 +205,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         .collect::<Result<Vec<_>, _>>()?;
     let quota_history = quota_history(db, q)?;
     Ok(
-        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":days.into_values().collect::<Vec<_>>(),"months":months.into_values().collect::<Vec<_>>(),"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activityCount":activities.len(),"quotas":quotas,"quotaHistory":quota_history,"status":status,"availableModels":all_models,"availableProjects":all_projects,"eventCount":events.len()}),
+        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":calendar_rows(days,q,false)?,"months":calendar_rows(months,q,true)?,"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activityCount":activities.len(),"quotas":quotas,"quotaHistory":quota_history,"status":status,"availableModels":all_models,"availableProjects":all_projects,"eventCount":events.len()}),
     )
 }
 pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) -> Result<Value, String> {
@@ -242,7 +270,7 @@ mod tests {
                 }
             }
         }
-        let mut q = Query { start:60_000,end:120_000,agent:Some("codex".into()),session:Some("one".into()),model:None,project:None,search:String::new(),offset_minutes:0 };
+        let mut q = Query { start:60_000,end:120_000,agent:Some("codex".into()),session:Some("one".into()),model:None,project:None,search:String::new(),time_zone: None, offset_minutes: 0 };
         let result = quota_history(&db,&q).unwrap();
         assert_eq!(result["total"],2);
         assert_eq!(result["items"][0]["ts"],119_999);
@@ -303,7 +331,7 @@ mod tests {
             project: None,
             session: None,
             search: String::new(),
-            offset_minutes: 480,
+            time_zone: None, offset_minutes: 480,
         };
         let result = dashboard(&db, &q, &p).unwrap();
         assert_eq!(result["totals"]["totalTokens"], 20);

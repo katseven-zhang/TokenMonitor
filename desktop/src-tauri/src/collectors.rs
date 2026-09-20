@@ -116,14 +116,16 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             .unwrap_or_default();
     }
     let mut previous: Option<Tokens> = None;
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in text.split_inclusive('\n').enumerate() {
         if line.trim().is_empty() {
             continue;
         }
         let rec: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => {
-                out.malformed_lines += 1;
+                // An invalid unterminated tail may still be written. Only complete
+                // records are known malformed; reparse the tail when the file changes.
+                if line.ends_with('\n') { out.malformed_lines += 1; }
                 continue;
             }
         };

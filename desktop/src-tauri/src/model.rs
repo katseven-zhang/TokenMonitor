@@ -81,15 +81,19 @@ pub struct Query {
     /// Minutes east of UTC. Client passes the selected display timezone offset.
     #[serde(default)]
     pub offset_minutes: i32,
+    /// IANA display timezone. Missing only for explicitly fixed-offset API callers.
+    #[serde(default)]
+    pub time_zone: Option<String>,
 }
 impl Query {
     pub fn validate(&self) -> Result<(), String> {
         if self.start < 0 || self.end <= self.start || self.end > 32_503_680_000_000 {
             return Err("无效时间范围：开始时间必须早于结束时间".into());
         }
-        if self.offset_minutes.abs() > 24 * 60 {
+        if !(-24 * 60..=24 * 60).contains(&self.offset_minutes) {
             return Err("无效时区".into());
         }
+        if let Some(zone)=&self.time_zone { zone.parse::<chrono_tz::Tz>().map_err(|_|format!("无效 IANA 时区: {zone}"))?; }
         Ok(())
     }
     pub fn matches(&self, e: &Event) -> bool {

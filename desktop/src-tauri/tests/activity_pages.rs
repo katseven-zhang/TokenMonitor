@@ -82,7 +82,7 @@ fn activity_pages_reach_older_rows_and_preserve_all_filters() {
         project: None,
         session: None,
         search: String::new(),
-        offset_minutes: 480,
+        time_zone: None, offset_minutes: 480,
     };
     let all = service::query_local(
         &root,

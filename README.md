@@ -97,10 +97,13 @@ dist/TokenMonitor-desktop-windows-x64.zip
 
 ```powershell
 cd desktop
-npm install
+npm ci
 cd ..
+cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 pwsh -File desktop/scripts/build-windows.ps1
 ```
+
+首次依赖准备需要联网：`npm ci` 安装锁定的前端依赖，`cargo fetch` 预取锁定的 Rust 依赖。之后打包脚本使用离线 Cargo 构建；构建依赖下载不改变应用运行时的纯本地行为。CI 在无项目 Cargo 缓存的 Windows runner 上执行相同流程。
 
 构建脚本会覆盖固定位置，不会不断创建新目录：
 
@@ -147,6 +150,7 @@ desktop/scripts/build-windows.ps1        固定目录覆盖式打包
 - [桌面验收记录](docs/DESKTOP-VERIFICATION.md)
 - [Codex 参考功能迁移矩阵](docs/CODEX-MIGRATION-MATRIX.md)
 - [Windows 使用说明](docs/WINDOWS.md)
+- [旧版 Node CLI 说明](docs/LEGACY-CLI.md)（不适用于新桌面版）
 
 ## 测试
 

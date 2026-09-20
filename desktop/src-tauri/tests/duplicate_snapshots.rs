@@ -8,7 +8,7 @@ fn newer_observation_wins_over_lexicographically_first_archive() {
     let snapshot=|path:&str,ts,output|Parsed{events:vec![Event{id:"same-request".into(),agent:"claude-code".into(),session:"s".into(),project:"p".into(),model:"m".into(),ts,tokens:Tokens{input:100,output,..Default::default()},path:path.into(),line:1}],..Default::default()};
     db::replace_file(&mut cache,"a-archive","claude-code",1,500,&snapshot("a-archive",60_000,10)).unwrap();
     db::replace_file(&mut cache,"z-live","claude-code",2,100,&snapshot("z-live",61_000,40)).unwrap();
-    let query=Query{start:0,end:120_000,agent:Some("claude-code".into()),session:None,model:None,project:None,search:String::new(),offset_minutes:0};
+    let query=Query{start:0,end:120_000,agent:Some("claude-code".into()),session:None,model:None,project:None,search:String::new(),time_zone: None, offset_minutes: 0};
     let rows=db::events(&cache,&query).unwrap();
     assert_eq!(rows.len(),1);
     assert_eq!(rows[0].tokens.output,40);
