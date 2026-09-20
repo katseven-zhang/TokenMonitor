@@ -1,7 +1,8 @@
 import type { Summary } from './api';
-export type SummarySort = 'label'|'totalTokens'|'input'|'cached'|'cacheWrite'|'output'|'reasoning'|'events'|'costUsd'|'lastTs';
+import { cacheHitRate,effectivePrice } from './summary-analytics';
+export type SummarySort = 'label'|'totalTokens'|'input'|'cached'|'cacheWrite'|'output'|'reasoning'|'events'|'costUsd'|'lastTs'|'cacheHitRate'|'effectivePrice';
 export function sortSummaries(rows:Summary[],column:SummarySort,descending:boolean) {
-  const value=(row:Summary):string|number|null => column==='input'||column==='cached'||column==='cacheWrite'||column==='output'||column==='reasoning' ? row.tokens[column] : row[column];
+  const value=(row:Summary):string|number|null => column==='cacheHitRate'?cacheHitRate(row):column==='effectivePrice'?effectivePrice(row):column==='input'||column==='cached'||column==='cacheWrite'||column==='output'||column==='reasoning' ? row.tokens[column] : row[column];
   return [...rows].sort((a,b)=>{
     const left=value(a),right=value(b);
     // Unknown prices are not zero and stay after known prices in either direction.

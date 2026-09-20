@@ -54,6 +54,9 @@ No final completion claim until every remaining acceptance cell has concrete evi
 
 ## Native service controls and patch-count follow-up
 
+- Model/project comparison tables now add whole-query usage/cost shares, token composition bars, cache-hit rate, historical effective USD per million tokens and last activity. Ratios include cache-write input, exclude duplicate reasoning, and do not manufacture shares/rates from unknown or zero denominators. Derived numeric fields support sorting with unknowns last. Twenty-four frontend tests and production build pass; these fields still await native packaging/visual verification.
+- The sidebar fix was verified in the native `4facd0a` package at 951×651: agent navigation exposes its own scrollbar, service/settings remain visible at the bottom, and clicking settings opens the full configuration form. This closes the observed short-window navigation defect; OS DPI acceptance remains separate.
+
 - Reference trend comparison identified missing local cost line, series toggles and expanded viewing. Commit `4facd0a` adds these, with a tooltip showing total/composition/reasoning/events and explicit unknown pricing plus known-price subtotal. Native package EXE is 7,079,936 bytes, ZIP 4,310,965 bytes. Native populated seven-day view, expanded chart, cache-series toggle (green bars disappear and token axis rescales) and Escape dismissal were exercised. Unknown-cost intervals remain gaps. Twenty-one existing frontend tests and production build pass; chart interaction evidence is native GUI observation.
 
 - Native Excel and Markdown Save As flows also completed into `.dev-data/native-session-export.xlsx` / `.md`. Independent ZIP/XML and Markdown parsing matched every CSV cell (numeric comparison for Excel numbers): all three formats contain 14 rows, 575,570 tokens and $2.05136400. Excel freezes its header row. These are real GUI exports for the selected Codex session, not direct backend-only calls.
