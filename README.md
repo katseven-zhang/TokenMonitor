@@ -1,23 +1,8 @@
 # TokenMonitor
 
-TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用。它读取本机 AI 编码工具留下的会话记录，将不同格式统一为可查询的 Token 事件，再提供模型、项目、会话、日期、工具调用、费用和额度观测等视图。
-
-当前 `main` 以 `desktop/` 下的 Windows 桌面应用为正式实现。发行包不需要 Node.js，不上传会话内容，不在线获取模型价格，也不访问 Agent 账号。
+TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用。它纯本地读取本机 AI 编码工具留下的记录数据，将不同格式统一为可查询的 Token 事件，再提供模型、项目、会话、日期、工具调用、费用和额度观测等视图。
 
 > TokenMonitor 是非官方工具。它读取的是各工具保存在本机的私有格式；上游格式变化可能影响采集结果。模型费用是按本地价格表计算的估算值，不代表厂商账单。
-
-## 当前版本
-
-TokenMonitor 当前 Windows 版本采用完整的桌面架构：
-
-- Tauri 2 + Rust 本地后端，React + TypeScript 桌面界面；
-- 原生读取 JSONL、SQLite/WAL 与压缩会话文件；
-- 统一的多 Agent 事件模型、查询和导出链路；
-- 完整的后台启动、停止、重启、托盘驻留与当前用户登录自启；
-- 固定目录覆盖式构建，发行包中不携带 Node、数据库、日志或用户凭据；
-- 纯本地价格目录、历史价格和 USD/CNY 换算，不依赖在线价格服务。
-
-当前 Windows 产品、测试和打包均以 `desktop/` 为准。
 
 ## 主要能力
 
@@ -96,8 +81,7 @@ dist/TokenMonitor-desktop-windows-x64.zip
 运行要求：
 
 - Windows 10/11 x64；
-- Microsoft Edge WebView2 Runtime；
-- 不需要安装 Node.js、Rust 或数据库服务。
+- Microsoft Edge WebView2 Runtime。
 
 首次运行会扫描本地历史记录。日志较多时，首次建立缓存可能需要一定时间。默认配置、事件缓存、日志、价格和 WebView 数据位于：
 
@@ -124,8 +108,6 @@ pwsh -File desktop/scripts/build-windows.ps1
 dist/desktop-windows-x64
 dist/TokenMonitor-desktop-windows-x64.zip
 ```
-
-发行 ZIP 只包含白名单内的 EXE、说明、价格示例、许可证、第三方声明和完整性清单。
 
 ## 架构
 
@@ -184,16 +166,9 @@ cargo test --offline --locked --tests
 
 测试覆盖来源黄金数据、重复扫描、分钟边界、缓存 Token、历史价格、混合币种、项目身份、会话回放、活动分页、本地服务生命周期和导出结果。
 
-## 隐私与安全边界
+## 本地数据
 
-- 原始 Agent 日志以只读方式访问；
-- 统计、设置、价格和日志保存在本机；
-- 发行版不包含用户数据库、会话、日志、Token 或凭据；
-- 运行时不在线获取价格、汇率、公告或更新；
-- 不提供账号池、代理、OAuth、远程额度管理或额度兑换；
-- 本地日志没有提供的信息不会被伪造为实时账号数据。
-
-用户主动配置的本地目录可能包含敏感会话信息。请仅在可信电脑上运行，并在分享日志或导出文件前自行检查内容。
+TokenMonitor 仅读取用户配置的本机 Agent 记录。索引、统计、价格和设置均在本地处理并保存。
 
 ## 项目实现与开源致谢
 
@@ -219,8 +194,6 @@ TokenMonitor 的 Codex 会话体验参考并移植了 `codex-usage-desktop` v3.3
 
 - [参考项目代码许可](desktop/LICENSE.codex-usage-desktop)
 - 参考项目：<https://github.com/itvincent-git/codex-usage-desktop>
-
-参考项目的账号功能、在线更新器、远程价格或凭据逻辑没有被复用。
 
 ## License
 
