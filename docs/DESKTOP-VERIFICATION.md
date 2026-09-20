@@ -2,6 +2,10 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Navigation follow-up — `78e44ad`
+
+Native inspection exposed inherited document scroll when navigating from a long model table to settings. A layout effect now resets the document position on page or Agent changes, leaving periodic data refreshes alone. The production frontend build and 27 tests pass, including added local-calendar year rollover and leap-February boundaries. Native acceptance of this change is pending: the current Computer Use recovery returned `GetCursorPos failed: Access denied (0x80070005)`, so no further UI inputs were attempted. This is distinct from shell escalation, which succeeded for the rebuild.
+
 ## Latest acceptance snapshot — packaged `63e8b9c`
 
 This snapshot supersedes older pending entries in the chronological record below where explicitly covered.
