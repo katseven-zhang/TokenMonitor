@@ -5,6 +5,12 @@ on:
     branches: [main, 'codex/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      gate_probe:
+        description: 'Verify a failing gate (expected failed run; never publishes artifacts)'
+        type: choice
+        default: none
+        options: [none, frontend, rust, compile]
 
 permissions:
   contents: read
@@ -30,6 +36,15 @@ jobs:
         run: npm ci --prefix desktop
       - name: Prepare locked Rust dependencies
         run: cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Inject frontend failure for gate verification
+        if: github.event_name == 'workflow_dispatch' && inputs.gate_probe == 'frontend'
+        run: Set-Content desktop/src/gate-probe.test.ts "import { test, expect } from 'vitest'; test('intentional gate probe', () => expect(true).toBe(false));"
+      - name: Inject Rust failure for gate verification
+        if: github.event_name == 'workflow_dispatch' && inputs.gate_probe == 'rust'
+        run: Set-Content desktop/src-tauri/tests/gate_probe.rs '#[test] fn intentional_gate_probe() { panic!("intentional gate probe"); }'
+      - name: Inject compile failure for gate verification
+        if: github.event_name == 'workflow_dispatch' && inputs.gate_probe == 'compile'
+        run: Add-Content desktop/src-tauri/src/lib.rs 'compile_error!("intentional gate probe");'
       - name: Desktop frontend tests
         run: npm test --prefix desktop
       - name: Desktop frontend build
