@@ -1,14 +1,14 @@
-# TokenMonitor Desktop 2
+# TokenMonitor
 
 TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用。它读取本机 AI 编码工具留下的会话记录，将不同格式统一为可查询的 Token 事件，再提供模型、项目、会话、日期、工具调用、费用和额度观测等视图。
 
-当前 `main` 以 `desktop/` 下的 Desktop 2 实现为正式版本。Windows 发行包不需要 Node.js，不上传会话内容，不在线获取模型价格，也不访问 Agent 账号。
+当前 `main` 以 `desktop/` 下的 Windows 桌面应用为正式实现。发行包不需要 Node.js，不上传会话内容，不在线获取模型价格，也不访问 Agent 账号。
 
 > TokenMonitor 是非官方工具。它读取的是各工具保存在本机的私有格式；上游格式变化可能影响采集结果。模型费用是按本地价格表计算的估算值，不代表厂商账单。
 
-## 当前版本定位
+## 当前版本
 
-Desktop 2 不是旧网页面板的简单换皮，而是一条新的 Windows 桌面实现：
+TokenMonitor 当前 Windows 版本采用完整的桌面架构：
 
 - Tauri 2 + Rust 本地后端，React + TypeScript 桌面界面；
 - 原生读取 JSONL、SQLite/WAL 与压缩会话文件；
@@ -17,7 +17,7 @@ Desktop 2 不是旧网页面板的简单换皮，而是一条新的 Windows 桌�
 - 固定目录覆盖式构建，发行包中不携带 Node、数据库、日志或用户凭据；
 - 纯本地价格目录、历史价格和 USD/CNY 换算，不依赖在线价格服务。
 
-仓库根目录仍保留早期 Node/macOS 实现及其历史，但它不参与当前 Windows Desktop 2 发行包。当前 Windows 产品、测试和打包均以 `desktop/` 为准。
+当前 Windows 产品、测试和打包均以 `desktop/` 为准。
 
 ## 主要能力
 
@@ -195,7 +195,7 @@ cargo test --offline --locked --tests
 
 用户主动配置的本地目录可能包含敏感会话信息。请仅在可信电脑上运行，并在分享日志或导出文件前自行检查内容。
 
-## 开发范围与代码来源
+## 项目实现与开源致谢
 
 以下能力是在 TokenMonitor 项目中设计并实现的：
 
@@ -209,7 +209,7 @@ cargo test --offline --locked --tests
 - Windows 托盘、单实例、登录自启和固定目录打包；
 - 面向真实本地数据的验证脚本、单元测试和集成测试。
 
-Desktop 2 同时参考并移植了 `codex-usage-desktop` v3.3.0 的部分实现，主要包括：
+TokenMonitor 的 Codex 会话体验参考并移植了 `codex-usage-desktop` v3.3.0 的部分实现，主要包括：
 
 - Codex 会话回放解析器；
 - 回放相关 React 组件；
@@ -220,7 +220,7 @@ Desktop 2 同时参考并移植了 `codex-usage-desktop` v3.3.0 的部分实现�
 - [参考项目代码许可](desktop/LICENSE.codex-usage-desktop)
 - 参考项目：<https://github.com/itvincent-git/codex-usage-desktop>
 
-参考项目的账号功能、在线更新器、远程价格或凭据逻辑没有被复用。保留以上来源说明并不否定 TokenMonitor 的新架构和新增能力；它用于准确区分本项目开发内容与依法移植的部分。
+参考项目的账号功能、在线更新器、远程价格或凭据逻辑没有被复用。
 
 ## License
 
