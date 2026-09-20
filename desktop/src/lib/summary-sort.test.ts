@@ -1,7 +1,7 @@
 import { describe,it,expect } from 'vitest';
 import type { Summary } from './api';
 import { sortSummaries } from './summary-sort';
-const row=(key:string,totalTokens:number,costUsd:number|null):Summary=>({key,label:key,totalTokens,costUsd,knownCostUsd:costUsd??0,unpricedEvents:costUsd==null?1:0,events:1,firstTs:0,lastTs:totalTokens,agent:'codex',session:key,path:'',tokens:{input:totalTokens,cached:0,cacheWrite:0,output:0,reasoning:0}});
+const row=(key:string,totalTokens:number,costUsd:number|null):Summary=>({key,label:key,totalTokens,costUsd,knownCostUsd:costUsd??0,unpricedTokens:costUsd==null?totalTokens:0,unpricedEvents:costUsd==null?1:0,events:1,firstTs:0,lastTs:totalTokens,agent:'codex',session:key,path:'',tokens:{input:totalTokens,cached:0,cacheWrite:0,output:0,reasoning:0}});
 describe('summary sorting',()=>{
   it('sorts numeric values numerically without changing input',()=>{
     const rows=[row('a',2,1),row('b',10,2)];

@@ -62,6 +62,7 @@ for minutes in (300, 10080):
         known = sum((value for value in estimated if value is not None), Decimal(0))
         unknown = sum(value is None for value in estimated)
         assert totals['unpricedEvents'] == unknown
+        assert totals['unpricedTokens'] == sum(sum(row['tokens'][field] for field in ('input', 'cached', 'cacheWrite', 'output')) for row, value in zip(rows, estimated) if value is None)
         assert abs(Decimal(str(totals['knownCostUsd']))-known) <= max(Decimal('0.00000001'), abs(known)*Decimal('0.000000001'))
         assert (totals['costUsd'] is None) == bool(unknown)
         for grouping in ('models','projects','sessions','agents','days','months','series'):

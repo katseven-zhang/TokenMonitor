@@ -2,7 +2,7 @@ import { describe,it,expect } from 'vitest';
 import type { Summary } from './api';
 import { cacheHitRate,componentPrices,comparisonShares,comparisonTotals,effectivePrice } from './summary-analytics';
 import { sortSummaries } from './summary-sort';
-const row=(key:string,costUsd:number|null):Summary=>({key,label:key,agent:'codex',session:'',path:'',firstTs:0,lastTs:1,events:1,totalTokens:100,costUsd,knownCostUsd:costUsd??0,unpricedEvents:costUsd===null?1:0,tokens:{input:20,cached:50,cacheWrite:10,output:20,reasoning:5}});
+const row=(key:string,costUsd:number|null):Summary=>({key,label:key,agent:'codex',session:'',path:'',firstTs:0,lastTs:1,events:1,totalTokens:100,costUsd,knownCostUsd:costUsd??0,unpricedTokens:costUsd==null?100:0,unpricedEvents:costUsd===null?1:0,tokens:{input:20,cached:50,cacheWrite:10,output:20,reasoning:5}});
 describe('group comparison analytics',()=>{
   it('derives component rates from historical costs and preserves unknown/unused categories',()=>{
     const r={...row('historical',0.00021),knownCostByComponent:[0.00004,0.00005,0,0.00012] as [number,number,number,number]};

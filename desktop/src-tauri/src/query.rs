@@ -19,6 +19,7 @@ pub struct Summary {
     pub known_cost_by_component: [f64;4],
     pub cost_usd: Option<f64>,
     pub unpriced_events: usize,
+    pub unpriced_tokens: i64,
     pub events: usize,
     pub first_ts: i64,
     pub last_ts: i64,
@@ -42,7 +43,10 @@ impl Summary {
                 self.known_cost_usd += parts.iter().sum::<f64>();
                 for (sum,cost) in self.known_cost_by_component.iter_mut().zip(parts) { *sum+=cost; }
             },
-            None => self.unpriced_events += 1,
+            None => {
+                self.unpriced_events += 1;
+                self.unpriced_tokens += e.tokens.total();
+            },
         };
         self.cost_usd = if self.unpriced_events == 0 {
             Some(self.known_cost_usd)
@@ -304,6 +308,7 @@ mod tests {
         let result = dashboard(&db, &q, &p).unwrap();
         assert_eq!(result["totals"]["totalTokens"], 20);
         assert_eq!(result["totals"]["unpricedEvents"], 2);
+        assert_eq!(result["totals"]["unpricedTokens"], 20);
         assert!(result["totals"]["costUsd"].is_null());
         let mut sparse = q.clone();
         sparse.end = 300_000;
