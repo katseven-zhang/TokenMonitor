@@ -4,6 +4,8 @@ This is an implementation/acceptance record, not a release approval. Branch: `co
 
 ## Navigation follow-up — `78e44ad`
 
+After the user requested a fresh authorization, shell execution succeeded and the fixed output package rebuilt: EXE 7,083,520 bytes, ZIP 4,313,005 bytes. A fresh native window then became accessible. Native light-theme verification passed: scrolling well down a session table and selecting Settings returns to its heading and first controls. Daily drilldown from a seven-day query beginning September 13 at 08:30 retained 08:30 and ended September 14 at 00:00. August drilldown from a 30-day query beginning August 21 at 08:31 retained 08:31 and ended September 1 at 00:00. These verify intersection with the original minute range rather than silently broadening it to full calendar periods.
+
 Native inspection exposed inherited document scroll when navigating from a long model table to settings. A layout effect now resets the document position on page or Agent changes, leaving periodic data refreshes alone. The production frontend build and 27 tests pass, including added local-calendar year rollover and leap-February boundaries. Native acceptance of this change is pending: the current Computer Use recovery returned `GetCursorPos failed: Access denied (0x80070005)`, so no further UI inputs were attempted. This is distinct from shell escalation, which succeeded for the rebuild.
 
 ## Latest acceptance snapshot — packaged `63e8b9c`
