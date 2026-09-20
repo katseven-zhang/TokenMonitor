@@ -2,6 +2,17 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Latest acceptance snapshot — packaged `63e8b9c`
+
+This snapshot supersedes older pending entries in the chronological record below where explicitly covered.
+
+- 25 frontend tests, production TypeScript/Vite build, 37 native unit tests and three native integration tests pass. The latest package contains a 7,083,520-byte EXE and a 4,313,388-byte ZIP, without Node.
+- All/individual-Agent 5h and 7d cache/pricing comparisons pass (22 queries). Real Windows project normalization produces one group and identical drilldown totals; component costs sum to known total cost.
+- Native dark model-table expansion: unknown model categories show dashes; the known `gpt-5.6-luna` sample shows USD/million input 0.20, cached input 0.02, output 1.20 and unused cache-write as a dash. These are query-weighted historical prices, not current quotes.
+- Native light settings: invalid JSON structure and a valid rate-list structure containing a negative input price both show an inline error below the save button. Failed saves preserve the price file byte-for-byte. Restoring the original text and saving succeeds; the resulting file equals the original byte-for-byte.
+- Native service port changes, restart/stop, exports through Save As, model sorting, chart expansion/legend toggle and a 951×651 sidebar layout have been verified. Twenty bounded runtime TCP samples found no external connections.
+- Remaining acceptance includes tray hide/show/quit, actual login startup, OS DPI/text scaling, native day/month drilldown, historical price-catalog interaction and the remaining replay/hierarchy feature-matrix checks. No complete reference parity or final release approval is claimed.
+
 | Requirement | Current evidence | Remaining acceptance |
 | --- | --- | --- |
 | New branch, independent work, Room messages only | Branch exists; initial core commit `5765fa1`; Room plan 9309 and subsequent message updates | Continue stage commits and messages |

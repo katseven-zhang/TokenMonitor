@@ -22,16 +22,16 @@ Reference: local `codex-usage-desktop-main` 3.3.0, https://github.com/itvincent-
 Copied/adapted replay parser, replay React components, formatting helpers, types, locales, and styling configuration retain the license in `desktop/LICENSE.codex-usage-desktop` (Copyright 2026 vincent).
 No reference updater or account credentials are reused.
 
-## Verification gates (pending implementation)
+## Verification gates (implementation and acceptance)
 
-- [ ] Native event collectors for 10 sources; fixed source fixtures and dedup/restart verification.
-- [ ] Range boundary, cache token accounting, historical JSON pricing and unknown model checks.
+- [x] Native event collectors for 10 sources; fixed source fixtures and dedup/restart verification.
+- [x] Range boundary, cache token accounting, historical JSON pricing and unknown model checks.
 - [ ] Every agent independently filtered across every detail and export.
 - [ ] Codex full replay and hierarchy verified with fixtures and real GUI.
-- [ ] Service lifecycle, port collisions, single instance, stopped-service cached queries.
+- [x] Service lifecycle, port collisions, single instance, stopped-service cached queries.
 - [ ] GUI theme/layout/DPI inspection, exports, settings persistence.
-- [ ] No external requests: dependency/source audit plus running-process observation.
-- [ ] Release build, no-Node execution, size report, fixed overwrite packaging.
+- [x] No external requests: source audit plus bounded running-process TCP observation (not a permanent network guarantee).
+- [x] Release build, no-Node execution, size report, fixed overwrite packaging.
 
 Old worktree edits (.gitignore and two untracked review/plan documents) are pre-existing and not refactor work.
 
@@ -39,13 +39,15 @@ Old worktree edits (.gitignore and two untracked review/plan documents) are pre-
 
 - Branch created; complete planning message posted to Room as 9309, implementation updates via messages only.
 - User confirmed user-level service: GUI controls, configurable port, tray residence and login startup, without administrator privileges.
-- Frontend production build and 10 frontend tests pass. Native tests: 35 unit tests plus one integration test covering all 10 adapters pass.
+- Frontend production build and 25 frontend tests pass. Native tests: 37 unit tests plus three integration tests pass, including all 10 adapters, duplicate snapshots and Windows project identity.
 - The integration fixture verifies source-specific golden token totals, individual agent/minute filters, duplicate JSONL records, repeat scans, concatenated zstd frames and SQLite WAL updates.
-- Native service tests verify local authentication, single writer, real stop, cached reads after stop, and occupied-port preservation. GUI settings provide restart; live verification of all controls remains pending.
+- Native service tests verify local authentication, single writer, real stop, cached reads after stop, and occupied-port preservation. Actual GUI start/stop/restart and port changes passed; tray behavior and an actual login cycle remain pending.
 - Real local source scan found data for Codex, Claude Code, ZCode, WorkBuddy, Grok, OpenCode and Antigravity; ccmr/dsh/Pi were absent in configured roots. This is discovery evidence, not complete numeric parity validation.
-- A first release executable was 5,742,592 bytes; a later intermediate build was 5,806,592 bytes. No bundled Node. Final packaged size is still pending.
+- Latest packaged implementation is `63e8b9c`: EXE 7,083,520 bytes; ZIP 4,313,388 bytes; six distribution files, no bundled Node. Earlier smaller intermediate executables were not evidence of a complete rendered GUI.
 - Initial screenshot access timed out; subsequent native inspection succeeded and exposed a missing production custom-protocol feature. Corrected builds now visibly render populated light/dark views. GUI stop and cached reads work; user-level autostart registration was tested and restored to disabled. DPI and remaining controls still need acceptance; see DESKTOP-VERIFICATION.md.
 - Query summary, replay range summary and exports share the event cache. Full replay retains conversation context and is explicitly labelled separately. Unknown replay/hierarchy prices remain unknown, not zero.
-- Read-only GUI queries, source revision invalidation, partial UTF-8 tail handling, window single-instance signalling, blocked external navigation and local WebView data directory are implemented. Real runtime/network verification remains pending.
+- Read-only GUI queries, source revision invalidation, partial UTF-8 tail handling, window single-instance signalling, blocked external navigation and local WebView data directory are implemented. Twenty process-tree TCP samples over approximately 50 seconds found no external TCP connections; UDP and packet capture were not tested.
+- Real read-only checks for all Agents and each individual Agent across 5h/7d passed 22 independent Decimal-pricing/cache comparisons. Three absent sources (ccmr/dsh/Pi) have fixture evidence only.
+- Native model classification expansion shows unknown values as dashes and known historical weighted input/cache/output prices. Light settings and inline invalid-JSON/negative-rate errors passed; rejected edits left the saved price file unchanged, and the original editor contents were restored and saved.
 
 No final release or full reference-feature parity is claimed by these intermediate checks.
