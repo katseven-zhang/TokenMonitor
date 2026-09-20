@@ -14,6 +14,8 @@ On `e8e6661`, opened root session `01a06e3f-d90f-7113-8607-f093784ec659` in a 30
 
 The transition exposed a separate presentation bug: while loading the child, the header briefly fell back to the original parent's totals and identity. `0ba1ab9` requires the loaded replay path to match the active path, hides numerical/detail badges until that replay exists, and shows the loading label instead of the parent title. Model/project fallbacks no longer borrow fields from the original session. Twenty-seven frontend tests and the production frontend build pass; native transition reinspection on the new package remains pending.
 
+Native reinspection of packaged `0ba1ab9` passed both initial open and root-to-child navigation: the interim screen displays only the loading title/message without borrowed numeric badges, then shows the selected child's 21,932 Tokens / one record / USD 0.0154 and current-child highlight.
+
 ## Native historical price catalog — packaged `cadff72`
 
 Using only the isolated `.dev-data` configuration, added temporary model `tm-history-test` and alias `tm-alias-test` through the GUI JSON editor. Base input/cache-read/cache-write/output rates were 1 / 0.1 / 1.25 / 4; a second entry effective `2026-09-20T08:40:00+08:00` doubled all four rates. Alias search returned exactly the intended model. The native minute control at 08:39 showed the base rates; advancing to 08:40 showed 2 / 0.2 / 2.5 / 8 and the effective timestamp. Expanding history visibly displayed both entries and all four rate categories. Restored and saved the original JSON through the GUI, verified the disk file byte-for-byte against the pre-test content, and cleared the search filter. No temporary model or alias remains in the saved test configuration.
