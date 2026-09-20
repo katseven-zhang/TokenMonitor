@@ -1118,8 +1118,9 @@ export function ConversationItem({ block, rawJsonlLines }: { block: Conversation
 
 export function SessionDetailModal({ session, query, onClose }: SessionDetailModalProps) {
   const { t } = useTranslation();
-  const [detail, setDetail] = useState<SessionReplayDetail | null>(null);
+  const [loadedDetail, setDetail] = useState<SessionReplayDetail | null>(null);
   const [activePath, setActivePath] = useState(session.path);
+  const detail = loadedDetail?.path === activePath ? loadedDetail : null;
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("timeline");
   const [copied, setCopied] = useState(false);
@@ -1230,14 +1231,14 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     return inputTokens > 0 ? cachedInputTokens / inputTokens : 0;
   }, [detail, session.cachedInputTokens, session.inputTokens]);
 
-  const models = detail?.summary.models.length ? detail.summary.models : session.models;
-  const projects = detail?.summary.projects.length ? detail.summary.projects : session.projects;
+  const models = detail?.summary.models ?? [];
+  const projects = detail?.summary.projects ?? [];
   const sessionProjectsByPath = new Map(sessionProjectReferences(session).map((project) => [project.path, project]));
   const displayedProjects = projects.map((path) => sessionProjectsByPath.get(path) ?? {
     path,
     displayName: path.split(/[\\/]/).filter(Boolean).pop() || path,
   });
-  const threadName = detail ? detail.threadName : session.threadName;
+  const threadName = detail ? detail.threadName : t("sessions.detail.loading_replay");
   const displayedSessionId = cleanSessionId(detail?.sessionId ?? session.sessionId);
   const rawPreview = detail ? buildRawPreview(detail.rawJsonl) : "";
   const rawJsonlLines = useMemo(() => detail?.rawJsonl.split("\n") ?? [], [detail?.rawJsonl]);
@@ -1345,7 +1346,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
           <section ref={summaryRef} aria-label={t("sessions.detail.session_summary")} className="min-h-0 overflow-hidden bg-surface">
           {detail?.range && detail.rangeTotals ? <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs"><strong>当前查询范围</strong> · {new Date(detail.range.start).toLocaleString()} — {new Date(detail.range.end).toLocaleString()}（不含结束时刻）<div className="mt-1 flex flex-wrap gap-4"><span>Tokens <b>{formatNumber(detail.rangeTotals.totalTokens)}</b></span><span>用量记录 <b>{formatNumber(detail.rangeTotals.events)}</b></span><span>费用 <b>{formatCurrency(detail.rangeTotals.costUsd)}</b></span>{detail.rangeTotals.unpricedEvents>0 && <span>{detail.rangeTotals.unpricedEvents} 条记录缺少价格</span>}</div></div> : null}
           <p className="pt-2 text-xs text-muted-foreground">以下为完整会话回放与父子关系，保留范围外对话上下文；完整会话统计与上方查询范围分别显示。</p>
-          <div className="flex flex-wrap gap-1.5 pt-1 pb-0.5">
+          {detail && <div className="flex flex-wrap gap-1.5 pt-1 pb-0.5">
             {metric(t("sessions.detail.duration"), formatDuration(detail?.summary.durationMs), <Clock3 className="h-3.5 w-3.5" />, "blue")}
             {metric(t("sessions.detail.total_tokens"), formatNumber(detail?.summary.totalTokens ?? session.totalTokens), <Database className="h-3.5 w-3.5" />, "violet")}
             {metric(t("sessions.detail.input_tokens"), formatNumber(detail?.summary.inputTokens ?? session.inputTokens), <Database className="h-3.5 w-3.5" />, "blue")}
@@ -1355,8 +1356,8 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             {metric(t("sessions.detail.tool_calls"), formatNumber(detail?.summary.toolCallCount ?? 0), <Wrench className="h-3.5 w-3.5" />, "amber")}
             {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
             {metric(t("sessions.detail.errors"), formatNumber(detail?.summary.errorCount ?? 0), <AlertTriangle className="h-3.5 w-3.5" />, "red")}
-          </div>
-          {showDetails ? (
+          </div>}
+          {detail && showDetails ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5 text-[11px] text-muted-foreground">
               {threadName ? (
                 <button
