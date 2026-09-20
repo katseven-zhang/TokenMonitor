@@ -111,6 +111,7 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
     let p = prices(root)?;
     let path = PathBuf::from(args["path"].as_str().ok_or("未选择导出路径")?);
     let format = args["format"].as_str().ok_or("未选择格式")?;
+    let cost_heading = format!("Estimated {}", p.display_currency);
     let headers = [
         "Time (UTC)",
         "Agent",
@@ -123,7 +124,7 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
         "Output",
         "Reasoning (included)",
         "Total",
-        "Estimated USD",
+        &cost_heading,
         "Source",
         "Line",
     ];
@@ -145,7 +146,7 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
                 e.tokens.reasoning.to_string(),
                 e.tokens.total().to_string(),
                 p.cost(e)
-                    .map(|c| format!("{c:.8}"))
+                    .map(|c| format!("{:.8}",c*p.display_factor()))
                     .unwrap_or_else(|| "unpriced".into()),
                 e.path.clone(),
                 e.line.to_string(),

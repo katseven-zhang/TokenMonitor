@@ -1,3 +1,4 @@
+import { useCurrency } from '../lib/currency';
 import {
   buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
   parseToolContentBlocks, parseUserInputAnswers, processExitCode, processSignal, splitWebSearchResults, summarizeOutput,
@@ -8,7 +9,7 @@ import { AlertTriangle, Bot, Check, ChevronDown, ChevronRight, Clipboard, Clock3
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { fetchSessionDetail, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
-import { formatCurrency, formatNumber, formatPercent } from "@/lib/formatters";
+import { formatNumber, formatPercent } from "@/lib/formatters";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
 import { SessionQuotaUsageView } from "./session-quota-usage";
 
@@ -209,6 +210,7 @@ function AgentHierarchy({
   activePath: string;
   onSelect: (path: string) => void;
 }) {
+  const {money:formatCurrency}=useCurrency();
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
   if (agents.length <= 1) return null;
@@ -1117,6 +1119,7 @@ export function ConversationItem({ block, rawJsonlLines }: { block: Conversation
 }
 
 export function SessionDetailModal({ session, query, onClose }: SessionDetailModalProps) {
+  const {money:formatCurrency}=useCurrency();
   const { t } = useTranslation();
   const [loadedDetail, setDetail] = useState<SessionReplayDetail | null>(null);
   const [activePath, setActivePath] = useState(session.path);

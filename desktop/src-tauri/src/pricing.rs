@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Rate {
     #[serde(default)]
+    pub currency: Option<String>,
+    #[serde(default)]
     pub effective_from: Option<String>,
     pub input: f64,
     pub cached: f64,
@@ -17,24 +19,44 @@ pub struct Rate {
 pub struct Prices {
     pub version: u32,
     pub currency: String,
+    #[serde(default = "default_currency")]
+    pub display_currency: String,
+    #[serde(default)]
+    pub usd_cny: Option<f64>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub aliases: BTreeMap<String, String>,
     pub models: BTreeMap<String, Vec<Rate>>,
 }
+fn default_currency() -> String { "USD".into() }
 impl Prices {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let p: Self = serde_json::from_str(text).map_err(|e| format!("价格JSON无效: {e}"))?;
-        if p.version != 1 || p.currency != "USD" {
-            return Err("价格文件必须使用 version=1、currency=USD".into());
+        let mut p: Self = serde_json::from_str(text).map_err(|e| format!("价格JSON无效: {e}"))?;
+        p.currency = p.currency.to_ascii_uppercase();
+        p.display_currency = p.display_currency.to_ascii_uppercase();
+        for rates in p.models.values_mut() {
+            for rate in rates {
+                if let Some(currency) = &mut rate.currency { *currency = currency.to_ascii_uppercase(); }
+            }
         }
+        if p.version != 1 || !["USD","CNY"].contains(&p.currency.as_str()) || !["USD","CNY"].contains(&p.display_currency.as_str()) {
+            return Err("价格文件必须使用 version=1，currency 和 displayCurrency 仅支持 USD/CNY".into());
+        }
+        if p.usd_cny.is_some_and(|rate| !rate.is_finite() || rate <= 0.0) {
+            return Err("usdCny 汇率必须大于零：表示 1 美元兑换多少人民币".into());
+        }
+        let mut needs_fx = p.currency == "CNY" || p.display_currency == "CNY";
         for (model, rates) in &p.models {
             if model.trim().is_empty() || rates.is_empty() {
                 return Err("模型名和价格记录不能为空".into());
             }
             let mut dates = BTreeSet::new();
             for r in rates {
+                if let Some(currency) = &r.currency {
+                    if !["USD","CNY"].contains(&currency.as_str()) { return Err(format!("{model}: currency 仅支持 USD/CNY")); }
+                    needs_fx |= currency == "CNY";
+                }
                 if [r.input, r.cached, r.cache_write, r.output]
                     .iter()
                     .any(|n| !n.is_finite() || *n < 0.0)
@@ -47,6 +69,7 @@ impl Prices {
                 }
             }
         }
+        if needs_fx && p.usd_cny.is_none() { return Err("人民币计价或显示需要先设置 usdCny 本地汇率（1 USD = ? CNY）".into()); }
         for (alias, dest) in &p.aliases {
             if alias.is_empty() || !p.models.contains_key(dest) {
                 return Err(format!("别名 {alias} 必须直接指向已配置模型"));
@@ -67,11 +90,13 @@ impl Prices {
             .filter(|r| rate_time(r).is_ok_and(|t| t <= e.ts))
             .max_by_key(|r| rate_time(r).unwrap_or(0))?;
         let t = &e.tokens;
+        let factor = if rate.currency.as_deref().unwrap_or(&self.currency) == "CNY" { 1.0 / self.usd_cny? } else { 1.0 };
         Some([t.input as f64*rate.input/1_000_000.0,
             t.cached as f64*rate.cached/1_000_000.0,
             t.cache_write as f64*rate.cache_write/1_000_000.0,
-            t.output as f64*rate.output/1_000_000.0])
+            t.output as f64*rate.output/1_000_000.0].map(|cost|cost*factor))
     }
+    pub fn display_factor(&self) -> f64 { if self.display_currency == "CNY" { self.usd_cny.unwrap_or(1.0) } else { 1.0 } }
 }
 fn rate_time(r: &Rate) -> Result<i64, String> {
     match &r.effective_from {
@@ -121,5 +146,22 @@ mod tests {
     #[test]
     fn invalid_price_is_not_accepted() {
         assert!(Prices::parse(r#"{"version":1,"currency":"USD","models":{"m":[{"input":-1,"cached":0,"cacheWrite":0,"output":0}]}}"#).is_err());
+    }
+    #[test]
+    fn mixed_currencies_normalize_before_aggregation_and_validate_exchange_rate() {
+        let text=r#"{"version":1,"currency":"USD","displayCurrency":"CNY","usdCny":7,"models":{"domestic":[{"currency":"CNY","input":7,"cached":0.7,"cacheWrite":14,"output":21}],"foreign":[{"input":1,"cached":0.1,"cacheWrite":2,"output":3}]}}"#;
+        let p=Prices::parse(text).unwrap();
+        let mut e=Event{id:"1".into(),agent:"codex".into(),session:"s".into(),project:"p".into(),model:"domestic".into(),ts:1,tokens:Tokens{input:1_000_000,cached:1_000_000,cache_write:1_000_000,output:1_000_000,reasoning:500_000},path:String::new(),line:1};
+        let domestic=p.cost(&e).unwrap();
+        e.model="foreign".into();
+        assert!((domestic-6.1).abs()<1e-10);
+        assert!((p.cost(&e).unwrap()-domestic).abs()<1e-10);
+        assert!((domestic*p.display_factor()-42.7).abs()<1e-10);
+        let usd=Prices::parse(&text.replace("\"displayCurrency\":\"CNY\"","\"displayCurrency\":\"USD\"")).unwrap();
+        assert_eq!(usd.display_factor(),1.0);
+        assert!(Prices::parse(&text.replace("\"usdCny\":7,", "")).is_err());
+        assert!(Prices::parse(&text.replace("\"usdCny\":7", "\"usdCny\":0")).is_err());
+        assert!(Prices::parse(&text.replace("\"usdCny\":7", "\"usdCny\":-7")).is_err());
+        assert!(Prices::parse(&text.replace("\"currency\":\"CNY\"", "\"currency\":\"EUR\"")).is_err());
     }
 }

@@ -38,7 +38,8 @@ def cost(event):
     if not rates:
         return None
     rate = max(rates, key=effective)
-    return sum(Decimal(event['tokens'][key]) * Decimal(str(rate[key])) for key in ('input', 'cached', 'cacheWrite', 'output')) / Decimal(1_000_000)
+    native = sum(Decimal(event['tokens'][key]) * Decimal(str(rate[key])) for key in ('input', 'cached', 'cacheWrite', 'output')) / Decimal(1_000_000)
+    return native / Decimal(str(prices['usdCny'])) if (rate.get('currency') or prices.get('currency', 'USD')).upper() == 'CNY' else native
 
 cache = sqlite3.connect(f'{root.joinpath("events-v2.sqlite").as_uri()}?mode=ro', uri=True)
 # Completed historical windows avoid most changes from currently streaming logs.

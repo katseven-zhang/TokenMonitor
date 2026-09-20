@@ -1,3 +1,4 @@
+import { useCurrency } from '../lib/currency';
 import { useMemo, useRef, useState } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import { Bar, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
@@ -9,10 +10,10 @@ const series = [
   ['costUsd', '估算费用', '#ef8797'],
 ] as const;
 const compact = (n:number) => new Intl.NumberFormat('en',{notation:'compact',maximumFractionDigits:2}).format(n);
-const money = (n:number|null) => n === null ? '未完整定价' : `$${n.toLocaleString('en',{maximumFractionDigits:4})}`;
 const number = (n:number) => n.toLocaleString('zh-CN');
 
 function TrendTooltip({active,payload}:{active?:boolean;payload?:readonly {payload?:Summary}[]}) {
+  const {money}=useCurrency();
   const row=payload?.find(item=>item.payload)?.payload;
   if(!active || !row) return null;
   return <div className="trend-tooltip"><strong>{new Date(Number(row.label)).toLocaleString('zh-CN',{hour12:false})}</strong>
@@ -26,6 +27,7 @@ function TrendTooltip({active,payload}:{active?:boolean;payload?:readonly {paylo
 }
 
 export function UsageTrend({data}:{data:Pick<Dashboard,'series'|'bucketMs'>}) {
+  const {money}=useCurrency();
   const [hidden,setHidden]=useState<Set<string>>(()=>new Set());
   const dialog=useRef<HTMLDialogElement>(null);
   const points=useMemo(()=>data.series.map(row=>({...row,ts:Number(row.label),...row.tokens})),[data.series]);
@@ -35,7 +37,7 @@ export function UsageTrend({data}:{data:Pick<Dashboard,'series'|'bucketMs'>}) {
       <CartesianGrid vertical={false} stroke="var(--chart-grid)"/>
       <XAxis dataKey="ts" minTickGap={40} tickFormatter={ts=>new Date(ts).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:data.bucketMs<86400000?'2-digit':undefined,minute:data.bucketMs===60000?'2-digit':undefined})} tick={{fontSize:11}}/>
       <YAxis yAxisId="tokens" tickFormatter={compact} width={55} tick={{fontSize:11}}/>
-      <YAxis yAxisId="cost" orientation="right" hide={hidden.has('costUsd')} tickFormatter={n=>`$${compact(n)}`} width={58} tick={{fontSize:10}}/>
+      <YAxis yAxisId="cost" orientation="right" hide={hidden.has('costUsd')} tickFormatter={n=>money(n)} width={58} tick={{fontSize:10}}/>
       <Tooltip content={<TrendTooltip/>}/>
       {series.filter(([key])=>key!=='costUsd').map(([key,label,color])=><Bar key={key} yAxisId="tokens" dataKey={key} name={label} stackId="tokens" fill={color} hide={hidden.has(key)} isAnimationActive={false}/>)}
       <Line yAxisId="cost" dataKey="costUsd" name="估算费用" stroke="#ef8797" strokeWidth={2} dot={false} connectNulls={false} hide={hidden.has('costUsd')} isAnimationActive={false}/>
