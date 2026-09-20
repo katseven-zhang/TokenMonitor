@@ -8,6 +8,15 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
+#[derive(Default)]
+struct StartupError(std::sync::Mutex<Option<String>>);
+fn start_service(app:&tauri::AppHandle,root:&std::path::Path)->Result<Value,String> {
+    let result=service::start(root);
+    if let Ok(mut error)=app.state::<StartupError>().0.lock(){*error=result.as_ref().err().cloned();}
+    if let Err(error)=&result {service::log(root,error);}
+    result
+}
+
 #[tauri::command]
 async fn local_request(
     app: tauri::AppHandle,
@@ -24,16 +33,21 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
         "bootstrap" => Ok(
             json!({"settings":config::settings(&root)?,"prices":fs::read_to_string(root.join("prices.json")).map_err(|e|e.to_string())?,"dataDir":root,"agents":config::AGENTS,"autostart":app.autolaunch().is_enabled().map_err(|e|e.to_string())?}),
         ),
-        "status" => Ok(service::rpc(&root, "status", json!({}))
-            .unwrap_or(json!({"running":false,"scanning":false}))),
-        "start" => service::start(&root),
+        "status" => {
+            let result=service::rpc(&root,"status",json!({}));
+            let state=app.state::<StartupError>();
+            let mut error=state.0.lock().map_err(|e|e.to_string())?;
+            if result.is_ok(){*error=None;}
+            Ok(result.unwrap_or(json!({"running":false,"scanning":false,"error":*error})))
+        },
+        "start" => start_service(app,&root),
         "stop" => service::stop(&root),
         "restart" => {
             service::stop(&root)?;
-            service::start(&root)
+            start_service(app,&root)
         }
         "scan" => {
-            service::start(&root)?;
+            start_service(app,&root)?;
             service::rpc(&root, "scan", json!({}))
         }
         "save_settings" => {
@@ -88,7 +102,8 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 pub fn run() {
-    tauri::Builder::default()
+    let result=tauri::Builder::default()
+        .manage(StartupError::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
@@ -148,10 +163,9 @@ pub fn run() {
                         "show" => show(app),
                         "start" => {
                             let root = config::data_dir();
+                            let app=app.clone();
                             std::thread::spawn(move || {
-                                if let Err(e) = service::start(&root) {
-                                    service::log(&root, &e);
-                                }
+                                let _=start_service(&app,&root);
                             });
                         }
                         "stop" => {
@@ -177,13 +191,26 @@ pub fn run() {
                 })
                 .build(app)?;
             let root = config::data_dir();
+            let handle=app.handle().clone();
             std::thread::spawn(move || {
-                if let Err(e) = service::start(&root) {
-                    service::log(&root, &e);
-                }
+                let _=start_service(&handle,&root);
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("TokenMonitor desktop failed");
+        .run(tauri::generate_context!());
+    if let Err(error)=result {
+        let message=format!("TokenMonitor 无法打开桌面界面。请确认 Microsoft Edge WebView2 Runtime 已安装且可用。\n\n详细错误：{error}");
+        service::log(&config::data_dir(),&message);
+        #[cfg(windows)]
+        {
+            #[link(name="user32")]
+            extern "system" { fn MessageBoxW(window:*mut std::ffi::c_void,text:*const u16,title:*const u16,flags:u32)->i32; }
+            let text:Vec<u16>=message.encode_utf16().chain(Some(0)).collect();
+            let title:Vec<u16>="TokenMonitor 启动失败".encode_utf16().chain(Some(0)).collect();
+            // Native fallback still works when WebView2 cannot create any UI.
+            unsafe {MessageBoxW(std::ptr::null_mut(),text.as_ptr(),title.as_ptr(),0x10);}
+        }
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
 }

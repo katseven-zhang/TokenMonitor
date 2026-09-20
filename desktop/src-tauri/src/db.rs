@@ -14,11 +14,14 @@ fn register_query_functions(db:&Connection)->Result<(),String> {
 }
 
 pub fn open_read(root: &Path) -> Result<Connection, String> {
+    if !root.join("events-v2.sqlite").exists() {
+        return Err("正在准备本地用量缓存；首次启动请稍候。若后台已停止，请点击顶部“启动”；启动失败原因请查看日志。".into());
+    }
     let db = Connection::open_with_flags(
         root.join("events-v2.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .map_err(|e| format!("用量缓存尚未就绪，请启动后台：{e}"))?;
+    .map_err(|e| format!("无法读取本地用量缓存：{e}"))?;
     db.busy_timeout(Duration::from_secs(10))
         .map_err(|e| e.to_string())?;
     register_query_functions(&db)?;

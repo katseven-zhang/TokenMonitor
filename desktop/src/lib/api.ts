@@ -15,6 +15,6 @@ export type UsageEvent={id:string;agent:string;session:string;project:string;mod
 export type EventPage={total:number;items:{event:UsageEvent;costUSD:number|null}[]};
 export type Settings={port:number;refreshSeconds:number;roots:Record<string,string[]>;disabledAgents:string[]};
 export type Bootstrap={settings:Settings;prices:string;dataDir:string;agents:[string,string][];autostart:boolean};
-export type Status={running:boolean;scanning:boolean;stopping?:boolean;pid?:number};
+export type Status={error?:string|null;running:boolean;scanning:boolean;stopping?:boolean;pid?:number};
 
 export type ActivityPage={total:number;items:Activity[]};
