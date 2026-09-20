@@ -2,6 +2,10 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Native historical price catalog — packaged `cadff72`
+
+Using only the isolated `.dev-data` configuration, added temporary model `tm-history-test` and alias `tm-alias-test` through the GUI JSON editor. Base input/cache-read/cache-write/output rates were 1 / 0.1 / 1.25 / 4; a second entry effective `2026-09-20T08:40:00+08:00` doubled all four rates. Alias search returned exactly the intended model. The native minute control at 08:39 showed the base rates; advancing to 08:40 showed 2 / 0.2 / 2.5 / 8 and the effective timestamp. Expanding history visibly displayed both entries and all four rate categories. Restored and saved the original JSON through the GUI, verified the disk file byte-for-byte against the pre-test content, and cleared the search filter. No temporary model or alias remains in the saved test configuration.
+
 ## Navigation follow-up — `78e44ad`
 
 After the user requested a fresh authorization, shell execution succeeded and the fixed output package rebuilt: EXE 7,083,520 bytes, ZIP 4,313,005 bytes. A fresh native window then became accessible. Native light-theme verification passed: scrolling well down a session table and selecting Settings returns to its heading and first controls. Daily drilldown from a seven-day query beginning September 13 at 08:30 retained 08:30 and ended September 14 at 00:00. August drilldown from a 30-day query beginning August 21 at 08:31 retained 08:31 and ended September 1 at 00:00. These verify intersection with the original minute range rather than silently broadening it to full calendar periods.
