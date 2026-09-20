@@ -1,267 +1,227 @@
-# TokenMonitor
+# TokenMonitor Desktop 2
 
-**Mac 本地多源 AI Agent 用量与配额实时面板。** 一个常驻进程解析你机器上各 AI 编码工具留下的本地会话记录，统一归一化为 token 事件流，提供 Codex 风格的统计面板、实时配额卡、厂商余额轮询、费用估算与菜单栏胶囊。零框架依赖、纯本地运行。
+TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用。它读取本机 AI 编码工具留下的会话记录，将不同格式统一为可查询的 Token 事件，再提供模型、项目、会话、日期、工具调用、费用和额度观测等视图。
 
-![TokenMonitor](https://raw.githubusercontent.com/katseven-zhang/TokenMonitor/main/docs/screenshot.png)
+当前 `main` 以 `desktop/` 下的 Desktop 2 实现为正式版本。Windows 发行包不需要 Node.js，不上传会话内容，不在线获取模型价格，也不访问 Agent 账号。
 
-> 截图为真实运行数据（厂商余额与项目名已脱敏为 ••••）。
+> TokenMonitor 是非官方工具。它读取的是各工具保存在本机的私有格式；上游格式变化可能影响采集结果。模型费用是按本地价格表计算的估算值，不代表厂商账单。
 
-## 支持的工具（9 源）
+## 当前版本定位
 
-| 工具 | 数据位置 | 能看到什么 |
+Desktop 2 不是旧网页面板的简单换皮，而是一条新的 Windows 桌面实现：
+
+- Tauri 2 + Rust 本地后端，React + TypeScript 桌面界面；
+- 原生读取 JSONL、SQLite/WAL 与压缩会话文件；
+- 统一的多 Agent 事件模型、查询和导出链路；
+- 完整的后台启动、停止、重启、托盘驻留与当前用户登录自启；
+- 固定目录覆盖式构建，发行包中不携带 Node、数据库、日志或用户凭据；
+- 纯本地价格目录、历史价格和 USD/CNY 换算，不依赖在线价格服务。
+
+仓库根目录仍保留早期 Node/macOS 实现及其历史，但它不参与当前 Windows Desktop 2 发行包。当前 Windows 产品、测试和打包均以 `desktop/` 为准。
+
+## 主要能力
+
+### 多 Agent 统一采集
+
+当前桌面版支持 10 个本地来源：
+
+| Agent / 工具 | 默认数据位置或类型 | 采集方式 |
 |---|---|---|
-| Claude Code | `~/.claude/projects` | 逐请求 token 明细、模型分布 |
-| ccmr（claude-code-model-router） | `~/.claude-gateway/projects` | 同上（国产模型隔离目录，真实模型名） |
-| Codex | `~/.codex/sessions`、`archived_sessions` | token 明细、**官方周配额百分比与重置时间**、模型（含 auto-review 子代理）、工具调用 |
-| ZCode | `~/.zcode/cli/db/db.sqlite` | 逐请求明细（model_usage 表）、工具调用 |
-| dsh（DeepSeek Harness） | `~/.dsh/sessions` | 逐请求明细（zstd 压缩会话） |
-| WorkBuddy | `~/.WorkBuddy/projects` | 逐请求明细 + **积分费率自学习**（credit 账本 × token 最小二乘） |
-| Grok Build | `~/.grok/sessions` | 轮次用量明细（含厂商侧成本刻度）、工具调用 |
-| Pi | `~/.pi/agent/sessions` | 逐请求明细、工具调用（会话 JSONL 自带 USD 成本明细） |
-| OpenCode | `~/.local/share/opencode/opencode.db` | 逐请求明细（message 表）、工具调用 |
+| Codex | `~/.codex/sessions`、`archived_sessions` | JSONL，会话与归档去重 |
+| Claude Code | `~/.claude/projects` | JSONL |
+| ccmr | `~/.claude-gateway/projects` | JSONL |
+| ZCode | `~/.zcode/cli/db/db.sqlite` | SQLite/WAL |
+| dsh | `~/.dsh/sessions` | 多帧 zstd 会话 |
+| WorkBuddy | `~/.WorkBuddy/projects` | JSONL |
+| Grok Build | `~/.grok/sessions` | JSONL |
+| Pi | `~/.pi/agent/sessions` | JSONL |
+| OpenCode | `opencode.db` | SQLite/WAL |
+| Antigravity | `conversation_summaries.db` | SQLite/WAL |
 
-不支持的：网页版聊天（ChatGPT/豆包/DeepSeek 网页等）——token 计数在服务端，本地无留痕，原理上不可统计。
+每个来源都归一化为相同的时间、Agent、模型、项目、会话、Token 分类与工具调用结构。扫描采用只读访问，并通过文件游标、数据库水位、来源版本和去重键保证重复扫描尽量不重不漏。
 
-## 快速开始
+### 本地分析
 
-三种用法，按"要不要长期用"来选。
+- 全部 Agent 总览，也可以只查看任意一个 Agent；
+- 模型、项目、日、月、会话和逐条用量明细；
+- 输入、缓存读取、缓存写入、输出和推理 Token 分项；
+- 分页的工具调用活动、来源健康状态和本地日志；
+- Codex 会话完整回放，包括父子 Agent、消息、命令、补丁和工具结果；
+- 分钟精度的半开时间范围 `[开始, 结束)`，并提供近 5 小时、24 小时、7 天和 30 天快捷范围；
+- CSV、Markdown 和 Excel 导出，遵循当前筛选范围。
 
-### 方式一：npx 试用（什么都不装）
+### 离线定价策略
 
-```bash
-npx --yes tokenmonitor@latest serve
-open http://127.0.0.1:8787
+模型定价由本地 JSON 管理。当前价格目录的约定是：中国模型使用 CNY，海外模型使用 USD；每条价格仍可明确指定自己的原始币种。
+
+定价引擎支持：
+
+- `input`、`cached`、`cacheWrite`、`output` 四种价格分项；
+- 日志模型名到标准模型名的精确别名；
+- `effectiveFrom` 历史价格，按请求时间选择生效记录；
+- 每条价格独立使用 `USD` 或 `CNY`；
+- 手动维护 `usdCny`，页面和导出统一显示为美元或人民币；
+- 已定价费用与未定价条数、未定价 Token 分开显示；
+- 缺少价格表示“未知”，不会被当作免费或零费用。
+
+内置目录只是带来源日期的离线参考快照。服务等级、长上下文附加费、企业合同和地区差异应按实际情况在本地价格文件中调整。
+
+### 桌面与后台运行
+
+- 顶部全局控制后台启动、停止和重启；
+- 后台停止后，仍可读取已经缓存的统计结果；
+- 关闭窗口后驻留系统托盘；
+- 支持当前用户登录自启，无需管理员权限；
+- 单实例恢复窗口，避免重复启动多个桌面实例；
+- 浅色、深色和跟随系统主题；
+- `Ctrl + 加号/减号` 缩放界面，`Ctrl + 0` 恢复；
+- 本地端口可配置，服务只面向本机使用。
+
+## 快速使用
+
+### 运行已构建版本
+
+从固定发行目录运行：
+
+```text
+dist/desktop-windows-x64/TokenMonitor.exe
 ```
 
-关掉终端即停止，适合先看看有没有用。
+或者解压：
 
-两个参数都别省：`--yes` 跳过安装确认；`@latest` 绕开 npx 的版本缓存——不加的话它
-可能跑到一个早先缓存的旧版本。另外 npx 会优先解析**本地**依赖，所以如果你正好在
-本仓库目录里执行，跑的其实是仓库代码而非 npm 上的包。
-
-### 方式二：npm 全局安装（长期使用，推荐）
-
-```bash
-npm install -g tokenmonitor
-tokenmonitor serve
+```text
+dist/TokenMonitor-desktop-windows-x64.zip
 ```
 
-装完除了 `serve`，还多出两个只有全局安装才方便用的能力：
+运行要求：
 
-```bash
-# 常驻 + 开机自启（macOS，崩溃自动拉起）
-tokenmonitor install-agent
-tokenmonitor install-agent --port 9000
-tokenmonitor uninstall-agent
+- Windows 10/11 x64；
+- Microsoft Edge WebView2 Runtime；
+- 不需要安装 Node.js、Rust 或数据库服务。
 
-# 菜单栏胶囊（macOS）
-tokenmonitor bar
-tokenmonitor bar --port 9000   # 服务不在默认端口时
+首次运行会扫描本地历史记录。日志较多时，首次建立缓存可能需要一定时间。默认配置、事件缓存、日志、价格和 WebView 数据位于：
+
+```text
+%LOCALAPPDATA%\TokenMonitor2
 ```
 
-`install-agent` 会把 node 与入口脚本的**绝对路径**固化进 LaunchAgent——launchd 的
-PATH 是系统默认，既不含 npm 全局 bin（前缀还可能被改过），也不保证含 homebrew，
-靠命令名会起不来。日志在 `~/.tokenmonitor/logs/`。停用请用 `uninstall-agent` 或
-`launchctl bootout`，`launchctl stop` 会被 KeepAlive 立刻拉起。
+所有 Agent 路径都可以在“设置”中修改或禁用。
 
-菜单栏 app 以 universal 二进制随包发布（arm64 + x86_64，约 340KB），不需要 Xcode
-工具链；从菜单里选「退出」可关闭。
+### 从源码构建
 
-CLI 命令统一为 `tokenmonitor`，不再发布旧命令别名。
+构建环境需要 Node.js、Rust stable、Windows C++ 构建工具和 PowerShell 7：
 
-### 方式三：克隆仓库（想改代码）
-
-```bash
-git clone https://github.com/katseven-zhang/TokenMonitor.git
-cd TokenMonitor && npm install
-npm run serve        # 首扫历史 ~3.3GB 约 6 秒，仅首次
+```powershell
+cd desktop
+npm install
+cd ..
+pwsh -File desktop/scripts/build-windows.ps1
 ```
 
-```bash
-npm test             # 回归测试，零依赖、离线可跑
-npm run build-bar    # 重新编译菜单栏 app（需 Xcode CLT；发版时 prepack 会自动跑）
+构建脚本会覆盖固定位置，不会不断创建新目录：
+
+```text
+dist/desktop-windows-x64
+dist/TokenMonitor-desktop-windows-x64.zip
 ```
 
-仓库里不含编译产物，`.app` 由 `prepack` 在发版前构建。所以克隆后想用菜单栏胶囊，
-需先执行 `npm run build-bar`。
-
-### 三种方式的差别
-
-| | npx | 全局安装 | 克隆仓库 |
-|---|---|---|---|
-| 面板 / 采集 | ✓ | ✓ | ✓ |
-| 菜单栏胶囊 | ✓ | ✓ | 需先 `npm run build-bar` |
-| 开机自启 | 不建议 | ✓ | ✓（指向仓库路径）|
-| 升级 | 每次拉最新 | `npm i -g tokenmonitor` | `git pull` |
-
-npx 下不建议装开机自启：生成的 LaunchAgent 会指向 npx 的缓存目录，而那个目录随时
-可能被 npm 清理，届时服务会静默起不来。要常驻就用全局安装。
-
-### 其他命令
-
-```bash
-tokenmonitor today              # 终端速览今日消耗
-tokenmonitor scan               # 只扫描一次
-tokenmonitor serve --port 9000
-```
-
-## 运行要求
-
-**Node ≥ 22.13**（`node:sqlite` 自该版本起免 `--experimental-sqlite` flag，零原生依赖）。
-
-**dsh 源需要系统 `zstd`**（`brew install zstd`）。dsh 的会话快照是追加式多帧写入，
-单个文件可达数千帧，而 Node 内置的 zstd 只解第一帧就结束且不报错，因此这里以外部
-`zstd` 为准，仅在确认文件只含单帧时才回落内置实现。未安装且遇到多帧文件时，该源会在
-健康自检里报错，而不是静默少算。其余数据源不需要它。
-
-**平台支持：macOS 全功能验证**（含菜单栏 App 与 launchd）。Windows / Linux 上核心链路（采集、面板、API）随 CI 在 macOS + Ubuntu + Windows 三平台跑回归，包含"装成依赖后能否真正跑起来"的安装冒烟。菜单栏 App 与 launchd 开机自启为 macOS 专属。
-
-开发与测试：`npm test` 运行五层回归——语法检查、import 冒烟（拦模块级错误，`node --check` 看不见）、静态断言、前端纯函数行为、端到端冒烟（fixtures 黄金数字 + 幂等 + API 结构）。零依赖、离线运行，GitHub Actions 上跑 macOS/Ubuntu × Node 22.13/24 矩阵。
-
-## 功能
-
-- **实时**：FSEvents 监听各数据目录 → 增量解析 → SSE 推送，面板秒级刷新（实测 <1s）
-- **增量采集**：字节级游标 / sqlite 水位 / 快照重解析三种策略，二次扫描 0ms；dedup 键保证幂等；采集器版本号机制支持逻辑升级后自动全量回填
-- **统计面板**：指标卡、近一年 GitHub 风格日历热力图（每日/每周/累计）、按天/模型/工具图表、最近请求实时流
-- **会话钻取**：点击趋势图任意一天 → 会话列表（峰值上下文估算）→ 单会话逐请求 token 曲线
-- **工具活动**：四源工具调用频次榜
-- **配额**：Codex 官方配额直读（百分比/重置倒计时）、Claude 订阅 5h 窗口推算（session-blocks 法）
-- **余额与费用**：DeepSeek/Kimi 余额轮询（读 `~/.ccmr/.env` 的 key，密钥不出后端）；ccmr 侧按官方牌价折算（`~/.tokenmonitor/pricing.json` 可编辑）+ 余额对账
-- **阈值通知**（菜单栏 App）：Codex ≥80%/95%、余额 <¥10/¥2 弹 macOS 通知，级别上升只提醒一次
-- **数据源健康自检**：解析错误标红、"文件在写但无新事件"标黄——私有格式漂移不再静默失败
-- **导出与备份**：CSV 导出、每日 `VACUUM INTO` 备份保留 7 份
-
-## 隐私
-
-- 纯本地：只读取上述本地文件，**不上传任何用量数据**，面板只监听 127.0.0.1 且校验 Host（挡 DNS rebinding）
-- API 密钥仅在服务进程内使用（调厂商余额接口），不入库、不进前端
-- 统计库只存聚合事件（时间/工具/模型/token 数/项目名），不存对话内容
-
-**出站请求清单**（只有这三类，都不携带你的用量数据）：
-
-| 用途 | 端点 | 频率 |
-|---|---|---|
-| USD→CNY 汇率 | `open.er-api.com`、`cdn.jsdelivr.net` | 12 小时，本地缓存兜底 |
-| 模型牌价 | `raw.githubusercontent.com`（LiteLLM 价格表） | 24 小时，本地缓存兜底 |
-| 厂商余额 | DeepSeek / Kimi 官方接口（带你的 key） | 30 分钟，连续失败自动熔断 |
-
-要完全断网运行，设 `TOKENMONITOR_OFFLINE=1`：三类请求全部跳过，改用本地缓存与
-`~/.tokenmonitor/pricing.json`（可设 `usd_to_cny` + `usd_to_cny_manual: true` 固定汇率）。
-回归测试即以此模式运行，不依赖公网。
-
-## 免责声明
-
-TokenMonitor 是**非官方**工具，解析的均为各产品留在本地的**私有格式**（无稳定性承诺），上游版本升级可能导致个别源解析中断——健康面板会标出，欢迎提 issue。各产品版权归其厂商所有。
+发行 ZIP 只包含白名单内的 EXE、说明、价格示例、许可证、第三方声明和完整性清单。
 
 ## 架构
 
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。核心：`src/collectors/*` 每源一个适配器（增量 + dedup + 版本号），`src/scanner.js` 统一调度，SQLite 归一化事件表，`src/server.js` HTTP API + SSE，`web/` 零构建前端（ECharts UMD）。
+```text
+本地 Agent 日志 / SQLite / zstd
+                │
+                ▼
+      Rust 原生来源采集器（10 源）
+                │
+                ▼
+      SQLite 统一事件缓存与去重
+                │
+                ▼
+   本地查询、定价、导出和服务生命周期
+                │
+                ▼
+       Tauri + React 桌面界面
+```
 
-**添加新数据源**只需：写一个 collector（实现 `collect(store, {path, offset, state})` → `{inserted, newOffset, state}`）、在 `src/config.js` 注册、前端加一个颜色。见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+主要目录：
 
-## Roadmap
+```text
+desktop/src-tauri/src/collectors.rs      多来源解析与归一化
+desktop/src-tauri/src/scanner.rs         增量扫描和来源状态
+desktop/src-tauri/src/db.rs              本地事件缓存
+desktop/src-tauri/src/pricing.rs         历史价格与币种换算
+desktop/src-tauri/src/query.rs           汇总、筛选和分页查询
+desktop/src-tauri/src/service.rs         本地后台与导出
+desktop/src-tauri/src/session_replay.rs  Codex 会话回放
+desktop/src/                             React 桌面界面
+desktop/scripts/build-windows.ps1        固定目录覆盖式打包
+```
 
-- 跨平台验证（Linux/Windows）
-- 订阅 ROI 视角：API 等值成本 vs 订阅实付
-- 按项目维度的用量与花费
-- 配置文件（数据目录 / 端口 / 告警阈值）
-- i18n / 英文 README
+更详细的实现和验收记录见：
 
-## 更新日志
+- [桌面重构说明](docs/DESKTOP-REFACTOR.md)
+- [桌面验收记录](docs/DESKTOP-VERIFICATION.md)
+- [Codex 参考功能迁移矩阵](docs/CODEX-MIGRATION-MATRIX.md)
+- [Windows 使用说明](docs/WINDOWS.md)
 
-### 1.4.3（2026-09-17，待发布）
+## 测试
 
-- **修复 OpenCode 漏采约八成消息。** OpenCode 的 assistant 消息是"先插后改"：开始生成就插入
-  一行（用量全 0），生成结束才原地更新写入用量。采集器按 rowid 增量，而服务监听数据库写入、
-  生成过程中就会触发扫描——这行被当成 0 用量跳过，水位却越过了它，完成后的更新再也读不到。
-  面板表现为 OpenCode 明明在用却显示"疑似停更"。现改为按 `time_updated` 增量；升级后自动
-  全量重扫，补回历史漏采的消息（实测 99 条中原先只采到 20 条，修复后 99/99、token 总量逐一吻合）
-- 修掉一条会随日期自己变红的测试：余额对账用例把事件时刻写死在某一天，而对账窗口是"最近 24 小时"
+前端测试：
 
-### 1.4.2（2026-09-16）
+```powershell
+cd desktop
+npm test -- --run
+```
 
-- **修复 1.4.1 引入的回归：dsh 整源静默归零。** 1.4.1 把 zstd 解压改为优先使用 Node
-  内置实现（为解决 launchd 下找不到外部 zstd 的问题），但内置的 `zstdDecompressSync`
-  与 `createZstdDecompress` 都只解**第一帧**就结束且不报错。而 dsh 是追加式多帧写入，
-  实测单个会话文件有 5800+ 帧——外部 zstd 解出 19MB，内置实现只解出 226 字节。
-  现改为以外部 zstd 为准（仍显式试常见绝对路径以解决 launchd 的 PATH 问题），
-  仅在确认文件只含单帧时才回落内置实现，多帧又无外部 zstd 时大声报错而非静默少算。
-  **使用 dsh 源的用户请从 1.4.1 升级。**
+Rust 单元与集成测试：
 
-- 新增 `tokenmonitor install-agent` / `uninstall-agent`，把服务装成 macOS 开机自启项。
-  此前 README 指向 `npm run install-agent`，但 npm scripts 对全局安装的用户不可见，
-  且那条命令只负责 `launchctl bootstrap`、从不生成 plist，plist 也不随包发布——
-  全局安装的用户实际没有可用的常驻方案
-- 生成的 plist 固化 node 与入口脚本的绝对路径。launchd 的 PATH 不含 npm 全局 bin 与
-  homebrew，而入口脚本的 shebang 是 `#!/usr/bin/env node`，靠命令名无法启动
-- 检测到已有 `com.tokenmonitor.server` 仍在运行时拒绝安装（两者抢同一端口），可用 `--force` 覆盖
-- 新增 `tokenmonitor bar`，菜单栏胶囊随包发布。此前 `.app` 只存在于仓库、也不在
-  发布白名单里，全局安装的用户拿不到，而指引用的 `npm run bar` 同样不可见
-- 菜单栏 app 改为 universal 二进制（arm64 + x86_64）。此前产物只有 arm64，Intel Mac
-  上无法运行；`prepack` 会在发版前自动重新编译，避免发出陈旧或缺失的产物
-- 菜单栏 app 不再写死 8787 端口，`serve --port` 的用户不会再拿到连不上的胶囊
-- 修掉菜单栏的数量换算：「亿」档阈值错写成 1e6 却按 1e8 换算，200 万会显示成 "0.0亿"
+```powershell
+cd desktop/src-tauri
+cargo test --offline --locked --tests
+```
 
-### 1.4.1（2026-09-16）
+测试覆盖来源黄金数据、重复扫描、分钟边界、缓存 Token、历史价格、混合币种、项目身份、会话回放、活动分页、本地服务生命周期和导出结果。
 
-修掉一批让面板数字低于厂商账单的问题。起因是实测发现面板显示 DeepSeek 当日 ¥8.34，
-而官方后台是 ¥58.24。定价表本身无误，问题全在数据进库之前。
+## 隐私与安全边界
 
-- **ccmr 的输出 token 被钉死在 0**：Claude Code transcript 把一次响应按 content block
-  拆成多行，只有终结块带真实 `output_tokens`；ccmr 网关又不写 `requestId`，分片塌成
-  同一去重键，先到者胜留下的正是 output=0 的首块。实测单日丢掉 94.5% 的输出量。
-- **dsh 自 2026-08-14 起整源静默归零**：上游把会话结构换到 v3（`assistant/chunk` →
-  `assistant/message`，`data.chunk.usage` → `data.usage`），采集器一条也匹配不上，
-  却照常返回 0 条且不报错。全库停在 165 条，而恢复后单日就有 790 次请求 / 1.07 亿 token。
-- **守护进程解不开 zstd**：launchd 的 PATH 不含 homebrew 目录，dsh 快照只有手动
-  `scan` 才解得开。改为优先使用 Node 内置 zstd（≥23.8），旧版本回落外部可执行文件。
-- **DeepSeek 峰谷价未实现**：谷时用量一律按峰时价折算。峰时为 UTC 周一至周五
-  01:00-04:00 与 06:00-10:00，其余时段半价。
-- **余额对账漏算同账户的工具**：`computeRecon` 写死只统计 ccmr，而 dsh 花的是同一个
-  DeepSeek 账户，导致对账永远显示巨大缺口。改为按注册表的 `apiBilled` 标记推导。
+- 原始 Agent 日志以只读方式访问；
+- 统计、设置、价格和日志保存在本机；
+- 发行版不包含用户数据库、会话、日志、Token 或凭据；
+- 运行时不在线获取价格、汇率、公告或更新；
+- 不提供账号池、代理、OAuth、远程额度管理或额度兑换；
+- 本地日志没有提供的信息不会被伪造为实时账号数据。
 
-升级后首次扫描会全量重扫 ccmr 与 dsh 以补正存量数据。
+用户主动配置的本地目录可能包含敏感会话信息。请仅在可信电脑上运行，并在分享日志或导出文件前自行检查内容。
 
-### 1.4.0（2026-09-16）
+## 开发范围与代码来源
 
-- 新增 **Pi** 与 **OpenCode** 两个数据源（共 9 源）。两者口径均逐条核对
-  `total == input + output + cacheRead + cacheWrite` 后才接入
-- 健康自检的工具清单改为从数据源注册表推导。此前是另抄的一份硬编码数组，两份清单
-  必然漂移，而漏登记的源不会报错，只是从健康自检里静默消失
+以下能力是在 TokenMonitor 项目中设计并实现的：
 
-### 1.3.1（2026-09-15）
+- 10 个 Agent 来源的原生采集器和统一事件模型；
+- 增量扫描、SQLite/WAL 读取、去重、缓存与来源健康状态；
+- 模型别名、Token 分项、历史生效价格、未知价格语义；
+- 中国模型 CNY、海外模型 USD 的本地价格目录策略；
+- USD/CNY 原币种记录、手动汇率和统一显示币种；
+- 全 Agent 与单 Agent 查询、项目归一化、分页、筛选和导出；
+- Rust 本地后台的启动、停止、重启、端口与缓存读取；
+- Windows 托盘、单实例、登录自启和固定目录打包；
+- 面向真实本地数据的验证脚本、单元测试和集成测试。
 
-- **装成依赖后面板全空**：ECharts 路径写死了嵌套 `node_modules`，而 npm 安装时会把
-  依赖提升到顶层，于是 `/vendor/echarts.min.js` 返回 404、前端整个挂掉。改为交给
-  Node 自己的解析算法
-- 修掉两处 Windows 专属问题（目录分隔符解析）
+Desktop 2 同时参考并移植了 `codex-usage-desktop` v3.3.0 的部分实现，主要包括：
 
-### 1.3.0（2026-09-15，未发布）
+- Codex 会话回放解析器；
+- 回放相关 React 组件；
+- 部分格式化辅助、类型定义、语言包和样式配置。
 
-- 补上与包名同名的 `tokenmonitor` 命令入口，确保 `npx tokenmonitor` 直接解析到唯一 CLI。
+这些移植和改编部分继续遵循原项目 MIT 许可，并保留原版权声明：
 
-### 1.2.0（2026-09-15）
+- [参考项目代码许可](desktop/LICENSE.codex-usage-desktop)
+- 参考项目：<https://github.com/itvincent-git/codex-usage-desktop>
 
-- **服务不再会悄悄退出**：扫描时源文件被删（Claude 清理会话、Codex 归档搬移都是常态）
-  会抛 ENOENT 冲垮整轮扫描，而这发生在防抖定时器回调里，等于未处理 rejection
-- `scanning` 标志异常后不复位会让后续每轮扫描都被"并发中"挡掉，面板从此停更
-- 补齐路由错误处理与 `busy_timeout`，一次 SQLITE_BUSY 不再能杀掉进程
-- 清理已消失文件的游标行（只清 `files`，不动 `events`）
-
-### 1.1.0（2026-09-15）
-
-- 汇率实时化：公开接口拉取 USD/CNY，12 小时刷新 + 断网兜底
-- 新增逐日 token 消耗图与按天 × 模型堆叠花费图（Top6 + 其他聚合，低价模型不再被静默丢弃）
-- 布局重构为两列严格等高对齐
-- 回归测试强化
-
-### 1.0.0（2026-09-14）
-
-- 首个版本：本地多源 AI Agent 用量与配额实时面板，7 源采集
-- 费用折算接入 LiteLLM 实时牌价
-- GitHub 风格热力图、会话钻取
-- 三层回归测试（语法 / 静态断言 / 端到端冒烟）
+参考项目的账号功能、在线更新器、远程价格或凭据逻辑没有被复用。保留以上来源说明并不否定 TokenMonitor 的新架构和新增能力；它用于准确区分本项目开发内容与依法移植的部分。
 
 ## License
 
-[MIT](LICENSE)
+TokenMonitor 本项目代码采用 [MIT License](LICENSE)。发行包还包含依赖许可证汇总和参考项目许可。使用、修改或再分发时，请同时保留适用的版权声明与许可文本。
