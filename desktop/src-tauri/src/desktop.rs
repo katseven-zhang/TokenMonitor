@@ -102,6 +102,9 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 pub fn run() {
+    // The runtime otherwise shows an English dialog but can leave a headless
+    // tray/service process alive. Stop before constructing either subsystem.
+    if let Err(error)=tauri::webview_version() { fatal_desktop(&error.to_string()); }
     let result=tauri::Builder::default()
         .manage(StartupError::default())
         .plugin(tauri_plugin_dialog::init())
@@ -199,6 +202,10 @@ pub fn run() {
         })
         .run(tauri::generate_context!());
     if let Err(error)=result {
+        fatal_desktop(&error.to_string());
+    }
+}
+fn fatal_desktop(error:&str)->! {
         let message=format!("TokenMonitor 无法打开桌面界面。请确认 Microsoft Edge WebView2 Runtime 已安装且可用。\n\n详细错误：{error}");
         service::log(&config::data_dir(),&message);
         #[cfg(windows)]
@@ -212,5 +219,4 @@ pub fn run() {
         }
         eprintln!("{message}");
         std::process::exit(1);
-    }
 }
