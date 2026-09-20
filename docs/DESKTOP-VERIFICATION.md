@@ -2,6 +2,12 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Native replay detail follow-up — packaged `cadff72`
+
+Reopened the previously reconciled real session `01a0b217-d175-7540-b225-ac0c58e07c18`. The query panel shows 575,570 Tokens / 14 records / USD 2.0514; the complete replay header shows the same sample total, 10 tools, two patches and three errors. The turn header now also shows three errors, confirming the earlier tool/patch-error badge correction. Expanded a failed command with exit 1 and its local raw JSONL disclosure; both command/output and the underlying custom tool call/output records display. The full raw tab reports 417.3 KB / 110 lines, starts with a bounded preview, and its Show Full JSONL control displays subsequent records in the scrolling view. This sample has no multi-child hierarchy, so it does not close that acceptance item.
+
+The walkthrough found a macOS-specific Chinese/Japanese file-manager label inherited from the reference. Updated those labels for Windows File Explorer; the reveal action itself was already implemented through the native file manager.
+
 ## Native historical price catalog — packaged `cadff72`
 
 Using only the isolated `.dev-data` configuration, added temporary model `tm-history-test` and alias `tm-alias-test` through the GUI JSON editor. Base input/cache-read/cache-write/output rates were 1 / 0.1 / 1.25 / 4; a second entry effective `2026-09-20T08:40:00+08:00` doubled all four rates. Alias search returned exactly the intended model. The native minute control at 08:39 showed the base rates; advancing to 08:40 showed 2 / 0.2 / 2.5 / 8 and the effective timestamp. Expanding history visibly displayed both entries and all four rate categories. Restored and saved the original JSON through the GUI, verified the disk file byte-for-byte against the pre-test content, and cleared the search filter. No temporary model or alias remains in the saved test configuration.
