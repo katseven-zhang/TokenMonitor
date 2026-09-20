@@ -27,7 +27,7 @@ No reference updater or account credentials are reused.
 - [x] Native event collectors for 10 sources; fixed source fixtures and dedup/restart verification.
 - [x] Range boundary, cache token accounting, historical JSON pricing and unknown model checks.
 - [ ] Every agent independently filtered across every detail and export.
-- [ ] Codex full replay and hierarchy verified with fixtures and real GUI.
+- [x] Codex full replay and hierarchy verified with fixtures and real GUI.
 - [x] Service lifecycle, port collisions, single instance, stopped-service cached queries.
 - [ ] GUI theme/layout/DPI inspection, exports, settings persistence.
 - [x] No external requests: source audit plus bounded running-process TCP observation (not a permanent network guarantee).
@@ -39,11 +39,11 @@ Old worktree edits (.gitignore and two untracked review/plan documents) are pre-
 
 - Branch created; complete planning message posted to Room as 9309, implementation updates via messages only.
 - User confirmed user-level service: GUI controls, configurable port, tray residence and login startup, without administrator privileges.
-- Frontend production build and 25 frontend tests pass. Native tests: 37 unit tests plus three integration tests pass, including all 10 adapters, duplicate snapshots and Windows project identity.
+- Frontend production build and 27 frontend tests pass. Native tests: 37 unit tests plus three integration tests pass, including all 10 adapters, duplicate snapshots and Windows project identity. The ten-source test now also checks individual-agent grouped details, paginated events, tool isolation and filtered exports through the GUI's local query entry point.
 - The integration fixture verifies source-specific golden token totals, individual agent/minute filters, duplicate JSONL records, repeat scans, concatenated zstd frames and SQLite WAL updates.
 - Native service tests verify local authentication, single writer, real stop, cached reads after stop, and occupied-port preservation. Actual GUI start/stop/restart and port changes passed; tray behavior and an actual login cycle remain pending.
 - Real local source scan found data for Codex, Claude Code, ZCode, WorkBuddy, Grok, OpenCode and Antigravity; ccmr/dsh/Pi were absent in configured roots. This is discovery evidence, not complete numeric parity validation.
-- Latest packaged implementation is `63e8b9c`: EXE 7,083,520 bytes; ZIP 4,313,388 bytes; six distribution files, no bundled Node. Earlier smaller intermediate executables were not evidence of a complete rendered GUI.
+- Latest packaged implementation is `a5f8943`: EXE 7,082,496 bytes; ZIP 4,313,086 bytes; six distribution files, no bundled Node. Current source/assets fingerprint, build stamp, distributed file hashes and ZIP bytes independently match. Earlier smaller intermediate executables were not evidence of a complete rendered GUI.
 - Initial screenshot access timed out; subsequent native inspection succeeded and exposed a missing production custom-protocol feature. Corrected builds now visibly render populated light/dark views. GUI stop and cached reads work; user-level autostart registration was tested and restored to disabled. DPI and remaining controls still need acceptance; see DESKTOP-VERIFICATION.md.
 - Query summary, replay range summary and exports share the event cache. Full replay retains conversation context and is explicitly labelled separately. Unknown replay/hierarchy prices remain unknown, not zero.
 - Read-only GUI queries, source revision invalidation, partial UTF-8 tail handling, window single-instance signalling, blocked external navigation and local WebView data directory are implemented. Twenty process-tree TCP samples over approximately 50 seconds found no external TCP connections; UDP and packet capture were not tested.

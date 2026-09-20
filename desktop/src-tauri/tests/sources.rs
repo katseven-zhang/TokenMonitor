@@ -6,7 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tokenmonitor_core::{config, db, model::Query, scanner};
+use tokenmonitor_core::{config, db, model::Query, scanner, service};
 
 const TS: i64 = 1_800_000_000_000;
 struct Fixture(PathBuf);
@@ -125,8 +125,16 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
     z.execute("INSERT INTO tool_usage VALUES('z-session','Bash',?1)", [TS])
         .unwrap();
     // Pending, missing and invalid negative usage must not inflate request counts.
-    for (id, value) in [("z-empty", Some(0)), ("z-null", None), ("z-negative", Some(-20))] {
-        z.execute("INSERT INTO model_usage VALUES(?1,'z-session','unknown',?2,?3,?3,?3,?3,?3)", params![id, TS, value]).unwrap();
+    for (id, value) in [
+        ("z-empty", Some(0)),
+        ("z-null", None),
+        ("z-negative", Some(-20)),
+    ] {
+        z.execute(
+            "INSERT INTO model_usage VALUES(?1,'z-session','unknown',?2,?3,?3,?3,?3,?3)",
+            params![id, TS, value],
+        )
+        .unwrap();
     }
     roots.insert("zcode".into(), vec![zpath.display().to_string()]);
 
@@ -206,6 +214,93 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
             query.end = TS + 120_000;
             assert!(db::events(&cache, &query).unwrap().is_empty(), "{agent}");
         }
+    }
+    // Exercise the same local query/export entry point used by the GUI. All sources
+    // coexist, so a missing agent filter would leak nine unrelated records.
+    for (agent, total) in expected {
+        let mut query = Query {
+            start: TS,
+            end: TS + 60_000,
+            agent: Some(agent.into()),
+            model: None,
+            project: None,
+            session: None,
+            search: String::new(),
+            offset_minutes: 480,
+        };
+        let dashboard = service::query_local(&f.0, "dashboard", &json!({"query":query})).unwrap();
+        assert_eq!(dashboard["totals"]["totalTokens"], total, "{agent}");
+        for grouping in [
+            "models", "projects", "sessions", "agents", "days", "months", "series",
+        ] {
+            let sum: i64 = dashboard[grouping]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["totalTokens"].as_i64().unwrap())
+                .sum();
+            assert_eq!(sum, total, "{agent}: {grouping}");
+        }
+        let activities = dashboard["activities"].as_array().unwrap();
+        assert!(
+            activities.iter().all(|a| a["agent"] == agent),
+            "{agent}: activity isolation"
+        );
+        assert_eq!(
+            activities.len(),
+            usize::from(matches!(agent, "claude-code" | "ccmr" | "zcode")),
+            "{agent}: tool fixture"
+        );
+        let page =
+            service::query_local(&f.0, "events", &json!({"query":query,"offset":0,"limit":1}))
+                .unwrap();
+        assert_eq!(page["total"], 1);
+        assert_eq!(page["items"][0]["event"]["agent"], agent);
+        assert_eq!(page["items"][0]["event"]["ts"], TS);
+        let next =
+            service::query_local(&f.0, "events", &json!({"query":query,"offset":1,"limit":1}))
+                .unwrap();
+        assert!(next["items"].as_array().unwrap().is_empty());
+        for format in ["csv", "markdown", "xlsx"] {
+            let path = f.0.join(format!("{agent}.{format}"));
+            let result = service::query_local(
+                &f.0,
+                "export",
+                &json!({"query":query,"format":format,"path":path}),
+            )
+            .unwrap();
+            assert_eq!(result["rows"], 1, "{agent}: {format}");
+            if format == "csv" {
+                let text = fs::read_to_string(&path).unwrap();
+                assert_eq!(text.lines().count(), 2);
+                let row = text.lines().nth(1).unwrap();
+                assert!(row.contains(&format!(",\"{agent}\",")));
+                assert!(row.contains(&format!(",\"{total}\",\"unpriced\",")));
+            } else if format == "markdown" {
+                let text = fs::read_to_string(&path).unwrap();
+                assert_eq!(text.lines().filter(|line| line.starts_with('|')).count(), 3);
+                assert!(text.contains(&format!("|{agent}|")));
+                assert!(text.contains(&format!("|{total}|unpriced|")));
+            } else {
+                // Native Save As tests independently inspect XLSX cell contents;
+                // here verify each agent reaches the writer with one filtered row.
+                assert!(fs::read(&path).unwrap().starts_with(b"PK"));
+            }
+        }
+        query.start = TS + 60_000;
+        query.end = TS + 120_000;
+        let empty = service::query_local(&f.0, "dashboard", &json!({"query":query})).unwrap();
+        assert_eq!(empty["totals"]["totalTokens"], 0);
+        assert!(empty["activities"].as_array().unwrap().is_empty());
+        let path = f.0.join(format!("{agent}.csv"));
+        let result = service::query_local(
+            &f.0,
+            "export",
+            &json!({"query":query,"format":"csv","path":path}),
+        )
+        .unwrap();
+        assert_eq!(result["rows"], 0);
+        assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
     }
     // Read changes committed only in WAL and replace existing records without double counting.
     z.execute("UPDATE model_usage SET output_tokens=70 WHERE id='z-1'", [])

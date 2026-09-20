@@ -2,6 +2,17 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Current audit — 2026-09-20, package `a5f8943`
+
+This section is the current status. Older sections retain their historical results and pending statements; they are not the current backlog.
+
+- Independently recomputed the package fingerprint from current production source/assets and matched the manifest and version-2 build stamp. The release binary, distributed executable, all five manifest file hashes/sizes and every ZIP entry match byte-for-byte. Both output directory and ZIP contain exactly six whitelisted files. EXE: 7,082,496 bytes; ZIP: 4,313,086 bytes. No rebuild is needed for test/document-only changes.
+- Native Windows project drilldown passed: the `D:\claw\agentchatroom` group shows 866,626,437 tokens / 4,193 records for September 13 08:58 through September 20 08:58. Clicking its name opens sessions with canonical filter `d:/claw/agentchatroom`; the unchanged minute range and filtered session list are visible. Switching to the dashboard preserves that filter and displays 866.63M tokens / 4,193 records, one project and 26 sessions.
+- Extended the ten-source integration fixture through the GUI's local service query entry point. Each individual Agent has correct totals across model/project/session/agent/day/month/series groupings, isolated tool activity, one paginated usage event and an empty next page. CSV and Markdown contents identify only the selected Agent and its golden token total; all ten XLSX writes receive one filtered row and produce ZIP containers. XLSX cell-level parity remains covered by the separate real native export inspection, not by the container signature alone. Moving to the adjacent empty minute produces empty totals/activity and overwrites CSV with only its header.
+- Full native test suite passes: 37 unit tests and three integration tests, including the strengthened ten-source test. Latest frontend evidence remains 27 tests and production TypeScript/Vite build from the unchanged production source.
+- Completed native checks include light/dark rendering, 951×651 navigation, application zoom, minute/day/month drilldown, model component pricing, valid/invalid price JSON, historical effective prices/alias search, replay failures/raw logs/patches, real child hierarchy, service port/restart/stop, cached reads, three Save As formats, close-to-background and single-instance restoration.
+- Still open: direct notification-area tray menu interaction; OS-level DPI/text scaling inspection; large-source session-table performance acceptance; final local quota rollover presentation review. Current-user startup registration and background entry point are verified, but no actual logout/login cycle was performed. Three unavailable local sources (ccmr/dsh/Pi) retain fixture-only evidence. These limits are not silently treated as passed.
+
 ## Application zoom — packaged `a5f8943`
 
 Enabled Tauri's Windows WebView2 zoom hotkeys (disabled by default). The native GUI visibly enlarged at three successive Ctrl-plus steps; at the largest tested step it switched the dashboard to one column, wrapped sidebar labels and retained independent Agent navigation scrolling plus accessible fixed settings/service controls. The settings form's labels, inputs and local paths remained readable without clipping. Ctrl-zero restored the initial layout. This is application zoom evidence, not an OS DPI change or a claim about every monitor configuration. The package was overwritten successfully: EXE 7,082,496 bytes and ZIP 4,313,086 bytes, with README keyboard instructions.
@@ -38,9 +49,9 @@ Code review found background launch initially created a visible window before hi
 
 The `cadff72` release rebuilt successfully: EXE 7,082,496 bytes, ZIP 4,312,786 bytes. Launching `--background` with a hidden shell launch produced GUI PID 53740, service PID 58020 and a listener owned by that service at `127.0.0.1:18787`; the native window inventory contained no visible application window. Ordinary relaunch exited and restored the original application with a populated light dashboard. The hidden-launch test verifies steady-state visibility and service readiness, while the builder code establishes visibility before creation; no high-speed capture of startup frames or actual login-cycle test is claimed.
 
-## Latest acceptance snapshot — packaged `63e8b9c`
+## Historical acceptance snapshot — packaged `63e8b9c`
 
-This snapshot supersedes older pending entries in the chronological record below where explicitly covered.
+This was the acceptance snapshot at `63e8b9c`; the current audit above supersedes it.
 
 - 25 frontend tests, production TypeScript/Vite build, 37 native unit tests and three native integration tests pass. The latest package contains a 7,083,520-byte EXE and a 4,313,388-byte ZIP, without Node.
 - All/individual-Agent 5h and 7d cache/pricing comparisons pass (22 queries). Real Windows project normalization produces one group and identical drilldown totals; component costs sum to known total cost.
