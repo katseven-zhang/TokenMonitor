@@ -54,6 +54,9 @@ No final completion claim until every remaining acceptance cell has concrete evi
 
 ## Native service controls and patch-count follow-up
 
+- Packaging now compares source fingerprints before frontend compilation and source/assets before native compilation against final inputs; changed inputs refuse a build stamp/package. SkipBuild requires stamp version 2. A stable build completed at `46b0b8a`: EXE 7,080,448 bytes, ZIP 4,311,590 bytes. Independent validation matched every manifest file's length/SHA-256 and every ZIP entry byte-for-byte, with exactly six allowed files. A temporary source probe caused SkipBuild to reject the stale inputs and was removed afterward; no during-build mutation experiment was run.
+- Native model comparison verification now shows composition bars, usage shares, cache-hit rate and effective unit prices. Clicking effective-price sort produced descending $1.5826 / $0.7737 / $0.3709 / $0.0324 followed by unknown-price rows; incomplete whole-query pricing displays no cost shares. This proves the model-page interaction in the current real dataset; broader project/historical-price verification remains separately tracked.
+
 - Model/project comparison tables now add whole-query usage/cost shares, token composition bars, cache-hit rate, historical effective USD per million tokens and last activity. Ratios include cache-write input, exclude duplicate reasoning, and do not manufacture shares/rates from unknown or zero denominators. Derived numeric fields support sorting with unknowns last. Twenty-four frontend tests and production build pass; these fields still await native packaging/visual verification.
 - The sidebar fix was verified in the native `4facd0a` package at 951×651: agent navigation exposes its own scrollbar, service/settings remain visible at the bottom, and clicking settings opens the full configuration form. This closes the observed short-window navigation defect; OS DPI acceptance remains separate.
 
