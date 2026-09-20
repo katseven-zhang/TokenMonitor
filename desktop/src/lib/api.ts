@@ -7,7 +7,7 @@ export const fetchSessionDetail = (path: string, query?: Query) => request<Sessi
 export const revealInFileManager = (path: string) => request<void>('reveal', { path });
 export type Tokens = { input:number; cached:number; cacheWrite:number; output:number; reasoning:number };
 export type Query = { start:number; end:number; agent:string|null; model:string|null; project:string|null; session:string|null; search:string; offsetMinutes:number };
-export type Summary = { key:string; label:string; tokens:Tokens; totalTokens:number; knownCostUsd:number; costUsd:number|null; unpricedEvents:number; events:number; firstTs:number; lastTs:number; agent:string; session:string; path:string };
+export type Summary = { key:string; label:string; tokens:Tokens; totalTokens:number; knownCostUsd:number; knownCostByComponent?:[number,number,number,number]; costUsd:number|null; unpricedEvents:number; events:number; firstTs:number; lastTs:number; agent:string; session:string; path:string };
 export type ScanStatus = {agent:string; state:string; files:number; parsed:number; reused:number; events:number; malformedLines:number; errors:string[]; updatedAt:number; durationMs:number};
 export type Activity = {id:string; agent:string; session:string; ts:number; name:string; path:string; line:number};
 export type Dashboard = {query:Query; totals:Summary; models:Summary[]; projects:Summary[]; sessions:Summary[]; agents:Summary[]; days:Summary[]; months:Summary[]; series:Summary[]; bucketMs:number; tools:Record<string,number>; activities:Activity[]; quotas:QuotaObservation[]; quotaHistory:{total:number;items:QuotaObservation[]}; status:ScanStatus[]; availableModels:string[]; availableProjects:string[]; eventCount:number};

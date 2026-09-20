@@ -16,6 +16,7 @@ pub struct Summary {
     pub tokens: Tokens,
     pub total_tokens: i64,
     pub known_cost_usd: f64,
+    pub known_cost_by_component: [f64;4],
     pub cost_usd: Option<f64>,
     pub unpriced_events: usize,
     pub events: usize,
@@ -36,8 +37,11 @@ impl Summary {
             self.first_ts.min(e.ts)
         };
         self.last_ts = self.last_ts.max(e.ts);
-        match p.cost(e) {
-            Some(c) => self.known_cost_usd += c,
+        match p.cost_parts(e) {
+            Some(parts) => {
+                self.known_cost_usd += parts.iter().sum::<f64>();
+                for (sum,cost) in self.known_cost_by_component.iter_mut().zip(parts) { *sum+=cost; }
+            },
             None => self.unpriced_events += 1,
         };
         self.cost_usd = if self.unpriced_events == 0 {

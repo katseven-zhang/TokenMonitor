@@ -7,6 +7,10 @@ export function cacheHitRate(row:Summary):number|null {
 export function effectivePrice(row:Summary):number|null {
   return row.costUsd!==null&&row.totalTokens>0?row.costUsd/row.totalTokens*1_000_000:null;
 }
+export function componentPrices(row:Summary):(number|null)[] {
+  const tokens=[row.tokens.input,row.tokens.cached,row.tokens.cacheWrite,row.tokens.output];
+  return tokens.map((count,index)=>row.costUsd!==null&&row.knownCostByComponent&&count>0?row.knownCostByComponent[index]/count*1_000_000:null);
+}
 export function comparisonTotals(rows:Summary[]) {
   return {
     tokens:rows.reduce((sum,row)=>sum+row.totalTokens,0),

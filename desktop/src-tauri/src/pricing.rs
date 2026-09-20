@@ -55,6 +55,10 @@ impl Prices {
         Ok(p)
     }
     pub fn cost(&self, e: &Event) -> Option<f64> {
+        self.cost_parts(e).map(|parts|parts.iter().sum())
+    }
+    /// USD components in input, cache-read, cache-write, output order.
+    pub fn cost_parts(&self, e: &Event) -> Option<[f64;4]> {
         let model = self.aliases.get(&e.model).unwrap_or(&e.model);
         let rate = self
             .models
@@ -63,13 +67,10 @@ impl Prices {
             .filter(|r| rate_time(r).is_ok_and(|t| t <= e.ts))
             .max_by_key(|r| rate_time(r).unwrap_or(0))?;
         let t = &e.tokens;
-        Some(
-            (t.input as f64 * rate.input
-                + t.cached as f64 * rate.cached
-                + t.cache_write as f64 * rate.cache_write
-                + t.output as f64 * rate.output)
-                / 1_000_000.0,
-        )
+        Some([t.input as f64*rate.input/1_000_000.0,
+            t.cached as f64*rate.cached/1_000_000.0,
+            t.cache_write as f64*rate.cache_write/1_000_000.0,
+            t.output as f64*rate.output/1_000_000.0])
     }
 }
 fn rate_time(r: &Rate) -> Result<i64, String> {
@@ -105,8 +106,15 @@ mod tests {
             line: 1,
         };
         assert_eq!(p.cost(&e), Some(6.1));
+        assert_eq!(p.cost_parts(&e),Some([1.0,0.1,2.0,3.0]));
+        let first=e.clone();
         e.ts = 1_800_000_000_000;
         assert_eq!(p.cost(&e), Some(12.2));
+        let summary=crate::query::summarize(&[first,e.clone()],&p);
+        for (actual,expected) in summary.known_cost_by_component.iter().zip([3.0,0.3,6.0,9.0]) {
+            assert!((actual-expected).abs()<1e-10);
+        }
+        assert!((summary.known_cost_usd-18.3).abs()<1e-10);
         e.model = "unknown".into();
         assert_eq!(p.cost(&e), None);
     }
