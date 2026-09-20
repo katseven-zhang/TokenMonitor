@@ -26,7 +26,7 @@ No reference updater or account credentials are reused.
 
 - [x] Native event collectors for 10 sources; fixed source fixtures and dedup/restart verification.
 - [x] Range boundary, cache token accounting, historical JSON pricing and unknown model checks.
-- [ ] Every agent independently filtered across every detail and export.
+- [x] Every agent independently filtered across grouped details, usage pages, activity pages and exports (all ten fixtures; seven sources present in the real local cache).
 - [x] Codex full replay and hierarchy verified with fixtures and real GUI.
 - [x] Service lifecycle, port collisions, single instance, stopped-service cached queries.
 - [ ] GUI theme/layout/DPI inspection, exports, settings persistence.
@@ -35,19 +35,21 @@ No reference updater or account credentials are reused.
 
 Old worktree edits (.gitignore and two untracked review/plan documents) are pre-existing and not refactor work.
 
-## Current verification evidence (2026-09-20, work in progress)
+## Current verification evidence (2026-09-20, implementation ready; desktop acceptance open)
 
 - Branch created; complete planning message posted to Room as 9309, implementation updates via messages only.
 - User confirmed user-level service: GUI controls, configurable port, tray residence and login startup, without administrator privileges.
-- Frontend production build and 27 frontend tests pass. Native tests: 37 unit tests plus three integration tests pass, including all 10 adapters, duplicate snapshots and Windows project identity. The ten-source test now also checks individual-agent grouped details, paginated events, tool isolation and filtered exports through the GUI's local query entry point.
+- Frontend production build and 32 frontend tests pass. Native tests: 37 unit tests plus four integration tests pass, including all 10 adapters, duplicate snapshots, Windows project identity and activity pagination. The ten-source test checks individual-agent grouped details, paginated events, tool isolation and filtered exports through the GUI's local query entry point.
 - The integration fixture verifies source-specific golden token totals, individual agent/minute filters, duplicate JSONL records, repeat scans, concatenated zstd frames and SQLite WAL updates.
-- Native service tests verify local authentication, single writer, real stop, cached reads after stop, and occupied-port preservation. Actual GUI start/stop/restart and port changes passed; tray behavior and an actual login cycle remain pending.
+- Native service tests verify local authentication, single writer, real stop, cached reads after stop, and occupied-port preservation. Actual GUI start/stop/restart and port changes passed. Close-to-background and single-instance restoration passed; direct tray menu interactions await user-assisted verification because the current UI tool exposes no notification-area window. Current-user startup registration and the background entry point passed; an actual logout/login cycle was not performed.
 - Real local source scan found data for Codex, Claude Code, ZCode, WorkBuddy, Grok, OpenCode and Antigravity; ccmr/dsh/Pi were absent in configured roots. This is discovery evidence, not complete numeric parity validation.
-- Latest packaged implementation is `a5f8943`: EXE 7,082,496 bytes; ZIP 4,313,086 bytes; six distribution files, no bundled Node. Current source/assets fingerprint, build stamp, distributed file hashes and ZIP bytes independently match. Earlier smaller intermediate executables were not evidence of a complete rendered GUI.
-- Initial screenshot access timed out; subsequent native inspection succeeded and exposed a missing production custom-protocol feature. Corrected builds now visibly render populated light/dark views. GUI stop and cached reads work; user-level autostart registration was tested and restored to disabled. DPI and remaining controls still need acceptance; see DESKTOP-VERIFICATION.md.
+- Latest packaged implementation is `0d6f4c2`: EXE 7,105,536 bytes; ZIP 4,324,623 bytes; six distribution files, no bundled Node. Stable-input build completed; distributed manifest hashes and ZIP bytes independently match. Earlier smaller intermediate executables were not evidence of a complete rendered GUI.
+- Native light/dark views, long labels, 951×651 navigation, application zoom, settings and exports passed. OS-level DPI/text scaling remains unverified; application zoom is not presented as OS DPI coverage. Earlier custom-protocol and loading-state defects were fixed and reverified; see DESKTOP-VERIFICATION.md.
 - Query summary, replay range summary and exports share the event cache. Full replay retains conversation context and is explicitly labelled separately. Unknown replay/hierarchy prices remain unknown, not zero.
 - Read-only GUI queries, source revision invalidation, partial UTF-8 tail handling, window single-instance signalling, blocked external navigation and local WebView data directory are implemented. Twenty process-tree TCP samples over approximately 50 seconds found no external TCP connections; UDP and packet capture were not tested.
 - Real read-only checks for all Agents and each individual Agent across 5h/7d passed 22 independent Decimal-pricing/cache comparisons. Three absent sources (ccmr/dsh/Pi) have fixture evidence only.
-- Native model classification expansion shows unknown values as dashes and known historical weighted input/cache/output prices. Light settings and inline invalid-JSON/negative-rate errors passed; rejected edits left the saved price file unchanged, and the original editor contents were restored and saved.
+- Native model classification expansion shows unknown values as dashes and known historical weighted input/cache/output prices. Light settings and inline invalid-JSON/negative-rate errors passed; rejected edits left the saved price file unchanged. Alias search and exact-minute historical-price changes passed, with temporary entries removed and original bytes restored.
+- Real Codex parent/child replay, failures, patches, raw logs and six replay/cache samples passed. Day/month drilldown preserves the selected minute boundaries. Three real native exports match the selected session's rows, tokens and prices.
+- A measured 30-day query with about 54,000 events and 646 sessions exposed a large activity payload. Separate activity pagination plus buffered loopback response writes reduced observed RPC time from 19.8s to 1.6s and JSON from 17.9MB to 1.1MB (two records were added between measurements). Full activity aggregates remain; first/last-page navigation and filter reset passed natively.
 
-No final release or full reference-feature parity is claimed by these intermediate checks.
+No final completion claim is made while desktop acceptance remains open. Online reference features are deliberately excluded by the user's pure-local requirement, not treated as unimplemented local features.
