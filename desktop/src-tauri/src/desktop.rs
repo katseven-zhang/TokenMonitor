@@ -76,7 +76,7 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
             }
             Ok(json!({"path":path}))
         }
-        "dashboard" | "events" | "replay" | "export" => service::query_local(&root, method, &args),
+        "dashboard" | "events" | "activities" | "replay" | "export" => service::query_local(&root, method, &args),
         _ => Err(format!("未知本地操作: {method}")),
     }
 }

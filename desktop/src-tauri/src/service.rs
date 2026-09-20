@@ -3,7 +3,7 @@ use crate::{config, db, model::Query, pricing::Prices, query, scanner};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Write},
     net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
@@ -39,6 +39,12 @@ pub fn query_local(root: &Path, method: &str, args: &Value) -> Result<Value, Str
             &db,
             &serde_json::from_value(args["query"].clone()).map_err(|e| e.to_string())?,
             &prices(root)?,
+            args["offset"].as_u64().unwrap_or(0) as usize,
+            args["limit"].as_u64().unwrap_or(100) as usize,
+        ),
+        "activities" => query::activity_page(
+            &db,
+            &serde_json::from_value(args["query"].clone()).map_err(|e| e.to_string())?,
             args["offset"].as_u64().unwrap_or(0) as usize,
             args["limit"].as_u64().unwrap_or(100) as usize,
         ),
@@ -356,7 +362,13 @@ pub fn run(root: &Path) -> Result<(), String> {
                         Ok(v) => json!({"ok":true,"result":v}),
                         Err(e) => json!({"ok":false,"error":e}),
                     };
-                    let _ = write!(stream, "{response}");
+                    // JSON Display emits many small writes. Buffer them so large
+                    // local responses do not cause one socket write per JSON token.
+                    {
+                        let mut writer = BufWriter::new(&mut stream);
+                        let _ = write!(writer, "{response}");
+                        let _ = writer.flush();
+                    }
                     let _ = stream.shutdown(Shutdown::Both);
                 });
             }

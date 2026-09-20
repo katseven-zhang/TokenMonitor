@@ -173,8 +173,25 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         .collect::<Result<Vec<_>, _>>()?;
     let quota_history = quota_history(db, q)?;
     Ok(
-        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":days.into_values().collect::<Vec<_>>(),"months":months.into_values().collect::<Vec<_>>(),"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activities":activities,"quotas":quotas,"quotaHistory":quota_history,"status":status,"availableModels":all_models,"availableProjects":all_projects,"eventCount":events.len()}),
+        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":days.into_values().collect::<Vec<_>>(),"months":months.into_values().collect::<Vec<_>>(),"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activityCount":activities.len(),"quotas":quotas,"quotaHistory":quota_history,"status":status,"availableModels":all_models,"availableProjects":all_projects,"eventCount":events.len()}),
     )
+}
+pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) -> Result<Value, String> {
+    q.validate()?;
+    let sessions = if q.model.is_some() || q.project.is_some() || !q.search.is_empty() {
+        Some(db::events(db, q)?.into_iter().map(|e| (e.agent, e.session)).collect::<BTreeSet<_>>())
+    } else {
+        None
+    };
+    let mut activities = db::activities(db, q)?;
+    if let Some(sessions) = sessions {
+        activities.retain(|a| sessions.contains(&(a.agent.clone(), a.session.clone())));
+    }
+    // Stable newest-first pagination, including records sharing the same timestamp.
+    activities.sort_by(|a,b| b.ts.cmp(&a.ts).then(a.agent.cmp(&b.agent)).then(a.id.cmp(&b.id)));
+    let total = activities.len();
+    let items = activities.into_iter().skip(offset).take(limit.clamp(1, 1000)).collect::<Vec<_>>();
+    Ok(json!({"total":total,"items":items}))
 }
 fn quota_history(db: &Connection, q: &Query) -> Result<Value, String> {
     // Archive copies of the same observation do not represent new observations.

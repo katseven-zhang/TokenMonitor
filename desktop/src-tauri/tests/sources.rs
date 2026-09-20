@@ -241,7 +241,14 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
                 .sum();
             assert_eq!(sum, total, "{agent}: {grouping}");
         }
-        let activities = dashboard["activities"].as_array().unwrap();
+        let activity_page = service::query_local(
+            &f.0,
+            "activities",
+            &json!({"query":query,"offset":0,"limit":100}),
+        )
+        .unwrap();
+        let activities = activity_page["items"].as_array().unwrap();
+        assert_eq!(dashboard["activityCount"], activity_page["total"]);
         assert!(
             activities.iter().all(|a| a["agent"] == agent),
             "{agent}: activity isolation"
@@ -291,7 +298,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         query.end = TS + 120_000;
         let empty = service::query_local(&f.0, "dashboard", &json!({"query":query})).unwrap();
         assert_eq!(empty["totals"]["totalTokens"], 0);
-        assert!(empty["activities"].as_array().unwrap().is_empty());
+        assert_eq!(empty["activityCount"], 0);
         let path = f.0.join(format!("{agent}.csv"));
         let result = service::query_local(
             &f.0,

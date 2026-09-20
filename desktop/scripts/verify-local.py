@@ -68,7 +68,10 @@ for minutes in (300, 10080):
             assert sum(row['totalTokens'] for row in dashboard[grouping]) == expected_total, (agent, minutes, grouping)
         expected_buckets = (300,) if minutes == 300 else (168,169)  # partial boundary hours
         assert len(dashboard['series']) in expected_buckets
-        assert all(query['start'] <= item['ts'] < end for item in dashboard['activities'])
+        activities = rpc('activities', dict(query=query, offset=0, limit=100))
+        assert activities['total'] == dashboard['activityCount'] == sum(dashboard['tools'].values())
+        assert len(activities['items']) == min(100, activities['total'])
+        assert all(query['start'] <= item['ts'] < end and (agent is None or item['agent'] == agent) for item in activities['items'])
         evidence.append(dict(agent=agent or 'all',minutes=minutes,events=len(rows),tokens=expected_total,unknownPrices=unknown,queryMs=elapsed))
 cache.close()
 print(json.dumps(dict(checks=len(evidence),windowsEnd=end,results=evidence),ensure_ascii=False,indent=2))
