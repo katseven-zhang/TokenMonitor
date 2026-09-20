@@ -158,10 +158,11 @@ pub fn events(db: &Connection, q: &Query) -> Result<Vec<Event>, String> {
     let search = q.search.to_lowercase();
     let mut without_search = q.clone();
     without_search.search.clear();
-    let mut stmt=db.prepare("SELECT data FROM events WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR project=?5) AND (?6 IS NULL OR session=?6) ORDER BY ts,id").map_err(|e|e.to_string())?;
+    let windows_project=q.project.as_deref().and_then(crate::model::windows_project_key).map(|key|key.trim_end_matches('/').to_string());
+    let mut stmt=db.prepare("SELECT data FROM events WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR project=?5 OR (?7 IS NOT NULL AND lower(rtrim(replace(project,char(92),'/'),'/'))=?7)) AND (?6 IS NULL OR session=?6) ORDER BY ts,id").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(
-            params![q.start, q.end, q.agent, q.model, q.project, q.session],
+            params![q.start, q.end, q.agent, q.model, q.project, q.session,windows_project],
             |r| r.get::<_, String>(0),
         )
         .map_err(|e| e.to_string())?;

@@ -97,11 +97,24 @@ impl Query {
             && e.ts < self.end
             && self.agent.as_ref().is_none_or(|x| x == &e.agent)
             && self.model.as_ref().is_none_or(|x| x == &e.model)
-            && self.project.as_ref().is_none_or(|x| x == &e.project)
+            && self.project.as_ref().is_none_or(|x| project_key(x) == project_key(&e.project))
             && self.session.as_ref().is_none_or(|x| x == &e.session)
             && (self.search.is_empty()
                 || format!("{} {} {}", e.model, e.project, e.session)
                     .to_lowercase()
                     .contains(&self.search.to_lowercase()))
     }
+}
+
+/// Windows drive/UNC paths share grouping identity across separators and ASCII
+/// case. Other project identifiers (including POSIX paths) stay case-sensitive.
+pub fn windows_project_key(value: &str) -> Option<String> {
+    let bytes=value.as_bytes();
+    let drive=bytes.len()>=3 && bytes[0].is_ascii_alphabetic() && bytes[1]==b':' && matches!(bytes[2],b'/'|b'\\');
+    if !drive && !value.starts_with("\\\\") && !value.starts_with("//") { return None; }
+    let normalized=value.replace('\\',"/").to_ascii_lowercase();
+    Some(if drive && normalized.len()==3 { normalized } else { normalized.trim_end_matches('/').to_string() })
+}
+pub fn project_key(value: &str) -> String {
+    windows_project_key(value).unwrap_or_else(||value.to_string())
 }

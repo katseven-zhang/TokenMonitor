@@ -105,7 +105,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         group(&mut models, &e.model, &e.model, e, prices);
         group(
             &mut projects,
-            &e.project,
+            &crate::model::project_key(&e.project),
             if e.project.is_empty() {
                 "未记录项目"
             } else {
@@ -141,7 +141,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
             prices,
         );
         all_models.insert(e.model.clone());
-        all_projects.insert(e.project.clone());
+        all_projects.insert(crate::model::project_key(&e.project));
     }
     let activities = db::activities(db, q)?
         .into_iter()
