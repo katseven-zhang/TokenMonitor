@@ -9,7 +9,7 @@ describe('query response identity', () => {
     expect(sameQuery(base,reversed)).toBe(true);
   });
   it('rejects stale results after every supported filter change', () => {
-    const changes: Partial<Query>[] = [{start:0},{end:180_000},{agent:'zcode'},{model:'m'},{project:'p'},{session:'s'},{search:'title'},{offsetMinutes:0}];
+    const changes: Partial<Query>[] = [{start:0},{end:180_000},{agent:'zcode'},{model:'m'},{project:'p'},{session:'s'},{search:'title'},{offsetMinutes:0},{timeZone:'America/New_York'}];
     for(const change of changes) expect(sameQuery(base,{...base,...change})).toBe(false);
   });
 });

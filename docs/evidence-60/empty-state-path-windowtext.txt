@@ -1,4 +1,4 @@
-﻿端口：
+端口：
 ----
 保存端口
 ----
@@ -8,6 +8,6 @@
 ----
 打开面板
 ----
-状态：已停止    面板：http://127.0.0.1:8787    数据：C:\Users\ZWX\AppData\Local\Temp\gui60-empty-primary
+状态：已停止    面板：http://127.0.0.1:8787    数据：C:\Users\ExampleUser\AppData\Local\Temp\gui60-empty-primary
 ----
 输出日志（最近 400 行，自动刷新）：

@@ -12,6 +12,8 @@ fn newer_observation_wins_over_lexicographically_first_archive() {
     let rows=db::events(&cache,&query).unwrap();
     assert_eq!(rows.len(),1);
     assert_eq!(rows[0].tokens.output,40);
+    let mut narrow=query.clone();narrow.start=60_000;narrow.end=61_000;
+    assert_eq!(db::event_page(&cache,&narrow,0,100).unwrap().0,0,"a replaced snapshot inside the range must not reappear when its winner is outside");
     // Upgrade an existing cache using the former path-first view atomically.
     cache.execute_batch("DROP VIEW events; CREATE VIEW events AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_events) WHERE rank=1; UPDATE cache_metadata SET value='1' WHERE key='view_revision';").unwrap();
     assert_eq!(db::events(&cache,&query).unwrap()[0].tokens.output,10);

@@ -36,6 +36,8 @@ jobs:
         run: npm run build --prefix desktop
       - name: Desktop Rust tests
         run: cargo test --offline --locked --tests --manifest-path desktop/src-tauri/Cargo.toml
+      - name: 100k and 1m indexed paging regression
+        run: cargo test --offline --locked --manifest-path desktop/src-tauri/Cargo.toml --test query_scale -- --ignored --nocapture
       - name: Build and package embedded desktop
         run: pwsh -File desktop/scripts/build-windows.ps1
       - name: Verify package and licenses

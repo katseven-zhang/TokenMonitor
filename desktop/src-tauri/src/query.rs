@@ -209,20 +209,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
     )
 }
 pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) -> Result<Value, String> {
-    q.validate()?;
-    let sessions = if q.model.is_some() || q.project.is_some() || !q.search.is_empty() {
-        Some(db::events(db, q)?.into_iter().map(|e| (e.agent, e.session)).collect::<BTreeSet<_>>())
-    } else {
-        None
-    };
-    let mut activities = db::activities(db, q)?;
-    if let Some(sessions) = sessions {
-        activities.retain(|a| sessions.contains(&(a.agent.clone(), a.session.clone())));
-    }
-    // Stable newest-first pagination, including records sharing the same timestamp.
-    activities.sort_by(|a,b| b.ts.cmp(&a.ts).then(a.agent.cmp(&b.agent)).then(a.id.cmp(&b.id)));
-    let total = activities.len();
-    let items = activities.into_iter().skip(offset).take(limit.clamp(1, 1000)).collect::<Vec<_>>();
+    let (total,items)=db::activity_page(db,q,offset,limit)?;
     Ok(json!({"total":total,"items":items}))
 }
 fn quota_history(db: &Connection, q: &Query) -> Result<Value, String> {
@@ -244,15 +231,9 @@ pub fn event_page(
     offset: usize,
     limit: usize,
 ) -> Result<Value, String> {
-    let all = db::events(db, q)?;
-    let items = all
-        .iter()
-        .rev()
-        .skip(offset)
-        .take(limit.min(500))
-        .map(|e| json!({"event":e,"costUSD":p.cost(e)}))
-        .collect::<Vec<_>>();
-    Ok(json!({"total":all.len(),"items":items}))
+    let (total,events)=db::event_page(db,q,offset,limit)?;
+    let items=events.iter().map(|e|json!({"event":e,"costUSD":p.cost(e)})).collect::<Vec<_>>();
+    Ok(json!({"total":total,"items":items}))
 }
 
 #[cfg(test)]
