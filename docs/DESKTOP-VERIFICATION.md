@@ -2,6 +2,10 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Application zoom — packaged `a5f8943`
+
+Enabled Tauri's Windows WebView2 zoom hotkeys (disabled by default). The native GUI visibly enlarged at three successive Ctrl-plus steps; at the largest tested step it switched the dashboard to one column, wrapped sidebar labels and retained independent Agent navigation scrolling plus accessible fixed settings/service controls. The settings form's labels, inputs and local paths remained readable without clipping. Ctrl-zero restored the initial layout. This is application zoom evidence, not an OS DPI change or a claim about every monitor configuration. The package was overwritten successfully: EXE 7,082,496 bytes and ZIP 4,313,086 bytes, with README keyboard instructions.
+
 ## Native replay detail follow-up — packaged `cadff72`
 
 Reopened the previously reconciled real session `01a0b217-d175-7540-b225-ac0c58e07c18`. The query panel shows 575,570 Tokens / 14 records / USD 2.0514; the complete replay header shows the same sample total, 10 tools, two patches and three errors. The turn header now also shows three errors, confirming the earlier tool/patch-error badge correction. Expanded a failed command with exit 1 and its local raw JSONL disclosure; both command/output and the underlying custom tool call/output records display. The full raw tab reports 417.3 KB / 110 lines, starts with a bounded preview, and its Show Full JSONL control displays subsequent records in the scrolling view. This sample has no multi-child hierarchy, so it does not close that acceptance item.
