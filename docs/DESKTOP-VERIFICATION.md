@@ -2,6 +2,19 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+## Activity pagination and RPC performance — `b194c5d` / `0d6f4c2`
+
+The performance/accessibility issue recorded below is fixed for the measured dataset. Dashboard responses retain full tool counts and activity count but no longer serialize all activity records. A separate local `activities` method serves stable newest-first pages, preserving minute/Agent/session filters and session-level model/project/search attribution. The native page exposes first/previous/next/last navigation. Tool summaries are expandable, and the fixed-height activity region prevents loading from collapsing the document and moving the viewport.
+
+- Native tests: 37 unit and four integration tests pass. The new fixture traverses 625 records across seven pages for model, Windows-project, session and title-search filters, checks equal-timestamp deterministic order, no duplicates/missing IDs, exclusive-end/inclusive-start boundaries and full tool aggregates. All ten source fixtures use the new query method and agree with dashboard activity counts.
+- Frontend: 32 tests pass and TypeScript/Vite production build succeeds. Existing latest-loader regressions cover coalescing slow refreshes and suppressing superseded results; the activity component uses that loader and resets its state on complete query identity changes.
+- Real 30-day RPC query, same August 21 09:12–September 20 09:12 interval: 1,604 ms and 1,117,114 serialized JSON bytes, versus prior 19,793 ms / 17,923,925 bytes. This is an observational comparison, not a frozen-data benchmark: scanning added two usage records and two activities between runs. New totals: 53,944 events, 10,341,723,391 tokens, 646 sessions, 53,608 activities.
+- Real activity API offsets 0 / 500 / 53,600 return 100 / 100 / 8 rows in 861 / 821 / 870 ms, with approximately 33 KB per full page. All 22 historical 5h/7d independent cache/Decimal comparisons pass with additional paged-activity count, range and Agent assertions.
+- Native final package: seven-day tools page shows 13,079 calls / 131 pages. Last-page navigation displays September 13 records; the loading transition keeps the heading and controls stationary and hides old rows. Changing to the five-hour preset resets from page 131 to page 1 of 7 with 637 calls and the correct new minute range.
+- Fixed overwritten package `0d6f4c2`: EXE 7,105,536 bytes; ZIP 4,324,623 bytes. No runtime Node was added. Backend currently filters and sorts cached activity records before selecting a page; this removes full-payload/UI growth but is not a claim of constant-memory database pagination.
+
+Direct system-tray interaction and OS-level DPI acceptance remain separate open checks. Actual logout/login remains unperformed; registration and background entry point have their existing evidence.
+
 ## Current audit — 2026-09-20, package `a5f8943`
 
 This section is the current status. Older sections retain their historical results and pending statements; they are not the current backlog.
