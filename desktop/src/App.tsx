@@ -1,4 +1,4 @@
-import { useCallback,useEffect,useState } from 'react';
+import { useCallback,useEffect,useLayoutEffect,useState } from 'react';
 import { Activity,ArrowDownToLine,BarChart3,ChevronRight,Clock3,Coins,Cpu,Database,Folder,HardDrive,Layers,Loader2,Moon,Play,RefreshCw,Search,Settings2,ShieldCheck,Square,Sun,Terminal,X } from 'lucide-react';
 import { UsageTrend } from './components/usage-trend';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -29,6 +29,7 @@ export default function App(){
  const page=pageResponse&&sameQuery(pageResponse.query,q)&&pageResponse.offset===offset?pageResponse.result:null;
  const [priceError,setPriceError]=useState('');
  const [startText,setStartText]=useState(localInput(q.start)),[endText,setEndText]=useState(localInput(q.end));
+ useLayoutEffect(()=>{window.scrollTo({top:0,left:0,behavior:'instant'});},[tab,q.agent]);
  useEffect(()=>{const m=matchMedia('(prefers-color-scheme: dark)');const apply=()=>{document.documentElement.classList.toggle('dark',theme==='dark'||(theme==='system'&&m.matches));document.documentElement.style.colorScheme=theme==='system'?(m.matches?'dark':'light'):theme;};apply();m.addEventListener('change',apply);localStorage.setItem('tm-theme',theme);return()=>m.removeEventListener('change',apply);},[theme]);
  const [loader]=useState(()=>latestLoader<Query,Dashboard>(sameQuery,query=>request<Dashboard>('dashboard',{query}),setData,e=>setError(String(e))));
  const refresh=useCallback((force=false)=>loader.run(q,force),[q,loader]);
