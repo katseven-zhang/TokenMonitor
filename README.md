@@ -66,6 +66,8 @@ TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用
 
 ### 运行已构建版本
 
+从 [GitHub Releases](https://github.com/katseven-zhang/TokenMonitor/releases/latest) 下载 `TokenMonitor-desktop-windows-x64.zip`，解压后运行 `TokenMonitor.exe`。压缩包同时包含项目许可证、第三方许可和文件校验清单。
+
 从固定发行目录运行：
 
 ```text

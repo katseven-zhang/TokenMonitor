@@ -2,6 +2,8 @@
 
 This is an implementation/acceptance record, not a release approval. Branch: `codex/desktop-refactor`.
 
+The entries below preserve historical checkpoints. For the merged desktop's 2026-09-20 review fixes, current packaging, native acceptance and release gates, see [release review](RELEASE-REVIEW-2026-09-20.md). In particular, the older in-memory paging and six-file package descriptions have been superseded by SQL paging and the seven-file licensed package.
+
 ## Activity pagination and RPC performance — `b194c5d` / `0d6f4c2`
 
 The performance/accessibility issue recorded below is fixed for the measured dataset. Dashboard responses retain full tool counts and activity count but no longer serialize all activity records. A separate local `activities` method serves stable newest-first pages, preserving minute/Agent/session filters and session-level model/project/search attribution. The native page exposes first/previous/next/last navigation. Tool summaries are expandable, and the fixed-height activity region prevents loading from collapsing the document and moving the viewport.
