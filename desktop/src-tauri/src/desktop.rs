@@ -105,6 +105,7 @@ pub fn run() {
         .setup(|app| {
             let root = config::data_dir();
             tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+                .visible(!std::env::args().any(|arg| arg == "--background"))
                 .data_directory(root.join("webview"))
                 .additional_browser_args("--disable-background-networking --disable-component-update --disable-sync --disable-domain-reliability --no-first-run")
                 .on_navigation(|url| {
@@ -148,7 +149,9 @@ pub fn run() {
                         "start" => {
                             let root = config::data_dir();
                             std::thread::spawn(move || {
-                                let _ = service::start(&root);
+                                if let Err(e) = service::start(&root) {
+                                    service::log(&root, &e);
+                                }
                             });
                         }
                         "stop" => {
@@ -173,11 +176,6 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            if std::env::args().any(|a| a == "--background") {
-                if let Some(w) = app.get_webview_window("main") {
-                    w.hide()?;
-                }
-            }
             let root = config::data_dir();
             std::thread::spawn(move || {
                 if let Err(e) = service::start(&root) {
