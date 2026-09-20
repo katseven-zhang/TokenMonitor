@@ -54,6 +54,8 @@ No final completion claim until every remaining acceptance cell has concrete evi
 
 ## Native service controls and patch-count follow-up
 
+- Package `63e8b9c` completed from stable inputs (EXE 7,083,520 bytes; ZIP 4,313,388 bytes) and was launched with a Node-free PATH. Real RPC queries found one normalized `d:/claw/agentchatroom` group, with 878,879,161 tokens matching project drilldown exactly. Every model's component cost sum matched its known-cost total. The 22-query historical verification (all plus ten agents, 5h/7d) passed again against independent Decimal JSON pricing and cache aggregates. Expanded component-price native GUI inspection is still pending.
+
 - Model rows now expand input/cache-read/cache-write/output effective unit prices derived from per-event historical JSON pricing components. These are explicitly query-period weighted prices, not current catalog quotes; unpriced records or unused categories show no invented rate. A two-effective-date native fixture checks component cost sums; frontend checks free, unknown and unused categories with appropriate floating-point tolerance. All 25 frontend tests, production build, 37 Rust unit tests and three integration tests pass. Native packaging/visual verification of this addition remains pending.
 
 - Runtime observation: an initial sandboxed process-tree query was denied and its empty samples were discarded. The authorized read-only retry produced 20 valid samples over 50 seconds while the GUI was queried: only TokenMonitor/WebView2 in the tracked tree and zero external TCP connections. Evidence is in ignored `.dev-data/runtime-network-verification.json`. This is bounded TCP sampling, not packet capture or proof about all future runtime behavior.
