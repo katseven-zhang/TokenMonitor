@@ -152,6 +152,19 @@ function printStatus({ port, backend }) {
   for (const line of lines) console.log(line);
 }
 
+/**
+ * #87：status 追加共存三行（桌面版是否装机/配在哪个端口/是否在跑）。
+ * 这段必须零副作用——status 承诺不建库不建目录，所以只用 coexistence.js 的只读探测。
+ */
+async function printCoexistence({ port }) {
+  try {
+    const { coexistenceLines } = await import('../src/coexistence.js');
+    for (const line of await coexistenceLines({ ownPort: port })) console.log(line);
+  } catch (e) {
+    console.log(`desktop_edition: unknown (${e?.message ?? e})`);
+  }
+}
+
 const fmt = (n) => {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
@@ -174,6 +187,7 @@ const { cmd, port, force } = args;
 if (cmd === 'status') {
   const backend = await probeBackend(port);
   printStatus({ port, backend });
+  await printCoexistence({ port });
   process.exit(0);
 }
 
@@ -231,9 +245,38 @@ if (cmd === 'scan') {
   for (const r of store.byTool()) {
     log(`${r.tool.padEnd(12)} ${String(r.n).padStart(6)} 次  total=${fmt(r.total)}`);
   }
-  scanner.startWatching();
+  // #87：先监听，成功了才开始盯目录。
+  // 修前顺序是 startWatching() → await startServer()，而 installDaemonGuards() 已经
+  // 装了 unhandledRejection 兜底：端口被占用时 startServer 的 Promise 被 reject，
+  // 那个 handler 把 EADDRINUSE 当普通拒绝吞掉，await 之后的代码（含运行锁）永远不执行，
+  // 但 scanner 的 fs.watch + 兜底轮询和 balancePoller 的定时器已经把事件循环钉住——
+  // 抢端口输掉的这个旧版实例就成了静默僵尸：没有 HTTP、没有锁文件、却在持续扫描，
+  // 还会每 30 分钟打一次余额接口。现在冲突必须说清占用了是谁、并且以退出码 1 结束。
   const balancePoller = new BalancePoller(store, { log });
-  const server = await startServer({ store, scanner, balancePoller, port, log });
+  let server = null;
+  try {
+    server = await startServer({ store, scanner, balancePoller, port, log });
+  } catch (e) {
+    err(`serve 启动失败：${e?.message ?? e}`);
+    if (e?.code === 'EADDRINUSE') {
+      const c = e.conflict || {};
+      try {
+        const { describePortConflict, coexistenceLines } = await import('../src/coexistence.js');
+        for (const line of describePortConflict({ port, holderPid: c.pid, holderImage: c.processName })) err(line);
+        for (const line of await coexistenceLines({ ownPort: port })) err(line);
+      } catch (reportErr) {
+        err(`端口冲突详情不可用：${reportErr?.message ?? reportErr}`);
+      }
+    }
+    // 只清理自己起起来的东西：绝不终止占用端口的进程（可能是另一个产品，也可能是用户的别的程序）。
+    try { scanner.stop(); } catch { /* 未启动 */ }
+    try { balancePoller.stop?.(); } catch { /* optional */ }
+    try { server?.close(); } catch { /* 没起来 */ }
+    try { store.close(); } catch { /* already closed */ }
+    err('exiting with code 1 (port conflict is fatal for this instance; nothing else was touched)');
+    process.exit(1);
+  }
+  scanner.startWatching();
   log('实时监听已启动（fs.watch 目录监听 + 60s 兜底轮询），余额每 30 分钟轮询，Ctrl+C 退出');
   let shutting = false;
   // #31：serve 运行锁（数据目录 tokenmonitor-<port>.lock，含 PID）——

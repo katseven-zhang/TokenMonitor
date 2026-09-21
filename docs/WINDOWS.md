@@ -58,6 +58,37 @@ node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://
 - **端口**：默认 `8787`；`--port N`（1–65535）对 serve/status/install-agent/bar 均可用，非法值直接报错退出。服务只绑定 `127.0.0.1` 回环并校验 `Host` 头（DNS rebinding 防护，[../src/server.js](../src/server.js)）。
 - **离线模式**：设置 `$env:TOKENMONITOR_OFFLINE='1'` 后，汇率、LiteLLM 牌价表、厂商余额三类外网请求全部跳过，改用本地缓存 / 内置牌价 / 种子价继续出数（[../src/config.js](../src/config.js)）。CI 与 Windows 专项测试默认离线运行。
 
+## 3b. 与桌面版共存（#87）
+
+同一仓库里有**两个产品**：旧版 Node 后台（本文档）与 Rust/Tauri 桌面版（`desktop/`）。
+两者此前默认端口都是 `127.0.0.1:8787`，各自还有一套独立的登录自启，且彼此完全看不见对方。
+
+| | 旧版 Node 后台 | 桌面版 |
+| --- | --- | --- |
+| 默认端口 | `8787`（**不变**：书签、任务计划、托盘、菜单栏都按它写死） | `18787`（#87 起让位；`desktop/src-tauri/src/config.rs`） |
+| 数据目录 | `%USERPROFILE%\.tokenmonitor` + 运行数据（见第 3 节、#89） | `%LOCALAPPDATA%\TokenMonitor2` |
+| 登录自启 | 任务计划 `TokenMonitor-Server` | tauri-plugin-autostart 写的 `HKCU\...\CurrentVersion\Run` 值 |
+| 进程名 | 启动器 `TokenMonitor.exe` + `node.exe`（**与桌面版主程序同名，见 #89**） | `TokenMonitor.exe` |
+
+- **探测是双向的**：旧版侧 [../src/coexistence.js](../src/coexistence.js) 只读地看桌面版装没装
+  （`%LOCALAPPDATA%\TokenMonitor2\settings.json`）、配在哪个端口、那个端口有没有人监听，
+  以及两套自启各自的注册状态；桌面版侧
+  [../desktop/src-tauri/src/coexistence.rs](../desktop/src-tauri/src/coexistence.rs) 反向认旧版的
+  运行锁与端口。探测**只读**：不建目录、不写文件、不创建/修改/删除任务计划、绝不终止对方进程。
+- `tokenmonitor status` 现在多出四行：`desktop_edition`、`desktop_port`、`desktop_running`、
+  `legacy_logon_task` / `desktop_logon_entry`。
+- **旧版端口冲突不再是静默的**（这是 #87 里最坏的一条路径）：修前 `bin/tokenmonitor.js` 里
+  `installDaemonGuards()` 的 `unhandledRejection` 兜底会把 `startServer()` 抛出的
+  `EADDRINUSE` 拒绝当普通日志吞掉，于是 `await` 之后的运行锁代码永不执行，而已经启动的
+  `fs.watch` 监听和每 30 分钟一次的余额轮询继续把事件循环钉住——抢端口输掉的旧版实例变成
+  一个**静默僵尸**：没有 HTTP、没有锁文件、却在持续扫描并持续打余额接口，安装/卸载脚本的
+  运行守卫因为看不到锁而一路放行。桌面版输的时候只把错误写进 `service.log`。
+  现在旧版先监听、监听成功之后才开始盯目录；冲突时打印占用者的 PID 与镜像名、给出两侧
+  安装路径（`TokenMonitor.exe` 两边都有，不能据此指认），并以退出码 1 结束。
+- 老用户的 `settings.json` 是升级前写的，端口仍可能是 `8787`：这不会静默打架——旧版会因
+  冲突退出并说明原因，桌面版会在 `service.log` 与 `status` 里报告"旧版在跑/端口相同"。
+  自行把其中一侧改成别的端口即可。
+
 ## 4. 开机自启：当前用户任务计划（✅ 已集成，#8）
 
 实现：[../src/platform/windows-service.js](../src/platform/windows-service.js)、[../src/agent.js](../src/agent.js)；测试：[../test/windows/service.test.mjs](../test/windows/service.test.mjs)。

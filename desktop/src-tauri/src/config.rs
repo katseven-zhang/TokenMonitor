@@ -83,7 +83,12 @@ impl Default for Settings {
                 .collect(),
         );
         Self {
-            port: 8787,
+            // #87：桌面版让位。旧版 Node 后台的默认端口是 8787（src/config.js::DEFAULT_PORT），
+            // 两个产品同仓共存时抢同一个回环端口，谁先起谁赢，输的那个此前毫无提示。
+            // 改默认值只影响新写入的 settings.json；老用户目录里的 8787 由
+            // crate::coexistence 在后台启动时探测并在 service.log 与 status 里报出来。
+            // 与 src/coexistence.js::DESKTOP_DEFAULT_PORT 必须一致（test/run.mjs [26] 会比对）。
+            port: crate::coexistence::DESKTOP_DEFAULT_PORT,
             refresh_seconds: 60,
             roots,
             disabled_agents: vec![],

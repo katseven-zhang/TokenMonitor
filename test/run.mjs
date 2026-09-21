@@ -2103,6 +2103,123 @@ console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/S
   }
 }
 
+/* ---------- [26] 两个产品共存（#87） ---------- */
+console.log('\n[26] 共存：端口让位、彼此探测、旧版冲突必须退出（#87）');
+{
+  const coex = await import(pathToFileURL(join(ROOT, 'src/coexistence.js')).href);
+
+  ok('旧版默认端口仍是 8787（书签/任务计划/托盘都按它写死）',
+    (await import(pathToFileURL(join(ROOT, 'src/config.js')).href)).DEFAULT_PORT === 8787);
+  ok('桌面版默认端口已让开旧版', coex.DESKTOP_DEFAULT_PORT === 18787
+    && coex.DESKTOP_DEFAULT_PORT !== 8787);
+
+  // 常量成对：JS 与 Rust 两侧各写一份，漂了就会有一侧看不见另一侧
+  {
+    const rustConfig = read(join(ROOT, 'desktop/src-tauri/src/config.rs'));
+    const rustCoex = read(join(ROOT, 'desktop/src-tauri/src/coexistence.rs'));
+    ok('desktop config.rs 的默认端口不再是 8787', !/port:\s*8787/.test(rustConfig), rustConfig.match(/port:\s*\d+/)?.[0]);
+    ok('desktop config.rs 取用 coexistence::DESKTOP_DEFAULT_PORT',
+      /port:\s*crate::coexistence::DESKTOP_DEFAULT_PORT/.test(rustConfig));
+    ok('两侧默认端口常量相等（Rust 侧 18787 / JS 侧 18787）',
+      new RegExp(`DESKTOP_DEFAULT_PORT:\\s*u16\\s*=\\s*${coex.DESKTOP_DEFAULT_PORT}`).test(rustCoex),
+      rustCoex.match(/DESKTOP_DEFAULT_PORT:[^;]*/)?.[0]);
+    ok('Rust 侧记录的旧版默认端口与 JS 侧一致',
+      /LEGACY_DEFAULT_PORT:\s*u16\s*=\s*8787/.test(rustCoex));
+    ok('旧版后台在 Rust 侧也确实被探测（service.rs 调用 detect_legacy）',
+      /coexistence::detect_legacy/.test(read(join(ROOT, 'desktop/src-tauri/src/service.rs'))));
+    ok('旧版 CLI 在端口冲突处调用共存模块',
+      /describePortConflict/.test(read(join(ROOT, 'bin/tokenmonitor.js'))));
+  }
+
+  // 只读探测的注入面：测试绝不真跑 reg.exe / schtasks.exe
+  {
+    const calls = [];
+    const fake = (file, args) => {
+      calls.push([file, args.join(' ')]);
+      if (file === 'schtasks.exe') return { ok: true, out: 'TokenMonitor-Server', err: '' };
+      return { ok: false, out: '', err: 'ERROR: The system was unable to find the specified registry key or value.' };
+    };
+    const res = await coex.detectAutostart({ run: fake, platform: 'win32' });
+    const allArgs = calls.map(([f, a]) => `${f} ${a}`).join(' ; ');
+    ok('旧版任务计划只查询不改动', res.legacyTask === 'yes'
+      && /schtasks\.exe.*\/Query \/TN TokenMonitor-Server/.test(allArgs)
+      && !/\/(Create|Delete|Change)\b/.test(allArgs), allArgs);
+    ok('桌面版 HKCU Run 缺失判为 no，而不是 unknown', res.desktopRunKey === 'no', JSON.stringify(res));
+    const denied = await coex.detectAutostart({
+      run: () => ({ ok: false, out: '', err: 'ERROR: Access is denied.' }), platform: 'win32',
+    });
+    ok('查询被拒时说 unknown 而非"没有自启"',
+      denied.legacyTask === 'unknown' && denied.desktopRunKey === 'unknown', JSON.stringify(denied));
+    const other = await coex.detectAutostart({ run: () => ({ ok: false, out: '', err: '' }), platform: 'darwin' });
+    ok('非 Windows 不跑这两条命令', other.legacyTask === 'not-applicable' && other.desktopRunKey === 'not-applicable');
+  }
+
+  {
+    const dir = mkdtempSync(join(tmpdir(), 'coex-desktop-'));
+    try {
+      const absent = coex.inspectDesktopInstall(dir);
+      ok('桌面版未装机判得出来（settings.json 缺失）', absent.installed === false && absent.port === coex.DESKTOP_DEFAULT_PORT);
+      writeFileSync(join(dir, 'settings.json'), JSON.stringify({ port: 21000, refresh_seconds: 60, roots: {}, disabledAgents: [] }));
+      const found = coex.inspectDesktopInstall(dir);
+      ok('读到桌面版自己配的端口', found.installed === true && found.port === 21000 && found.portFromSettings, JSON.stringify(found));
+      writeFileSync(join(dir, 'settings.json'), 'not-json{{{');
+      const broken = coex.inspectDesktopInstall(dir);
+      ok('桌面版 settings 损坏仍算"装了"，端口退回默认而不是猜',
+        broken.installed === true && broken.port === coex.DESKTOP_DEFAULT_PORT && !broken.portFromSettings, JSON.stringify(broken));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  {
+    const lines = coex.describePortConflict({ port: 8787, holderPid: 4321, holderImage: 'TokenMonitor.exe' });
+    const joined = lines.join('\n');
+    ok('同名 exe 时不指认产品，改为给出两侧安装路径',
+      joined.includes('两个产品都有') && joined.includes('PID 4321')
+      && joined.includes('无法据此指认'), joined);
+    ok('明确不抢占、不杀对方', joined.includes('也不会去杀占用者'), joined);
+  }
+
+  // 端到端：第二个 serve 抢不到端口必须"退出"，而不是变成静默僵尸
+  {
+    const port = await new Promise((r) => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+    const dirA = mkdtempSync(join(tmpdir(), 'coex-serveA-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'coex-serveB-'));
+    const spawnServe = (dataDir) => spawn(process.execPath,
+      ['--disable-warning=ExperimentalWarning', join(ROOT, 'bin/tokenmonitor.js'), 'serve', '--port', String(port)],
+      { env: { ...env, TOKENMONITOR_DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const winner = spawnServe(dirA);
+    let winBuf = '';
+    winner.stdout.on('data', (d) => { winBuf += d; });
+    winner.stderr.on('data', (d) => { winBuf += d; });
+    const won = await new Promise((r) => {
+      const t = setTimeout(() => r(false), 60000);
+      const iv = setInterval(() => { if (winBuf.includes('listening')) { clearTimeout(t); clearInterval(iv); r(true); } }, 100);
+    });
+    ok('第一个 serve 正常监听（僵尸测试的前提）', won, winBuf.slice(-200));
+    if (won) {
+      const loser = spawnServe(dirB);
+      let buf = '';
+      loser.stdout.on('data', (d) => { buf += d; });
+      loser.stderr.on('data', (d) => { buf += d; });
+      // 修前：EADDRINUSE 被 unhandledRejection 吞掉，await 之后的写锁代码永不执行，
+      // fs.watch + 余额轮询把事件循环钉住 —— 进程既不出错也不退出。
+      const outcome = await new Promise((r) => {
+        const t = setTimeout(() => r('timeout'), 45000);
+        loser.once('exit', (code) => { clearTimeout(t); r(code); });
+      });
+      ok('端口被占的第二个实例自行退出（不再是僵尸）', outcome === 1, `outcome=${outcome} out=${buf.slice(-400)}`);
+      ok('退出原因写清了端口冲突', /EADDRINUSE|已被|port conflict|端口/i.test(buf), buf.slice(-400));
+      ok('失败的那个没有留下运行锁（锁写在 await 之后，修前永不执行）',
+        !existsSync(join(dirB, `tokenmonitor-${port}.lock`)));
+      if (outcome === 'timeout') { try { loser.kill('SIGKILL'); } catch {} }
+    }
+    await killAndWait(winner);
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

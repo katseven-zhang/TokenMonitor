@@ -265,16 +265,27 @@ pub fn run(root: &Path) -> Result<(), String> {
         .try_lock()
         .map_err(|_| "后台进程已在运行或正在停止".to_string())?;
     let cfg = config::settings(root)?;
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port))
-        .map_err(|e| format!("端口{}不可用: {e}", cfg.port))?;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, cfg.port)).map_err(|e| {
+        format!(
+            "端口{}不可用: {e}{}",
+            cfg.port,
+            crate::coexistence::conflict_hint(cfg.port, crate::coexistence::LEGACY_DEFAULT_PORT)
+        )
+    })?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let _ = db::open(root)?;
+    // #87：桌面版此前完全看不见旧版 Node 后台——两边都用过 8787，抢输的那个只会把
+    // bind 错误写进 service.log。启动时探测一次并把结论写进日志、带进 status，
+    // 探测本身只读（查锁文件 + 回环 connect + schtasks /Query），不碰任何对方状态。
+    // 只在启动时做一次：GUI 每 60s 轮询 status，不该为此反复起进程。
+    let coexistence_report = crate::coexistence::detect_legacy(cfg.port, None);
     log(
         root,
         &format!(
-            "后台启动 pid={} port={}（仅本地）",
+            "后台启动 pid={} port={}（仅本地）；共存探测：{}",
             std::process::id(),
-            cfg.port
+            cfg.port,
+            coexistence_report
         ),
     );
     let stop = Arc::new(AtomicBool::new(false));
@@ -326,6 +337,7 @@ pub fn run(root: &Path) -> Result<(), String> {
                 let stop = stop.clone();
                 let request_scan = request_scan.clone();
                 let scanning = scanning.clone();
+                let coexistence = coexistence_report.clone();
                 thread::spawn(move || {
                     let mut stream = stream;
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -343,7 +355,7 @@ pub fn run(root: &Path) -> Result<(), String> {
                         }
                         match req["method"].as_str().unwrap_or("") {
                             "status" => Ok(
-                                json!({"running":true,"stopping":stop.load(Ordering::Relaxed),"scanning":scanning.load(Ordering::Relaxed),"pid":std::process::id()}),
+                                json!({"running":true,"stopping":stop.load(Ordering::Relaxed),"scanning":scanning.load(Ordering::Relaxed),"pid":std::process::id(),"coexistence":coexistence}),
                             ),
                             "stop" => {
                                 stop.store(true, Ordering::Relaxed);
