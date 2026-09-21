@@ -115,6 +115,9 @@ pub fn scan_cancellable(
         }
         set_status(&db, &s)?;
         let mut seen = BTreeSet::new();
+        // #71: 只有这一轮真的对着存在的根目录走完了一次完整、无错的扫描，
+        // seen 才能当作"哪些文件消失了"的证据（见下方对账前的守卫）。
+        let mut roots_present = false;
         for source in settings.roots.get(agent).into_iter().flatten() {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -123,6 +126,7 @@ pub fn scan_cancellable(
             if !path.exists() {
                 continue;
             }
+            roots_present = true;
             if agent == "antigravity" {
                 let projects = match collectors::antigravity_projects(path) {
                     Ok(p) => p,
@@ -200,6 +204,28 @@ pub fn scan_cancellable(
                         Err(e) => s.errors.push(e.to_string()),
                         _ => {}
                     }
+                }
+            }
+        }
+        // #71 删除对账：文件被删除或移走后，缓存行必须撤回，否则已消失的会话
+        // 永远挂在面板上。守卫三件套：至少有一个根目录存在（盘没插不算删除）、
+        // 扫描没有被 stop 打断、全程零错误（任何目录遍历出错都让 seen 不完整，
+        // 拿它删行会把还在的文件误删）。身份让位规则与 replace_file 相同：
+        // 归档副本仍持同 id 事件时由 db::forget_file 在同一事务里重新选举。
+        if roots_present && !stop.load(Ordering::Relaxed) && s.errors.is_empty() {
+            let stale: Vec<String> = db
+                .prepare("SELECT path FROM source_files WHERE agent=?1")
+                .map_err(|e| e.to_string())?
+                .query_map([agent], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|p| !seen.contains(&p.to_lowercase()))
+                .collect();
+            for path in stale {
+                if let Err(e) = db::forget_file(&mut db, &path, agent) {
+                    s.errors.push(format!("{path}: {e}"));
                 }
             }
         }

@@ -191,7 +191,9 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
     for a in &activities {
         *tools.entry(a.name.clone()).or_default() += 1;
     }
-    let mut stmt=db.prepare("SELECT agent,session,ts,payload FROM quota WHERE ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
+    // #71: 同一观测在 sessions/ 与 archived_sessions/ 各存一份是常态；"最新配额"
+    // 列表与 quotaHistory 一样必须先按内容去重，否则 100 个名额被副本占满。
+    let mut stmt=db.prepare("SELECT DISTINCT agent,session,ts,payload FROM quota WHERE ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
     let quotas=stmt.query_map(params![q.end,q.agent],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.map(|row|{let(a,s,t,p)=row.map_err(|e|e.to_string())?;Ok(json!({"agent":a,"session":s,"ts":t,"payload":serde_json::from_str::<Value>(&p).map_err(|e|e.to_string())?}))}).collect::<Result<Vec<_>,String>>()?;
     let mut stmt = db
         .prepare("SELECT data FROM scan_status ORDER BY agent")

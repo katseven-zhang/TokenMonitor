@@ -30,7 +30,9 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
 
 // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
 // while preserving cached data until each replacement transaction is ready.
-pub const COLLECTOR_REVISION: &str = "4";
+// 5 = #71：BOM 不再吞首条、浮点 token 字段不再归零、重复配额快照不入库——
+// 三者都改变已缓存文件的解析结果，旧行必须按新语义重解析。
+pub const COLLECTOR_REVISION: &str = "5";
 pub fn open(root: &Path) -> Result<Connection, String> {
     let db = Connection::open(root.join("events-v2.sqlite")).map_err(|e| e.to_string())?;
     register_query_functions(&db)?;
@@ -191,6 +193,36 @@ pub fn replace_file(
     // Deleted winners fall back to another raw snapshot in the same transaction.
     for (raw,current,columns) in [("raw_events","event_current","e.path,e.agent,e.id,e.ts,e.session,e.model,e.project,e.data"),("raw_activities","activity_current","e.path,e.agent,e.id,e.ts,e.session,e.data")] {
         tx.execute(&format!("INSERT OR IGNORE INTO changed_keys SELECT ?3,agent,id FROM {raw} WHERE path=?1 AND agent=?2"),params![path,agent,raw]).map_err(|e|e.to_string())?;
+        tx.execute(&format!("DELETE FROM {current} WHERE (agent,id) IN (SELECT agent,id FROM changed_keys WHERE kind=?1)"),[raw]).map_err(|e|e.to_string())?;
+        tx.execute(&format!("INSERT INTO {current} SELECT {columns} FROM changed_keys k JOIN {raw} e ON e.agent=k.agent AND e.id=k.id WHERE k.kind=?1 AND e.path=(SELECT r.path FROM {raw} r LEFT JOIN source_files f ON f.path=r.path AND f.agent=r.agent WHERE r.agent=k.agent AND r.id=k.id ORDER BY r.ts DESC,COALESCE(f.mtime,0) DESC,r.path LIMIT 1)"),[raw]).map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// #71: retract one source file that no longer exists: drop its raw rows, quota
+/// rows, health row and the source_files entry itself, then re-elect winners for
+/// every touched identity from the snapshots that remain (an archived copy of a
+/// deleted session resurfaces through the same ranking as replace_file's).
+/// Without this, deleting or archiving a log leaves it indexed forever: the
+/// dashboard kept showing sessions whose source is gone.
+pub fn forget_file(db: &mut Connection, path: &str, agent: &str) -> Result<(), String> {
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS changed_keys(kind TEXT,agent TEXT,id TEXT,PRIMARY KEY(kind,agent,id)); DELETE FROM changed_keys;").map_err(|e|e.to_string())?;
+    for table in ["raw_events","raw_activities"] {
+        tx.execute(&format!("INSERT OR IGNORE INTO changed_keys SELECT ?3,agent,id FROM {table} WHERE path=?1 AND agent=?2"),params![path,agent,table]).map_err(|e|e.to_string())?;
+    }
+    for table in ["raw_events", "raw_activities", "quota", "source_health"] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE path=?1 AND agent=?2"),
+            params![path, agent],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.execute("DELETE FROM source_files WHERE path=?1 AND agent=?2", params![path, agent])
+        .map_err(|e| e.to_string())?;
+    // Recompute after source_files was dropped, so the forgotten file's mtime
+    // can never win a tie.
+    for (raw,current,columns) in [("raw_events","event_current","e.path,e.agent,e.id,e.ts,e.session,e.model,e.project,e.data"),("raw_activities","activity_current","e.path,e.agent,e.id,e.ts,e.session,e.data")] {
         tx.execute(&format!("DELETE FROM {current} WHERE (agent,id) IN (SELECT agent,id FROM changed_keys WHERE kind=?1)"),[raw]).map_err(|e|e.to_string())?;
         tx.execute(&format!("INSERT INTO {current} SELECT {columns} FROM changed_keys k JOIN {raw} e ON e.agent=k.agent AND e.id=k.id WHERE k.kind=?1 AND e.path=(SELECT r.path FROM {raw} r LEFT JOIN source_files f ON f.path=r.path AND f.agent=r.agent WHERE r.agent=k.agent AND r.id=k.id ORDER BY r.ts DESC,COALESCE(f.mtime,0) DESC,r.path LIMIT 1)"),[raw]).map_err(|e|e.to_string())?;
     }

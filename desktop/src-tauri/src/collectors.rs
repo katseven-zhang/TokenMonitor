@@ -20,7 +20,20 @@ pub fn timestamp(v: &Value) -> Option<i64> {
         .map(|t| t.timestamp_millis())
 }
 fn number(v: &Value, key: &str) -> i64 {
-    v.get(key).and_then(Value::as_i64).unwrap_or(0).max(0)
+    // #71: token 字段被序列化成浮点（1000000.0、5e3）时 as_i64 返回 None，整列
+    // 静默归零。有限浮点按向下取整接受；负数、NaN、无穷一律按 0（与旧行为一致，
+    // 宁少不多）。
+    let field = v.get(key);
+    let raw = field
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            field
+                .and_then(Value::as_f64)
+                .filter(|f| f.is_finite())
+                .map(|f| f.floor().max(0.0) as i64)
+        })
+        .unwrap_or(0);
+    raw.max(0)
 }
 fn string(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -79,7 +92,14 @@ fn tool(
     }
 }
 pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
+    // #71: Windows 工具写出的 JSONL 可能带 UTF-8 BOM。它只污染第一条记录——
+    // 通常正是 session_meta——丢会话身份/项目归属，还把整行计成畸形行。
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Parsed::default();
+    // #71: codex 在每条 token_count 里重复携带相同的 rate_limits 快照，长会话
+    // 会把 quota 表灌成同一快照的成百行副本。按 (session, payload) 与上一条
+    // 观测比较，重复快照不再入库（跨归档副本的 DISTINCT 见 query.rs）。
+    let mut last_quota: BTreeMap<String, Value> = BTreeMap::new();
     let mut model = "unknown".to_string();
     let mut project = String::new();
     let mut session = Path::new(path)
@@ -189,12 +209,16 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                 }
                 if p["type"] == "token_count" {
                     if p["rate_limits"].is_object() {
-                        out.quotas.push(Quota {
-                            agent: agent.into(),
-                            session: session.clone(),
-                            ts,
-                            payload: p["rate_limits"].clone(),
-                        });
+                        let limits = &p["rate_limits"];
+                        if last_quota.get(&session).is_none_or(|prev| prev != limits) {
+                            last_quota.insert(session.clone(), limits.clone());
+                            out.quotas.push(Quota {
+                                agent: agent.into(),
+                                session: session.clone(),
+                                ts,
+                                payload: limits.clone(),
+                            });
+                        }
                     }
                     let info = &p["info"];
                     model = first(&[string(info, "model")], &model);
@@ -828,5 +852,54 @@ mod tests {
     fn malformed_rows_do_not_drop_good_rows() {
         let p = parse_jsonl("pi", "p.jsonl", "bad\n{\"type\":\"session\"}");
         assert_eq!(p.malformed_lines, 1);
+    }
+    /// #71: BOM 只污染第一条记录——通常正是 session_meta。修前那行整体解析
+    /// 失败：会话身份退回文件名、项目丢失，还多计一条畸形行。
+    #[test]
+    fn bom_does_not_swallow_the_first_record() {
+        let text = "\u{feff}{\"type\":\"session_meta\",\"payload\":{\"id\":\"bom-session\",\"cwd\":\"Q:/fixture\"}}\n{\"timestamp\":\"2026-09-20T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":10,\"output_tokens\":5}}}}\n";
+        let p = parse_jsonl("codex", "b.jsonl", text);
+        assert_eq!(p.malformed_lines, 0, "BOM 行不得计成畸形行");
+        assert_eq!(p.events.len(), 1);
+        assert_eq!(p.events[0].session, "bom-session");
+        assert_eq!(p.events[0].project, "Q:/fixture");
+    }
+    /// #71: 浮点 token 字段（JS/Python 写手把 1000000 序列化成 1000000.0、5e3）
+    /// 修前 as_i64→None，整列静默归零。现在向下取整接受；负数照旧钳 0（宁少不多）。
+    #[test]
+    fn float_token_fields_are_read_not_silently_zeroed() {
+        let p = parse_jsonl(
+            "claude-code",
+            "f.jsonl",
+            r#"{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"m","model":"claude","usage":{"input_tokens":1000000.9,"cache_read_input_tokens":5e3,"cache_creation_input_tokens":-7,"output_tokens":40.0}}}"#,
+        );
+        assert_eq!(p.events.len(), 1);
+        let t = &p.events[0].tokens;
+        assert_eq!(t.input, 1_000_000, "1000000.9 → 1000000（向下取整）");
+        assert_eq!(t.cached, 5_000, "5e3 → 5000");
+        assert_eq!(t.cache_write, 0, "负数仍按 0");
+        assert_eq!(t.output, 40);
+    }
+    /// #71: codex 在每条 token_count 里重复携带相同 rate_limits 快照，修前长
+    /// 会话会往 quota 表灌成百条一模一样的行，面板"最新 100 条配额"全是副本。
+    /// 载荷与同会话上一条观测相同就不再入库；载荷一变（10%→11%）立刻新的一行。
+    #[test]
+    fn repeated_quota_snapshots_are_not_reinserted() {
+        let line = |used: u32, ts: &str| {
+            format!(r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"used_percent":{used}}},"info":{{"last_token_usage":{{"input_tokens":1,"output_tokens":0}}}}}}}}"#)
+        };
+        let text = [
+            line(10, "2026-09-20T00:00:01Z"),
+            line(10, "2026-09-20T00:00:02Z"),
+            line(10, "2026-09-20T00:00:03Z"),
+            line(11, "2026-09-20T00:00:04Z"),
+            line(11, "2026-09-20T00:00:05Z"),
+        ]
+        .join("\n")
+            + "\n";
+        let p = parse_jsonl("codex", "q.jsonl", &text);
+        assert_eq!(p.quotas.len(), 2, "5 条重复快照只留 2 个不同观测");
+        assert_eq!(p.quotas[0].payload["used_percent"], 10);
+        assert_eq!(p.quotas[1].payload["used_percent"], 11);
     }
 }
