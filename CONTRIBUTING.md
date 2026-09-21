@@ -146,6 +146,24 @@ workflow 和打包脚本本身也是会被改坏的东西，所以 `test/run.mjs
 而不是把断言删空之后变绿。根 `.gitignore` 现在也在库里（#74）：新增"下载的外部源码"目录时
 顺手补一行，别让整棵目录树出现在 `git status` 里等人手动规避。
 
+## Windows PowerShell 与编码：这两份脚本里的注释为什么必须是 ASCII（#94）
+
+本仓库在中文路径下开发，Windows 上的默认 shell 是 **Windows PowerShell 5.1**，
+而它的 OEM codepage 常是 936（GBK）。两个已实测的后果，都足以造出"看着成功、其实坏了"的故障：
+
+- **从子进程 stdout 里解析路径，会在拿到之前就是坏的。** cargo / Node 输出 UTF-8，
+  PS 5.1 按 GBK 解码，多字节序列的尾字节会吃掉紧随其后的 `\`。所以 `build.ps1`
+  不去解析 `cargo metadata` 的输出，而是自己按 cargo 的默认规则算出目标目录
+  （`CARGO_TARGET_DIR` 优先，否则 crate 内 `target\`），同一个值既交给 `--target-dir`
+  又当复制源——两边不可能各说各话（`windows/gui/build.ps1` 与 `windows/tray/build.ps1`）。
+- **行尾的非 ASCII 字节会吃掉换行，把下一行静默变成注释。** 这类故障不会报错，
+  只会让脚本少做一步。所以 `scripts/*.ps1` 与 `windows/*/build.ps1` 的注释、
+  `Write-Host` 文案一律 ASCII-only；中文说明写进 markdown 与提交信息里。
+
+顺带一条同源约束：`git` 默认会把非 ASCII 路径转成八进制转义（`\346\212\200…`），所以脚本里若要拿路径字符串
+跟 `git ls-files` 的输出做比对，必须用 `git -c core.quotePath=false …`，否则中文路径下两边永远比不中；
+而"比不中"往哪个方向坏，取决于那段代码把不匹配当成了"没有文件"还是"没有排除项"。
+
 ## 其他约定
 
 - 零依赖原则：后端只用 Node 内置模块（`node:sqlite`/`node:http`/`node:fs`）；前端零构建（vanilla JS + ECharts UMD）
