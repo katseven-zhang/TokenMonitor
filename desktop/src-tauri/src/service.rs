@@ -7,8 +7,8 @@ use std::{
     net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU16, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering},
+        Mutex as StdMutex, OnceLock, Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -281,6 +281,31 @@ fn control_port_with_last(root: &Path, last_good: u16) -> (u16, Option<String>) 
 /// 本进程最近一次从 `settings.json` 成功读到的端口（0 = 还没读到过）。
 static LAST_CONTROL_PORT: AtomicU16 = AtomicU16::new(0);
 
+/// #114：worker 对同一句配置错误的重复上报间隔（轮数，每轮约 1s）。
+const CONFIG_ERROR_REPEAT_EVERY: u32 = 60;
+
+/// #114：去重状态只在 worker 线程里读写，用 Mutex 只是为了跨测试线程检查。
+fn config_error_dedupe() -> &'static (AtomicU32, StdMutex<String>) {
+    static STATE: OnceLock<(AtomicU32, StdMutex<String>)> = OnceLock::new();
+    &*STATE.get_or_init(|| (AtomicU32::new(0), StdMutex::new(String::new())))
+}
+
+/// #114：一次失败轮询的记账。返回 `Some(第几次)` 表示这句该写进日志，`None` 表示
+/// 与上一条相同且还没到重复间隔 —— 也就是刷屏被拦下的那一类。
+/// 拆成纯函数（状态由参数给）是为了能在测试里按「错误文本序列」驱动，
+/// 不必真的把 worker 线程跑上一分钟。
+fn config_error_tick(state: &(AtomicU32, StdMutex<String>), message: &str) -> Option<u32> {
+    let prev = state.0.fetch_add(1, Ordering::Relaxed);
+    let mut last = state.1.lock().map_err(|e| e.into_inner()).unwrap();
+    let changed = *last != message;
+    *last = message.to_string();
+    if changed || prev % CONFIG_ERROR_REPEAT_EVERY == 0 {
+        Some(prev + 1)
+    } else {
+        None
+    }
+}
+
 pub fn rpc(root: &Path, method: &str, args: Value) -> Result<Value, String> {
     let (port, config_error) = control_port(root);
     if let Some(e) = &config_error {
@@ -362,9 +387,21 @@ pub fn run(root: &Path) -> Result<(), String> {
         let mut last = Instant::now();
         while !worker_stop.load(Ordering::Relaxed) {
             let config = match config::settings(&worker_root) {
-                Ok(c) => c,
+                Ok(c) => {
+                    // 恢复本身也要看得见：否则用户只知道「好了」，不知道曾经坏了 40 分钟。
+                    if config_error_dedupe().0.swap(0, Ordering::Relaxed) > 0 {
+                        log(&worker_root, "settings.json 已恢复可读，扫描回到正常刷新节奏");
+                    }
+                    c
+                }
                 Err(e) => {
-                    log(&worker_root, &e);
+                    // #114：修前这里每轮（≈每秒一次）无条件 `log(&e)`。settings.json
+                    // 一旦被写坏，同一句话以 1 行/秒刷进 service.log，2MB 就轮转到
+                    // service.previous.log —— 几小时把真正有用的历史全挤掉，还白写磁盘。
+                    // 现在只在「首次 / 内容变了 / 每 60 轮」各报一次（见 config_error_tick）。
+                    if let Some(n) = config_error_tick(config_error_dedupe(), &e) {
+                        log(&worker_root, &format!("配置读取失败（第 {n} 次），扫描暂停：{e}"));
+                    }
                     thread::sleep(Duration::from_secs(1));
                     continue;
                 }
@@ -933,5 +970,39 @@ mod tests_control_port {
         assert_eq!(port, 13579);
         assert!(note.is_none(), "未知键不该被当成配置错误：{note:?}");
         fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests_config_error_log {
+    use super::*;
+
+    /// #114：同一句配置错误不得每秒刷一行；换了一个新错误必须立刻可见；
+    /// 每 `CONFIG_ERROR_REPEAT_EVERY` 轮再提醒一次；恢复后计数归零、重新从「第 1 次」报。
+    #[test]
+    fn repeated_config_errors_are_deduplicated_with_a_periodic_remainder() {
+        let state: (AtomicU32, StdMutex<String>) =
+            (AtomicU32::new(0), StdMutex::new(String::new()));
+        let e = "settings.json: expected value at line 1 column 1";
+        assert_eq!(config_error_tick(&state, e), Some(1), "首次必须报");
+        for n in 2..=60 {
+            assert_eq!(config_error_tick(&state, e), None, "第 {n} 次不该再刷屏");
+        }
+        assert_eq!(config_error_tick(&state, e), Some(61), "满一个重复间隔要再提醒一次");
+        assert_eq!(config_error_tick(&state, e), None);
+
+        // 错误内容变了不能被去重吞掉（否则「坏了 40 分钟后换了个新原因」会静默）
+        assert!(config_error_tick(&state, "settings.json: 端口须为1–65535").is_some());
+
+        // 恢复（worker 成功读到配置）后计数归零：下一次坏掉仍从「第 1 次」开始报
+        state.0.store(0, Ordering::Relaxed);
+        assert_eq!(config_error_tick(&state, e), Some(1));
+    }
+
+    #[test]
+    fn repeat_interval_is_about_a_minute_of_ticks() {
+        // 循环每轮 sleep 1s，所以 60 轮 ≈ 一分钟一次重复提醒：
+        // 再小就还是刷屏，再大就可能长时间没有任何提示。
+        assert_eq!(CONFIG_ERROR_REPEAT_EVERY, 60);
     }
 }
