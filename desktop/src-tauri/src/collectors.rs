@@ -669,6 +669,22 @@ fn num(f: &BTreeMap<u64, Field>, key: u64) -> i64 {
         _ => 0,
     }
 }
+/// steps.metadata 提供的步级时间（idx → ms）。本机 build 的生成行内没有 wall-clock，
+/// 时间只能来自这里（与 Node 端 stepTimestampMs 同一路径 1.1/1.2）。
+fn step_times(db: &Connection) -> rusqlite::Result<BTreeMap<i64, i64>> {
+    let mut stmt = db.prepare("SELECT idx,metadata FROM steps")?;
+    let mut rows =
+        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+    let mut out = BTreeMap::new();
+    while let Some(row) = rows.next() {
+        let (idx, b) = row?;
+        if let Ok(f) = fields(&b) {
+            let t = nested(&f, 1);
+            out.insert(idx, num(&t, 1) * 1000 + num(&t, 2) / 1_000_000);
+        }
+    }
+    Ok(out)
+}
 pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
     let db = readonly(path)?;
     let mut out = Parsed::default();
@@ -678,20 +694,15 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
         .to_string_lossy()
         .to_string();
     let source = path.display().to_string();
-    let mut times = BTreeMap::new();
-    let mut stmt = db
-        .prepare("SELECT idx,metadata FROM steps")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-        .map_err(|e| e.to_string())?;
-    for row in rows {
-        let (idx, b) = row.map_err(|e| e.to_string())?;
-        if let Ok(f) = fields(&b) {
-            let t = nested(&f, 1);
-            times.insert(idx, num(&t, 1) * 1000 + num(&t, 2) / 1_000_000);
-        }
-    }
+    // #95：steps 表被改走（schema 漂移）只意味着"没有步级时间"，不能让整库解析失败 ——
+    // 修前这里的 `?` 会把该源永久标成 error（一个漂移的会话库 = 整源再不出数）。
+    // 锁/IO 一类的暂时性失败仍然上报：那种情况下缓存里已有的事件必须原样保留、
+    // 下一轮重读，绝不能用一份读不全的结果去替换它。
+    let times = match step_times(&db) {
+        Ok(t) => t,
+        Err(e) if e.to_string().contains("no such table") => BTreeMap::new(),
+        Err(e) => return Err(e.to_string()),
+    };
     let mut stmt = db
         .prepare("SELECT idx,data FROM gen_metadata")
         .map_err(|e| e.to_string())?;
@@ -867,5 +878,55 @@ mod tests {
     fn malformed_rows_do_not_drop_good_rows() {
         let p = parse_jsonl("pi", "p.jsonl", "bad\n{\"type\":\"session\"}");
         assert_eq!(p.malformed_lines, 1);
+    }
+    /// #95（桌面侧对偶）：steps 表被改走时必须降级为"没有步级时间"，
+    /// 能定时的生成照常入库，定不了时的按 malformed 计，整库解析仍返回 Ok。
+    #[test]
+    fn antigravity_missing_steps_table_degrades_instead_of_failing() {
+        fn var(mut n: u64) -> Vec<u8> {
+            let mut out = vec![];
+            while n >= 128 {
+                out.push((n as u8 & 127) | 128);
+                n >>= 7;
+            }
+            out.push(n as u8);
+            out
+        }
+        fn number(field: u64, n: u64) -> Vec<u8> {
+            [var(field << 3), var(n)].concat()
+        }
+        fn blob(field: u64, b: &[u8]) -> Vec<u8> {
+            [var((field << 3) | 2), var(b.len() as u64), b.to_vec()].concat()
+        }
+        let path = std::env::temp_dir().join(format!("tm-agy-{}.db", uuid::Uuid::new_v4()));
+        let _ = fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);",
+            )
+            .unwrap();
+            let usage = [number(2, 100), number(3, 80)].concat();
+            let timed = blob(
+                1,
+                &[
+                    blob(4, &usage),
+                    blob(19, b"m"),
+                    blob(9, &blob(4, &[number(1, 1_800_000_000), number(2, 500_000_000)].concat())),
+                ]
+                .concat(),
+            );
+            let untimed = blob(1, &[blob(4, &usage), blob(19, b"m")].concat());
+            db.execute("INSERT INTO gen_metadata VALUES(1,?1)", [&timed])
+                .unwrap();
+            db.execute("INSERT INTO gen_metadata VALUES(2,?1)", [&untimed])
+                .unwrap();
+        }
+        let parsed = read_antigravity(&path, "proj").expect("steps 缺失不是解析失败");
+        assert_eq!(parsed.events.len(), 1, "{:?}", parsed.events);
+        assert_eq!(parsed.events[0].ts, 1_800_000_000_500);
+        assert_eq!(parsed.events[0].tokens.total(), 180);
+        assert_eq!(parsed.malformed_lines, 1);
+        fs::remove_file(path).unwrap();
     }
 }
