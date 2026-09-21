@@ -470,6 +470,48 @@ pub fn is_dsh_zstd_ext(ext: &std::ffi::OsStr) -> bool {
     ext.eq_ignore_ascii_case("zstd") || ext.eq_ignore_ascii_case("zst")
 }
 
+/// #109：把文件字节按行解码成可解析的文本。
+///
+/// 修前只有两条出路：整段 `from_utf8` 成功，或者——只要**中间**出现一个非法字节
+/// （`error_len().is_some()`）——整个文件返回 Err。后果不是"这一行丢了"，而是
+/// `collect_file` 失败 → 该 agent 整体 `state=error` → **这个来源的数据永久冻结**，
+/// 每轮扫描都重复整文件失败（Node 遗留端是按行丢坏行继续，两侧容错口径漂移，
+/// 且桌面端失败半径大得多）。
+///
+/// 现在按行处理，三条规则：
+/// 1. 整段合法 UTF-8 → 零拷贝原样返回（绝大多数情况，无额外开销）；
+/// 2. 中间某行含非法字节 → 该行按 lossy 替换后保留，`parse_jsonl` 会把它计成
+///    `malformed_lines`（坏数据要**可见**，不能悄悄跳过），其余行照常入库；
+/// 3. 末行没有结尾换行且自身 UTF-8 不合法 → 判定为"写方正在写半个字符"，
+///    整行丢掉等下一轮（与修前 `error_len().is_none()` 分支同一条语义：
+///    半行不推进、不把还在写的内容计成畸形行）。
+pub fn decode_jsonl_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+    let last = lines.len() - 1;
+    let mut out = String::with_capacity(bytes.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        match std::str::from_utf8(line) {
+            Ok(text) => out.push_str(text),
+            Err(e) => {
+                // 规则 3：末段且是"截断"（error_len 为 None = 尾部不完整）→ 丢掉这一行，
+                // 等下一轮写完整了再读；中间段的截断不可能出现，所以不必额外判 i。
+                if e.error_len().is_none() && i == last {
+                    out.truncate(out.len() - 1); // 收回刚写的分隔符
+                    continue;
+                }
+                out.push_str(&String::from_utf8_lossy(line));
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn read_jsonl(agent: &str, path: &Path) -> Result<Parsed, String> {
     let mut bytes = Vec::new();
     if agent == "dsh" && path.extension().is_some_and(is_dsh_zstd_ext) {
@@ -484,16 +526,8 @@ pub fn read_jsonl(agent: &str, path: &Path) -> Result<Parsed, String> {
     } else {
         bytes = fs::read(path).map_err(|e| e.to_string())?;
     }
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
-        // A live writer may be between bytes of a UTF-8 character. Keep complete records;
-        // the changed file fingerprint will cause the completed tail to be read next scan.
-        Err(e) if e.error_len().is_none() => {
-            std::str::from_utf8(&bytes[..e.valid_up_to()]).map_err(|e| e.to_string())?
-        }
-        Err(e) => return Err(format!("日志不是有效 UTF-8：{e}")),
-    };
-    Ok(parse_jsonl(agent, &path.display().to_string(), text))
+    let text = decode_jsonl_bytes(&bytes);
+    Ok(parse_jsonl(agent, &path.display().to_string(), &text))
 }
 fn readonly(path: &Path) -> Result<Connection, String> {
     let db = Connection::open_with_flags(
@@ -969,5 +1003,103 @@ mod tests {
         assert!(!rows[0].1.is_empty() && rows[0].1 == rows[1].1, "{rows:?}");
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests_utf8_tolerance {
+    use super::*;
+    use std::io::Write;
+
+    fn meta(id: &str) -> String {
+        serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"D:/fixture"}}).to_string()
+    }
+    fn usage(ts: &str, input: i64) -> String {
+        serde_json::json!({"timestamp":ts,"type":"event_msg","payload":{"type":"token_count",
+            "info":{"last_token_usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":0}}}})
+            .to_string()
+    }
+    /// 中段坏字节：一个非法的 UTF-8 序列（C3 28）夹在两行好数据之间。
+    fn bytes_with_bad_middle_line() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(meta("s1").as_bytes());
+        b.push(0x0A);
+        b.extend_from_slice(b"{\"content\":");
+        b.extend_from_slice(&[0xC3, 0x28, 0x41]);
+        b.push(0x0A);
+        b.extend_from_slice(usage("2026-09-20T00:00:02Z", 100).as_bytes());
+        b.push(0x0A);
+        b
+    }
+
+    #[test]
+    fn valid_bytes_take_the_zero_copy_path() {
+        let bytes = "{\"a\":1}\n{\"b\":2}\n";
+        match decode_jsonl_bytes(bytes.as_bytes()) {
+            std::borrow::Cow::Borrowed(s) => assert_eq!(s, bytes),
+            std::borrow::Cow::Owned(_) => panic!("合法 UTF-8 不该走拷贝路径（这是每轮扫描的热路径）"),
+        }
+    }
+
+    /// #109 核心：中间一个坏字节，修前整份文件 Err -> 该来源 state=error、数据永久冻结。
+    /// 现在坏行计 malformed（要看得见），其余行照常入库。
+    #[test]
+    fn a_bad_middle_line_becomes_one_malformed_row_not_a_failed_file() {
+        let bytes = bytes_with_bad_middle_line();
+        let text = decode_jsonl_bytes(&bytes);
+        let p = parse_jsonl("codex", "D:/fixture/s.jsonl", &text);
+        assert_eq!(p.malformed_lines, 1, "坏字节行必须计成畸形行，不能被静默吞掉");
+        assert_eq!(p.events.len(), 1, "其余行照常入库");
+        assert_eq!(p.events[0].session, "s1", "首行 session_meta 仍然生效");
+    }
+
+    /// 真 read_jsonl：中文+空格路径，坏字节在中间。修前这里返回 Err。
+    #[test]
+    fn read_jsonl_returns_events_for_a_file_with_a_permanent_bad_byte() {
+        let dir = std::env::temp_dir().join(format!("tm-utf8-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("会话 目录.jsonl");
+        std::fs::write(&path, bytes_with_bad_middle_line()).unwrap();
+        let p = read_jsonl("codex", &path).expect("中间一个坏字节不得让整份文件失败");
+        assert_eq!(p.malformed_lines, 1);
+        assert_eq!(p.events.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 半行不推进：写方正在写一个多字节字符时截断的尾巴，不得被计成畸形行
+    /// （修前 `error_len().is_none()` 分支就是为这个留的，必须保住）。
+    #[test]
+    fn an_incomplete_multibyte_tail_is_dropped_not_counted_as_malformed() {
+        let mut bytes = usage("2026-09-20T00:00:01Z", 10).into_bytes();
+        bytes.push(0x0A);
+        let tail = "{\"content\":\"元".as_bytes();
+        bytes.extend_from_slice(&tail[..tail.len() - 2]); // 只留 3 字节字符的前 1 字节
+        let text = decode_jsonl_bytes(&bytes);
+        let p = parse_jsonl("codex", "D:/fixture/t.jsonl", &text);
+        assert_eq!(p.malformed_lines, 0, "还在写的半行不得计成畸形行");
+        assert_eq!(p.events.len(), 1);
+        assert!(!text.contains("元"), "半行必须整条丢掉：{text}");
+    }
+
+    /// dsh 的 zstd 帧与纯文本共用同一个按行解码（口径一致，验收项 3）。
+    #[test]
+    fn zstd_frames_share_the_same_line_tolerance_as_plain_text() {
+        let dir = std::env::temp_dir().join(format!("tm-utf8-zstd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain_bytes = bytes_with_bad_middle_line();
+        let plain = dir.join("plain.jsonl");
+        std::fs::write(&plain, &plain_bytes).unwrap();
+        let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+        enc.write_all(&plain_bytes).unwrap();
+        let frame = enc.finish().unwrap();
+        let packed = dir.join("packed.jsonl.zstd");
+        std::fs::write(&packed, &frame).unwrap();
+
+        let a = read_jsonl("dsh", &packed).expect("zstd 分支同样不得因坏字节整文件失败");
+        let b = read_jsonl("dsh", &plain).expect("纯文本分支");
+        assert_eq!(a.malformed_lines, 1, "压缩帧里的坏行也要计成畸形行");
+        assert_eq!(a.malformed_lines, b.malformed_lines, "两条分支口径必须一致");
+        assert_eq!(a.events.len(), b.events.len());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
