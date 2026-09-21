@@ -38,3 +38,42 @@ export function epochMs(value) {
   if (!Number.isFinite(n) || n <= 0) return 0;
   return n < 1e11 ? Math.trunc(n * 1000) : Math.trunc(n);
 }
+
+/**
+ * 缓存写入的两种拼写（#75）：`cache_creation_input_tokens` 与 `cache_write_input_tokens`
+ * 是**同一个量**在不同版本里的两个名字，不是两个可以相加的量。规则必须只有一处实现——
+ * codex 与 workbuddy 都读它，桌面端对应 `collectors.rs::cache_write_of`（openai() 里
+ * 唯一那条 cache_write 通道，因此 workbuddy 与 codex 在桌面端天然同式）。
+ *
+ *  1. 只出一种 → 用它；两种都出且**数值相同** → 照用（只是重复写了一遍）。
+ *  2. 两种都出且**数值不同** → 无法判定上游说的是哪个量，**拒读记 0**。旧规则
+ *     `Math.max(两种)` 假设"同一份 payload 只会出其中一种"，此前没有任何 fixture
+ *     证明过这个假设；而 max 等于凭空取一个上游从没说过的较大值。
+ *
+ * 第二个返回值 `ws`（写法）是 codex 累计差分专用的：0 都没写 / 1 只 creation / 2 只 write /
+ * 3 两种都写且相等 / 4 两种都写但不等。相邻两条采样的 `ws` 都是"具体写法"（1/2/3）却不相同
+ * 时，说明累计序列来自两个版本的写入方，跨写法差分必然为负、会被 `.max(0)` 静默清零，
+ * 调用方要按"基线断了"处理。非累计的源（workbuddy）忽略 ws 即可。
+ *
+ * `readNumber` 让各源保留自己的数值口径（codex 用 `num()` 夹非负，workbuddy 用
+ * `tokenCount()`），共享的只是"哪个写法算哪个数"这一条判定。
+ */
+export const CW_NONE = 0;
+export const CW_CREATION = 1;
+export const CW_WRITE = 2;
+export const CW_SAME = 3;
+export const CW_CONFLICT = 4;
+
+export function cacheWriteOf(u, readNumber = tokenCount) {
+  const hasA = u?.cache_creation_input_tokens !== undefined;
+  const hasB = u?.cache_write_input_tokens !== undefined;
+  if (hasA && hasB) {
+    const a = readNumber(u.cache_creation_input_tokens);
+    const b = readNumber(u.cache_write_input_tokens);
+    if (a !== b) return { w: 0, ws: CW_CONFLICT }; // 无法判定：拒读，不取较大者
+    return { w: a, ws: CW_SAME };
+  }
+  if (hasA) return { w: readNumber(u.cache_creation_input_tokens), ws: CW_CREATION };
+  if (hasB) return { w: readNumber(u.cache_write_input_tokens), ws: CW_WRITE };
+  return { w: 0, ws: CW_NONE };
+}

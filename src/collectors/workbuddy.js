@@ -1,7 +1,7 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
-import { tokenCount, epochMs } from './tokens.js';
+import { tokenCount, epochMs, cacheWriteOf } from './tokens.js';
 
 /**
  * WorkBuddy 采集器：~/.WorkBuddy/projects/<dir>/<session>.jsonl（Electron 版 transcript）。
@@ -10,7 +10,8 @@ import { tokenCount, epochMs } from './tokens.js';
  *   `total = input + cache_write + output`）；缓存写入/思考量与 codex 一样有
  *   `cache_creation_input_tokens` / `cache_write_input_tokens` 与
  *   `reasoning_output_tokens` 三种字段名，#85 起两端都认（此前这边把 cache_write 与
- *   reasoning 写死成 0，逐字段对账永远对不上）；
+ *   reasoning 写死成 0，逐字段对账永远对不上）；两种缓存写入拼写的取舍走
+ *   tokens.js::cacheWriteOf（#75 统一规则，与桌面端 openai() 同一条）；
  * - providerData 携带 model（真实名，如 glm-5.3-flash）与 traceId（轮次键，
  *   供 credit 对账与费率自学习）；
  * - 工具调用在 type=function_call 记录（name + callId 去重）；
@@ -64,10 +65,11 @@ export async function collectWorkbuddyFile(store, { tool, path, fileId, offset }
       inputRaw);
     // #85：cache_write 与 reasoning 此前被写死成 0，而桌面端 openai(usage) 一直在读
     // 它们——同一份 transcript 的 cache_write 在两个 UI 里恒有一边是 0，逐字段对账
-    // 永远对不上。两种拼写取 max（同一 payload 只出一种），与桌面端同式。
-    const cacheWrite = Math.max(
-      tokenCount(u.cache_creation_input_tokens),
-      tokenCount(u.cache_write_input_tokens));
+    // 永远对不上。
+    // #75：两种拼写的取舍不再由各源自己写 `Math.max`——统一走 tokens.js::cacheWriteOf
+    // （只出一种用一种；两种都出且相等照用；两种都出不等则**拒读记 0**）。桌面端
+    // workbuddy 分支调用的就是 openai() 里同一条 cache_write_of，两源天然同式。
+    const cacheWrite = cacheWriteOf(u, tokenCount).w;
     const output = tokenCount(u.output_tokens);
     const reasoning = tokenCount(u.reasoning_output_tokens);
     // OpenAI 口径：input 已含缓存 → total = input + cache_write + output（拆列后不变）。

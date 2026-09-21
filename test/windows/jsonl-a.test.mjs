@@ -308,6 +308,95 @@ console.log('\n[codex] Windows cwd + 差分黄金数字 + 归档搬移不重复 
   rmSync(tmp, { recursive: true, force: true });
 }
 
+console.log('\n[#75] codex 三条跨端口径：缺 total 的采样 / 重复通知判据 / cache_write 两种写法');
+{
+  // 同一份期望数字的桌面端对照测试：
+  // desktop/src-tauri/tests/sources.rs::codex_snapshot_without_total_usage_and_duplicate_notifications_agree
+  // desktop/src-tauri/tests/sources.rs::codex_cache_write_spellings_conflict_and_switch
+  const tmp = mkdtempSync(join(tmpdir(), 'jsonl-a-75-'));
+  const run = async (name, records) => {
+    const file = join(tmp, `${name}.jsonl`);
+    writeFileSync(file, crlf(records), 'utf8');
+    const store = makeStore();
+    const r = await collectCodexFile(store, { path: file, fileId: `f-${name}`, offset: 0 });
+    const ev = eventsOf(store, 'codex');
+    closeStore(store);
+    return { r, ev };
+  };
+  const tc = (n) => ISO(200000 - n * 1000); // 每条采样一个独立毫秒，基线键才不会互撞
+  const meta = JSON.stringify({ type: 'session_meta', payload: { id: 'codex-75', cwd: 'Q:\\我的 项目\\projK' } });
+  const usage = (o) => ({ input_tokens: o.i, cached_input_tokens: o.c, output_tokens: o.o, reasoning_output_tokens: o.r ?? 0, ...o.extra });
+  const count = (o) => JSON.stringify({
+    timestamp: tc(o.n), type: 'event_msg',
+    payload: { type: 'token_count', info: { ...(o.total ? { total_token_usage: usage(o.total) } : {}), ...(o.last ? { last_token_usage: usage(o.last) } : {}) } },
+  });
+
+  // ① 只有 last_token_usage、没有 total_token_usage：修前这边整条丢弃，桌面端落库
+  const noTotal = await run('no-total', [
+    meta,
+    count({ n: 1, last: { i: 500, c: 400, o: 60, r: 10, extra: { cache_write_input_tokens: 20 } } }),
+    // ② 首个带累计值的采样：只认 last（本轮量），不拿累计值当单次用量
+    count({ n: 2, total: { i: 1000, c: 800, o: 100, r: 40, extra: { cache_write_input_tokens: 30, total_tokens: 2000 } },
+      last: { i: 200, c: 100, o: 40, r: 20, extra: { cache_write_input_tokens: 10 } } }),
+    // 累计值一模一样 = 重复通知
+    count({ n: 3, total: { i: 1000, c: 800, o: 100, r: 40, extra: { cache_write_input_tokens: 30, total_tokens: 2000 } },
+      last: { i: 200, c: 100, o: 40, r: 20, extra: { cache_write_input_tokens: 10 } } }),
+    // 只有 reasoning 与上游 total_tokens 在动：本轮没有可记用量，两端都不落库
+    count({ n: 4, total: { i: 1000, c: 800, o: 100, r: 90, extra: { cache_write_input_tokens: 30, total_tokens: 2050 } },
+      last: { i: 200, c: 100, o: 40, r: 20, extra: { cache_write_input_tokens: 10 } } }),
+  ]);
+  ok('#75① 缺 total_token_usage 的采样不再被丢弃', noTotal.ev.length === 2, JSON.stringify(noTotal.ev.map((e) => e.total_tokens)));
+  ok('#75① 该采样按 last 落库 580（100+400+20+60）',
+    noTotal.ev[0]?.total_tokens === 580 && noTotal.ev[0]?.cache_write === 20
+    && noTotal.ev[0]?.input_tokens === 100 && noTotal.ev[0]?.cached_input === 400,
+    JSON.stringify(noTotal.ev[0]));
+  ok('#75① 首个带累计值的采样按 last 落库 250，不记整段累计',
+    noTotal.ev[1]?.total_tokens === 250, JSON.stringify(noTotal.ev[1]));
+  ok('#75② 重复通知与"只有 reasoning 在动"两条都不落库',
+    noTotal.ev.length === 2 && noTotal.r.inserted === 2, `${noTotal.ev.length}/${noTotal.r.inserted}`);
+  ok('#75② 不再产出各列全 0 的事件（修前这边会多一条，桌面端一条不落）',
+    !noTotal.ev.some((e) => e.total_tokens === 0), JSON.stringify(noTotal.ev.map((e) => e.total_tokens)));
+
+  // ③ 同一条记录里两种 cache_write 写法数值不同 → 无法判定，拒读记 0（不取较大者）
+  const conflict = await run('cw-conflict', [
+    meta,
+    count({ n: 5, total: { i: 1000, c: 600, o: 100, r: 40, extra: { cache_creation_input_tokens: 999, cache_write_input_tokens: 10, total_tokens: 1800 } },
+      last: { i: 1000, c: 600, o: 100, extra: { cache_creation_input_tokens: 999, cache_write_input_tokens: 10 } } }),
+  ]);
+  ok('#75③ 两种写法冲突时 cache_write 拒读记 0（既不取较大者也不相加）',
+    conflict.ev.length === 1 && conflict.ev[0].cache_write === 0
+    && conflict.ev[0].total_tokens === 1100, JSON.stringify(conflict.ev[0]));
+
+  const agreed = await run('cw-same', [
+    meta,
+    count({ n: 6, total: { i: 1000, c: 600, o: 100, r: 40, extra: { cache_creation_input_tokens: 45, cache_write_input_tokens: 45, total_tokens: 1800 } },
+      last: { i: 1000, c: 600, o: 100, extra: { cache_creation_input_tokens: 45, cache_write_input_tokens: 45 } } }),
+  ]);
+  ok('#75③ 两种写法数值一致则照用 45（只是重复写了一遍）',
+    agreed.ev.length === 1 && agreed.ev[0].cache_write === 45
+    && agreed.ev[0].total_tokens === 1145, JSON.stringify(agreed.ev[0]));
+
+  // ③ 相邻两条采样各只写一种写法 → 累计序列断了，按回落改读本条 last；
+  // 修前是跨写法差分：345 - 500 = -155 → .max(0) → 那一轮的缓存写入静默清零
+  const switched = await run('cw-switch', [
+    meta,
+    count({ n: 7, total: { i: 1000, c: 800, o: 100, r: 40, extra: { cache_write_input_tokens: 500, total_tokens: 2500 } },
+      last: { i: 1000, c: 800, o: 100, extra: { cache_write_input_tokens: 500 } } }),
+    count({ n: 8, total: { i: 1400, c: 1000, o: 150, r: 60, extra: { cache_creation_input_tokens: 345, total_tokens: 3000 } },
+      last: { i: 400, c: 200, o: 50, r: 20, extra: { cache_creation_input_tokens: 45 } } }),
+  ]);
+  ok('#75③ 换写法的那一轮按 last 记到 cache_write 45（修前被 .max(0) 清零）',
+    switched.ev.length === 2 && switched.ev[1].cache_write === 45,
+    JSON.stringify(switched.ev.map((e) => e.cache_write)));
+  ok('#75③ 该轮总量 495 = 200+200+45+50（修前会是 450）',
+    switched.ev[0].total_tokens === 1600 && switched.ev[1].total_tokens === 495,
+    JSON.stringify(switched.ev.map((e) => e.total_tokens)));
+  ok('#75③ 写法相同（都是 write）时相邻差分不受影响',
+    switched.ev[0].cache_write === 500, String(switched.ev[0].cache_write));
+
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 if (failed) {
   console.error(`\njsonl-a FAILED ${failed}`);
   process.exit(1);

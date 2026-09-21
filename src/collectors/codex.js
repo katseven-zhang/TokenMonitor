@@ -1,6 +1,9 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
+import {
+  cacheWriteOf as sharedCacheWriteOf, CW_CREATION, CW_WRITE, CW_SAME,
+} from './tokens.js';
 
 /**
  * rate_limits 规范化（#44；#58 修正 resets_at 形态）：
@@ -68,7 +71,7 @@ export function normalizeRateLimits(rl, ts) {
  *   缓存写入同样有两种写法 cache_creation_input_tokens / cache_write_input_tokens
  *   （#75 修前三处只各认一种：Node 端 codex.js 认 cache_write_*，桌面端 openai() 认
  *   cache_creation_*，于是同一份日志两端 cache_write 恒有一边为 0）。
- *   同一份 payload 只会出其中一种，取 max 即"有哪个读哪个"，绝不相加。
+ *   同一份 payload 只会出其中一种"这个假设由 #75 明确化，见下方 cacheWriteOf()。
  * - OpenAI 口径 input_tokens 已含 cached：cached 必须夹在 [0, input]，否则
  *   "新输入 = input - cached" 会变负，两端总数就不一致了。
  * - 数字一律走 num() 强转：日志里出现过字符串形态的用量，`"123" + 0` 是拼接不是相加。
@@ -78,14 +81,26 @@ const num = (v) => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 };
 
+/**
+ * #75：两个 cache_write 写法的取舍规则在 `collectors/tokens.js::cacheWriteOf()`（workbuddy
+ * 共用同一条判定）。这里再包一层是为了带上 codex 自己的数值口径 `num()`（非负、非有限值
+ * 一律 0），并且给累计差分用 `ws`（写法）字段。codex 特有的一条见 collectCodexFile：
+ * 相邻两条采样各自写了具体写法而写法不同 = 累计序列断了，按回落处理，不跨写法做差分
+ * （跨写法差分必然为负、会被 `.max(0)` 静默清零，那一轮的缓存写入就这么没了）。
+ * 桌面端 `collectors.rs::cache_write_of` + `spelling_changed` 同一条规则。
+ */
+const cacheWriteOf = (u) => sharedCacheWriteOf(u, num);
+
 export function codexUsage(u) {
   const input = num(u.input_tokens);
   const cached = Math.max(num(u.cached_input_tokens), num(u.cache_read_input_tokens));
   const clamped = Math.min(cached, input);
+  const cw = cacheWriteOf(u);
   return {
     i: input,
     c: clamped,
-    w: Math.max(num(u.cache_creation_input_tokens), num(u.cache_write_input_tokens)),
+    w: cw.w,
+    ws: cw.ws,
     o: num(u.output_tokens),
     r: num(u.reasoning_output_tokens),
     tt: num(u.total_tokens),
@@ -115,12 +130,16 @@ function parts(u) {
  * Codex rollout 采集器（~/.codex/sessions 与 archived_sessions，2.4GB 量级）。
  *
  * - token_count.info.total_token_usage 是会话累计值：稳态按相邻事件差分得到单次用量，
- *   差分为 0 的事件（重复通知）自然跳过。
+ *   算不出用量的事件（重复通知）不落库，判据与桌面端落库前的 `total() > 0` 同一条
+ *   （#75：此前这边看上游 total_tokens 的差分，"只有 reasoning 在动"的采样两端一边
+ *   落一条全 0 事件、一边不落，事件数不同）。
+ * - 缺 total_token_usage 的采样不再整条丢弃（#75）：它带 last_token_usage 时那就是本轮
+ *   真实用量，与桌面端同样落库；两个都没有才算坏行。
  * - 首个采样与累计值回落（上下文压缩、resume/fork 继承父线程基线）不能差分，也不能
  *   把整个累计值当本轮用量——那会把被继承的父会话重复计入（实测 9 倍，见
  *   docs/ARCHITECTURE.md Codex 段），只认 info.last_token_usage；它缺失时宁可不记
  *   （#75 修前桌面端会退回整段累计值）。修前 Node 端在回落时把差分为负的事件整条丢掉，
- *   等于丢掉压缩后那一轮的用量。
+ *   等于丢掉压缩后那一轮的用量。cache_write 换了写法也算基线断，走同一条回落。
  * - 模型名（版本差异，两种都认）：新格式 thread_settings_applied.thread_settings.model；
  *   旧格式 turn_context.payload.model（2026-09 之前的 rollout）。
  * - 工具调用：`response_item` 且 `payload.type` 为 `function_call` 或 `custom_tool_call`
@@ -190,7 +209,12 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
     }
     if (payload.type === 'token_count') {
       const info = payload.info;
-      if (!info?.total_token_usage || !Number.isFinite(ts)) return;
+      // #75(a)：时间读不到才丢（桌面端在这一步之前就已 continue，见 collectors.rs 的
+      // `let Some(ts) = … else { continue }`）。**缺 total_token_usage 不再整条丢弃**，
+      // 与桌面端 `else if info["last_token_usage"].is_object()` 同式：没有累计基线时
+      // last_token_usage 本身就是"本轮量"，不需要基线；两个都没有才算坏行。
+      if (!Number.isFinite(ts)) return;
+      const hasTotal = !!info?.total_token_usage && typeof info.total_token_usage === 'object';
 
       if (payload.rate_limits) {
         const norm = normalizeRateLimits(payload.rate_limits, ts);
@@ -210,16 +234,26 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         // 不抛穿、不中断 token 事件采集
       }
 
-      const cur = codexUsage(info.total_token_usage);
+      const cur = hasTotal ? codexUsage(info.total_token_usage) : null;
       const prev = st.cum;
-      st.cum = cur;
+      // 只有真读到累计值才推进基线：某条采样缺 total 不能把已有基线抹掉，
+      // 否则下一条读到的累计值会跟 null 比出"首个采样"，把整段累计当本轮用量计入。
+      if (cur) st.cum = cur;
 
       // 累计值回落 = 上下文压缩 / resume 换了基线（与桌面端 reset 判定同式：
       // input 含缓存后的总量、output 任一变小）
-      const reset = prev && (cur.i < prev.i || cur.o < prev.o);
-      if (!prev || reset) {
-        // 基线/回落：只认 info.last_token_usage（本轮真实用量）。它缺失就丢掉这一条——
-        // 把整段累计值记成单次用量会在 resume/fork 会话上重复计入父线程（实测 9 倍）。
+      const reset = !!cur && !!prev && (cur.i < prev.i || cur.o < prev.o);
+      // #75(c) 情形 2：两条**各自写了具体写法**的采样用了不同字段名，说明累计序列来自
+      // 两个版本的写入方，跨写法差分必然为负、会被 .max(0) 静默清零 —— 与回落走同一条
+      // 处理。有一种写法是"这条压根没写缓存"（CW_NONE / 冲突拒读）时不算序列断了：那时
+      // 上一轮在这条序列上本来就是 0，字段第一次出现按普通差分读，不需要回落到 last。
+      const concreteSpelling = (ws) => ws === CW_CREATION || ws === CW_WRITE || ws === CW_SAME;
+      const spellingChanged = !!cur && !!prev
+        && concreteSpelling(cur.ws) && concreteSpelling(prev.ws) && cur.ws !== prev.ws;
+      if (!cur || !prev || reset || spellingChanged) {
+        // 无基线可差（首个采样 / 回落 / 没有 total / 写法变了）：只认 info.last_token_usage
+        // （本轮真实用量）。它缺失就丢掉这一条——把整段累计值记成单次用量会在
+        // resume/fork 会话上重复计入父线程（实测 9 倍）。
         const last = info.last_token_usage && typeof info.last_token_usage === 'object'
           ? codexUsage(info.last_token_usage) : null;
         if (!last) return;
@@ -243,7 +277,13 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         i: cur.i - prev.i, c: cur.c - prev.c, w: cur.w - prev.w,
         o: cur.o - prev.o, r: cur.r - prev.r, tt: cur.tt - prev.tt,
       };
-      if (d.i <= 0 && d.o <= 0 && d.w <= 0 && d.tt <= 0) return; // 无新用量（重复通知）
+      const p = parts(d);
+      // #75(b)：重复通知的判据两端统一 —— "这一轮算不出任何用量就不落库"，
+      // 与桌面端落库前的 `t.total() > 0`（collectors.rs）是同一条不变式。
+      // 旧判据 `d.i<=0 && d.o<=0 && d.w<=0 && d.tt<=0` 看的是上游 total_tokens 的差分，
+      // 于是"只有 reasoning / 只有 total_tokens 在动"的采样这边落一条各列全 0 的事件、
+      // 桌面端一条不落，同一份日志两端事件数不同。
+      if (p.total_tokens <= 0) return; // 无新用量（重复通知）
       st.seq++;
       inserted += store.insertEvent({
         ts,
@@ -253,7 +293,7 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         project: st.project,
         // cached 夹进 [0, 输入差分]、各列非负（parts 与桌面端 delta() 同式）：缓存修正
         // 让 Δc > Δi 时新输入不能变负，否则两端总数不同
-        ...parts(d),
+        ...p,
         dedup_key: `codex:${fileId}:${st.seq}`, // 会话键+序号：归档搬移后路径变了也不能重复计数
       });
     }

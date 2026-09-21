@@ -62,9 +62,31 @@ block3 tool_use   3594/47360/309   ← 唯一带真实输出的一行
 
 ### Codex（坑最多）
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`：
-- `token_count.info.total_token_usage` 是**会话累计值**，按相邻事件差分取单次用量；差分 0 的重复通知自然跳过
+- `token_count.info.total_token_usage` 是**会话累计值**，按相邻事件差分取单次用量
+- **重复通知的判据两端统一为一条不变式："这一轮算不出用量就不落库"**（#75）。桌面端是落库前的
+  `tokens.total() > 0`；Node 端此前看上游 `total_tokens` 的差分（`d.tt <= 0`），于是"只有
+  reasoning / 只有 total_tokens 在动"的采样在 Node 端落一条五列全 0 的事件、桌面端一条不落，
+  同一份日志两端事件数不同。`total()` 不含 reasoning，与 `store.insertEvent` 的落库公式同构
 - **resume/fork 会话继承父线程累计基线**——若直接对"每文件终值"求和会把同一对话重复计数（实测差 9 倍），差分 + 首事件建基线天然正确
-- **首个采样与累计值回落（上下文压缩 / resume 换基线）不走差分**：只认 `info.last_token_usage`（本轮真实用量，真实 rollout 恒有该字段）；它缺失时两端都**不记事件**，绝不退回整段累计值（#75 统一：修前桌面端退回整段累计值 → resume 会话重复计入，Node 端则把回落那一轮整条丢掉 → 少计）。缓存写入 `cache_creation_input_tokens` / `cache_write_input_tokens` 两种拼写两端都认（取 max，同一 payload 只出一种），`cached` 一律夹进 `[0, input]`
+- **首个采样、累计值回落、以及缺 `total_token_usage` 的采样都不走差分**（#75）：只认
+  `info.last_token_usage`（本轮真实用量）；它缺失时两端都**不记事件**，绝不退回整段累计值
+  （修前桌面端退回整段累计值 → resume 会话重复计入，Node 端则把回落那一轮整条丢掉 → 少计）。
+  缺 `total_token_usage` 但带 `last_token_usage` 的一条，修前 Node 端在入口 `if (!info?.total_token_usage) return`
+  处**整条丢弃**、桌面端照记 —— 现在两端都记，且累计水位不动（读不到累计值就不能推进基线，
+  否则下一条累计值会跟空基线比出"首个采样"、把整段历史当本轮用量计入）
+- **`cache_creation_input_tokens` / `cache_write_input_tokens` 是同一个累计量的两个写法**，
+  不是两个可以相加的量（#75）。规则明确为三条，两端同式
+  （Node `collectors/codex.js::cacheWriteOf` ↔ 桌面端 `collectors.rs::cache_write_of`）：
+  1. 只出一种 → 用它；两种都出且**数值相同** → 照用（只是重复写了一遍）。
+  2. 两种都出且**数值不同** → 无法判定上游说的是哪个量，该条记录的 `cache_write` **拒读记 0**。
+     旧规则 `.max()` 假设"同一 payload 只会出一种"，此前没有任何 fixture 证明过这个假设，
+     而 `.max()` 等于凭空取一个上游从没说过的较大值。
+  3. 相邻两条采样**各自都写了具体写法**而写法不同（codex 升级换了字段名）→ 跨写法差分必然为负、
+     会被 `delta()` 的 `.max(0)` **静默清零**（那一轮的缓存写入就这么没了，也不报错），
+     因此算"累计序列断了"，与回落同一条处理：改读本条的 `last_token_usage`。
+     上一条"压根没写缓存字段"（或上一条因规则 2 被拒读）**不算序列断**：那条在序列上就是 0，
+     字段第一次出现按普通差分读。
+- `cached` 一律夹进 `[0, input]`，`input` 已含缓存命中
 - 模型名版本漂移：新格式在 `thread_settings_applied.thread_settings.model`，旧格式在 `turn_context.payload.model`；续写文件两者皆无 → 按 `session_meta.parent_thread_id` 继承链回填（dedup 只防重插不更新旧行，需显式 UPDATE）
 - `rate_limits` 为账号级配额快照（used_percent/window/resets_at），只保留全局最新（按 ts，与扫描顺序无关）
 - 工具调用在 `response_item` 且 `payload.type` 为 `function_call` 或 `custom_tool_call`（name/call_id）；
@@ -193,7 +215,7 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 | 5 | 空 tool id：桌面端 `{session}:{id}` 里 id 为空时同会话的无名调用全塌成一个键互相顶掉 | **已对齐**：`tool()` 统一在 id 为空时按 `line:{行号}` 定位（Node 端各源本来就分别回落到行号/块序号/记录 id，从不产生空键）。codex 的 Node 端也补了对称缺陷：无 `call_id` 时此前只用 `st.seq` 定键，而 seq 只在 token_count 上自增，两次采样之间的第二条 `function_call` 会被 `INSERT OR IGNORE` 静默丢掉；现在同 seq 内的第二条起带 `:{序号}` 后缀，**首条仍沿用裸 seq 的原键**，存量行不位移 |
 | 6 | opencode 工具调用时间：桌面端用 `part.time_created`，Node 端优先 `data.state.time.start` | **已对齐**：桌面端改成 `state.time.start` 优先、缺失才退回列上的 `time_created`；两处都读不到时计 malformed |
 | 7 | antigravity 输出/时间/零用量三分支 + steps 读失败 | **已对齐**（`read_antigravity` 与 `decodeGenerationRow` 同式）：output 三分支——`f3>0` 用 `f3`，否则 `f10` 在场用 `f10+f9`，否则只剩 `f9`（旧写法用"字段在不在"判断，于是 `f3=0` 在桌面端记 0 输出）；时间**行内值优先**、缺失才回退同 idx 的 steps 时间（旧写法取 max，steps 一行覆盖多次生成，会把事件推到比真实完成时刻更晚的位置）；零用量判据 `input/output/cacheRead 全 0 → 丢` 补到桌面端。**steps 读失败两侧走不同通道但保证同一件事**：Node 端扣住水位不越过未采样的生成（#95），桌面端整份结果判失败、保留缓存里已有的行（`collect_file` 不会用读不全的结果替换缓存）——都是"读不到时间的那些生成不会永久丢失"，故不算漂移 |
-| 8 | workbuddy：Node 端把 `cache_write`/`reasoning` 写死 0，且不归一秒级时间戳 | **已对齐（补 Node 端）**：`cache_creation_input_tokens`/`cache_write_input_tokens` 两种拼写取 max（与 #75 的 codex 同一条规则）、`reasoning_output_tokens` 读出来、缓存命中同样认 `cached_input_tokens` 别名；请求数关卡统一到 `total <= 0`（此前只带缓存写入的一轮在 Node 端被丢、桌面端记）。秒级 `timestamp` 归一为毫秒（此前落到 1970-01-21，Node 面板的"今日/本周"里根本没有它）。workbuddy `version` 1→2 |
+| 8 | workbuddy：Node 端把 `cache_write`/`reasoning` 写死 0，且不归一秒级时间戳 | **已对齐（补 Node 端）**：`cache_creation_input_tokens`/`cache_write_input_tokens` 走与 codex **同一处** `tokens.js::cacheWriteOf`（#75 统一规则：只出一种用一种、两种相等照用、两种不等拒读记 0；桌面端 workbuddy 分支调用的 `openai()` 里就是同一条 `cache_write_of`）、`reasoning_output_tokens` 读出来、缓存命中同样认 `cached_input_tokens` 别名；请求数关卡统一到 `total <= 0`（此前只带缓存写入的一轮在 Node 端被丢、桌面端记）。秒级 `timestamp` 归一为毫秒（此前落到 1970-01-21，Node 面板的"今日/本周"里根本没有它）。workbuddy `version` 1→2 |
 | 9 | grok：Node 端有进行中轮次的上下文水位快照（`saveQuota('grok:live')`），桌面端没有 | **有意保留，不在本轮补齐**：桌面端 GUI 没有任何消费这个水位的界面（`web/app.js` 的"Grok 进行中"卡片只存在于 Node 版面板里），要"对齐"就得连 UI 一起做，那不是采集口径修复而是新功能。桌面端的 `quota` 表与 `Parsed.quotas` 通道是通的（codex rate_limits 就走这条路），需要时按 `_meta.totalTokens → Quota{agent:"grok:live"}` 加即可。这一行的意义是让下一个读代码的人知道这是**已知缺口**而不是漏看 |
 | 10 | `scanner.rs` 的 `seen` 去重一律 `to_lowercase()` | **已改成按平台**：Windows 路径大小写不敏感，不归一会把同一份日志采两遍（`raw_events` 主键含 path，两份都留下）；POSIX 恰好相反，`/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，一律 lowercase 会让后者被当成重复**静默跳过**——少一份用量且零错误。抽成 `dedup_key()`，`to_lowercase()` 只编进 Windows 构建 |
 

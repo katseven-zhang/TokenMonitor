@@ -2636,13 +2636,22 @@ console.log('\n[28] #85 双端采集口径（project 取末段 / 工具身份与
       // 无 rec.id：编不出稳定去重键，两端都不入库（桌面端此前用 {ts}:{行号} 合成键）
       { timestamp: 1789990240000, sessionId: 'p85wb',
         message: { usage: { input_tokens: 10, output_tokens: 5 } } },
+      // #75：两种缓存写入拼写同时出现且数值不同 → 无法判定上游说的是哪个量，
+      // 两端都**拒读记 0**（此前 Node 端 Math.max 会静默取 999）
+      { timestamp: 1789990300000, id: 'wb-85c', sessionId: 'p85wb',
+        providerData: { model: 'glm-85' },
+        message: { usage: { input_tokens: 300, cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 999, cache_write_input_tokens: 10, output_tokens: 30 } } },
     ].map((o) => JSON.stringify(o)).join('\n') + '\n');
     await collectWorkbuddyFile(store, { tool: 'workbuddy', path: f, fileId: 'p85wb', offset: 0 });
     const w = rows('workbuddy');
     ok('#85 workbuddy cache_write/reasoning 不再是写死的 0',
-      w.length === 2 && w[0].w === 20 && w[0].r === 12, JSON.stringify(w));
+      w.length === 3 && w[0].w === 20 && w[0].r === 12, JSON.stringify(w));
     ok('#85 workbuddy input 含缓存：500 拆成 200+300，total = 500+20+50 = 570',
       w[0]?.i === 200 && w[0]?.c === 300 && w[0]?.t === 570, JSON.stringify(w[0]));
+    ok('#75 workbuddy 两种拼写冲突时拒读记 0（total 330 而非取较大者的 1329）',
+      w[2]?.w === 0 && w[2]?.t === 330 && w[2]?.i === 200 && w[2]?.c === 100,
+      JSON.stringify(w[2]));
     ok('#85 workbuddy 秒级 timestamp 归一为毫秒（此前落到 1970-01-21）',
       w[0]?.ts === 1789990120000 && w[1]?.ts === 1789990180000,
       JSON.stringify(w.map((x) => x.ts)));

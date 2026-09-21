@@ -86,6 +86,34 @@ fn project_name(value: &str) -> String {
         base
     }
 }
+/// #75：两个 cache_write 写法（`cache_creation_input_tokens` /
+/// `cache_write_input_tokens`）是**同一个累计量**在 codex 不同版本里的两个名字，不是两个
+/// 可以相加的量。旧规则 `.max()` 假设"同一份 payload 只会出其中一种"，而此前没有任何 fixture
+/// 证明过这个假设；它在两种情形下出错，规则在此明确：
+///  1) 一条记录同时带两种写法且数值不同 —— 无法判定上游说的是哪个量，`.max()` 等于凭空造一个
+///     上游从没说过的数。→ 值记 0（**拒读**），写法标为 4 让调用方看得见。数值相同则照用（3）。
+///  2) 相邻两条采样各只带一种写法（升级换了字段名）—— 累计差分变成 `新写法值 - 旧写法值`，
+///     必然为负，`delta()` 里的 `.max(0)` 把那一轮的缓存写入静默清零。→ 写法换了就说明累计
+///     序列已断，调用方按"回落"处理（改读本条的 last_token_usage），不跨写法做差分。
+/// 写法：0 都没写 / 1 只写 creation / 2 只写 write / 3 两种都写且相等 / 4 两种都写但不等。
+/// 与 Node 端 `collectors/codex.js::cacheWriteOf()` 同一条规则。
+fn cache_write_of(v: &Value) -> (i64, u8) {
+    let a = v.get("cache_creation_input_tokens");
+    let b = v.get("cache_write_input_tokens");
+    match (a, b) {
+        (Some(x), Some(y)) => {
+            let (p, q) = (json_int(x), json_int(y));
+            if p != q {
+                (0, 4)
+            } else {
+                (p, 3)
+            }
+        }
+        (Some(x), None) => (json_int(x), 1),
+        (None, Some(y)) => (json_int(y), 2),
+        _ => (0, 0),
+    }
+}
 fn openai(v: &Value) -> Tokens {
     let input = number(v, "input_tokens");
     let cached = number(v, "cached_input_tokens")
@@ -96,9 +124,8 @@ fn openai(v: &Value) -> Tokens {
         cached,
         // #75: 缓存写入在不同 codex 版本里写作 cache_creation_input_tokens 或
         // cache_write_input_tokens。此前本函数只认前者、Node 端 codex.js 只认后者，
-        // 同一份日志两端恒有一边记 0。同一 payload 只会出一种，取 max = 有哪个读哪个。
-        cache_write: number(v, "cache_creation_input_tokens")
-            .max(number(v, "cache_write_input_tokens")),
+        // 同一份日志两端恒有一边记 0。两种写法的取舍见 cache_write_of()。
+        cache_write: cache_write_of(v).0,
         output: number(v, "output_tokens"),
         reasoning: number(v, "reasoning_output_tokens"),
     }
@@ -197,6 +224,9 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             .unwrap_or_default();
     }
     let mut previous: Option<Tokens> = None;
+    // #75：累计水位是"哪个写法读出来的"，写法一换差分就跨了两个版本的字段名（见
+    // cache_write_of）。与 Node 端 st.cum.ws 同一个作用。
+    let mut previous_ws: u8 = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -307,19 +337,29 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                     model = first(&[string(info, "model")], &model);
                     if info["total_token_usage"].is_object() {
                         let cur = openai(&info["total_token_usage"]);
-                        if previous.as_ref() == Some(&cur) {
+                        let cur_ws = cache_write_of(&info["total_token_usage"]).1;
+                        if previous.as_ref() == Some(&cur) && cur_ws == previous_ws {
                             continue;
                         }
                         let reset = previous.as_ref().is_some_and(|prev| {
                             cur.input + cur.cached < prev.input + prev.cached
                                 || cur.output < prev.output
                         });
+                        // #75 情形 2：两条各自写了具体写法的采样用了不同字段名，说明累计序列
+                        // 来自两个版本的写入方，跨写法做差分必然为负、会被 delta() 的 .max(0)
+                        // 静默清零 —— 与"回落"走同一条处理：改读本条采样的 last_token_usage。
+                        // 上一轮"压根没写缓存"（写法 0 / 冲突拒读）不算序列断了：那时它在
+                        // 这条序列上就是 0，字段第一次出现按普通差分读（与 Node 端
+                        // codex.js 的 concreteSpelling 同一条收窄）。
+                        let concrete_ws = |w: u8| (1..=3).contains(&w);
+                        let spelling_changed =
+                            concrete_ws(cur_ws) && concrete_ws(previous_ws) && cur_ws != previous_ws;
                         // #75 与 Node 端 codex.js 对齐：首个采样与累计值回落都不能用差分，
                         // 也都不能把整段累计值当单次用量 —— resume/fork 会话继承了父线程的
                         // 累计基线，记整段会把父会话重复计入（docs/ARCHITECTURE.md Codex 段
                         // 实测 9 倍）。只认 info.last_token_usage（本轮真实用量）；它缺失时
                         // 宁可不记（修前这里退回 cur.clone()）。
-                        tokens = if previous.is_none() || reset {
+                        tokens = if previous.is_none() || reset || spelling_changed {
                             info.get("last_token_usage")
                                 .filter(|v| v.is_object())
                                 .map(openai)
@@ -333,7 +373,11 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                             cur.reasoning
                         );
                         previous = Some(cur);
+                        previous_ws = cur_ws;
                     } else if info["last_token_usage"].is_object() {
+                        // #75：缺 total_token_usage 但带 last_token_usage 的采样两端**都落库**
+                        // （Node 端修前在这里整条丢弃）。last_token_usage 本来就是本轮量，
+                        // 不需要累计基线；累计水位与写法都不动，下一条带 total 的采样照旧差分。
                         tokens = Some(openai(&info["last_token_usage"]));
                         key = format!("{session}:{ts}:{}", info["last_token_usage"]);
                     }
@@ -1077,6 +1121,10 @@ mod tests {
     /// `test/run.mjs` 的 [17] 段（`#75` 块），两端任一改动都会同时变红。
     /// events = [125, 70, 85, 52]（重复通知那条不产事件），缺 last_token_usage 的
     /// 孤立首采样不产事件。
+    /// 第 5 行（→ 52）是 #75 刻意**不**改的那一种：上一轮的 total 里压根没写任何
+    /// cache_write 写法（写法=0，序列上就是 0），这一轮第一次出现 `cache_creation`
+    /// 7 —— 按普通差分读成 7，而不是回落到本轮的 2。只有两条采样**各自**写了具体写法
+    /// 且写法不同，才算累计序列断了（`codex_cache_write_spellings_conflict_and_switch`）。
     #[test]
     fn codex_baseline_reset_and_cache_write_match_node_golden_numbers() {
         const F: &str = r#"{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10}}}}
@@ -1433,12 +1481,18 @@ mod tests {
         assert_eq!(dsh.events[0].project, "我的 项目");
         assert_eq!(dsh.events[0].tokens.total(), 1480);
 
-        const WB_85: &str = r#"{"timestamp":1789990120,"id":"wb-85","sessionId":"p85wb","providerData":{"model":"glm-85","traceId":"tr-85"},"message":{"usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":50}}}"#;
+        // #75：两种缓存写入拼写同时出现在一条记录里且数值不同 → 无法判定上游说的是哪个量，
+        // 两端都**拒读记 0**（此前 Math.max / .max() 会静默取 999，凭空造一个没用过的数）。
+        // Node 端同一条记录与同样的期望数字在 test/run.mjs 的 [#85 WorkBuddy] 段。
+        const WB_85: &str = r#"{"timestamp":1789990120,"id":"wb-85","sessionId":"p85wb","providerData":{"model":"glm-85","traceId":"tr-85"},"message":{"usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":50}}}
+{"timestamp":1789990300000,"id":"wb-85c","sessionId":"p85wb","providerData":{"model":"glm-85"},"message":{"usage":{"input_tokens":300,"cache_read_input_tokens":100,"cache_creation_input_tokens":999,"cache_write_input_tokens":10,"output_tokens":30}}}"#;
         let wb = parse_jsonl("workbuddy", r"D:\Work\.WorkBuddy\projects\x-WorkBuddy-我的 项目\p85wb.jsonl", WB_85);
-        assert_eq!(wb.events.len(), 1, "{:?}", wb.events);
+        assert_eq!(wb.events.len(), 2, "{:?}", wb.events);
         assert_eq!(wb.events[0].ts, 1_789_990_120_000);
         assert_eq!(wb.events[0].project, "我的 项目", "目录名取 -WorkBuddy- 之后那段");
         assert_eq!(wb.events[0].tokens.total(), 550);
+        assert_eq!(wb.events[1].tokens.cache_write, 0, "两种拼写冲突时不许取较大者");
+        assert_eq!(wb.events[1].tokens.total(), 330, "200+100+0+30，而非取较大者的 1329");
     }
 
     /// #85：工具身份与记录类型门槛，四项都是"两端同一份日志必须给出同一张榜"。

@@ -395,6 +395,116 @@ fn dsh_same_seq_legacy_chunks_are_not_overwritten_in_the_cache() {
     }
 }
 
+/// #75①②：缺 `total_token_usage` 的采样与"重复通知"的判据，两端各落几条。
+/// 修前 Node 端在 `!info?.total_token_usage` 处整条 return，桌面端这边一直按
+/// `info.last_token_usage` 落库 —— 同一份日志两端事件数不同。
+/// 修前 Node 端判重复通知看的是上游 `total_tokens` 的差分（`d.tt<=0`），于是
+/// "只有 reasoning 在动"的采样这边落一条各列全 0 的事件、桌面端 `total()>0` 一道关
+/// 拦住，同样是一边多一条。期望统一为"这一轮算不出用量就不落库"。
+/// Node 侧同一组期望数字见 test/windows/jsonl-a.test.mjs 的 [#75] 段。
+#[test]
+fn codex_snapshot_without_total_usage_and_duplicate_notifications_agree() {
+    let u = |i: i64, c: i64, o: i64, r: i64, extra: &str| {
+        format!(
+            "{{\"input_tokens\":{i},\"cached_input_tokens\":{c},\"output_tokens\":{o},\"reasoning_output_tokens\":{r}{extra}}}"
+        )
+    };
+    // ① 只有 last_token_usage：本轮量 500/400 + cw 20 + out 60 → 100+400+20+60 = 580
+    let only_last = format!(
+        r#"{{"timestamp":{TS},"type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{}}}}}}}"#,
+        u(500, 400, 60, 10, r#","cache_write_input_tokens":20"#)
+    );
+    let head = r#"{"type":"session_meta","payload":{"id":"codex-75","cwd":"D:\\我的 项目"}}"#;
+    let p = tokenmonitor_core::collectors::parse_jsonl(
+        "codex",
+        "codex/75a.jsonl",
+        &format!("{head}\r\n{only_last}\r\n"),
+    );
+    assert_eq!(p.events.len(), 1, "缺累计基线但带本轮量的一条不能丢");
+    assert_eq!(p.events[0].tokens.total(), 580);
+    assert_eq!(p.events[0].tokens.cache_write, 20);
+    // 本轮没有累计值可读，累计水位不能被推进：下面这条带累计值的采样因此仍是"首个采样"
+    let first_with_total = format!(
+        r#"{{"timestamp":{},"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{},"last_token_usage":{}}}}}}}"#,
+        TS + 1000,
+        u(1000, 800, 100, 40, r#","cache_write_input_tokens":30,"total_tokens":2000"#),
+        u(200, 100, 40, 20, r#","cache_write_input_tokens":10"#),
+    );
+    let p2 = tokenmonitor_core::collectors::parse_jsonl(
+        "codex",
+        "codex/75a.jsonl",
+        &format!("{head}\r\n{only_last}\r\n{first_with_total}\r\n"),
+    );
+    assert_eq!(p2.events.len(), 2);
+    assert_eq!(p2.events[1].tokens.total(), 250, "首个采样只认本轮量，不记整段累计");
+
+    // ② 重复通知 + "只有 reasoning / total_tokens 在动"：两条都不落库
+    let dup = first_with_total.replace(
+        &format!("\"timestamp\":{}", TS + 1000),
+        &format!("\"timestamp\":{}", TS + 2000),
+    );
+    let reasoning_only = format!(
+        r#"{{"timestamp":{},"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{},"last_token_usage":{}}}}}}}"#,
+        TS + 3000,
+        u(1000, 800, 100, 90, r#","cache_write_input_tokens":30,"total_tokens":2050"#),
+        u(200, 100, 40, 20, r#","cache_write_input_tokens":10"#),
+    );
+    let p3 = tokenmonitor_core::collectors::parse_jsonl(
+        "codex",
+        "codex/75b.jsonl",
+        &format!("{head}\r\n{first_with_total}\r\n{dup}\r\n{reasoning_only}\r\n"),
+    );
+    assert_eq!(p3.events.len(), 1, "重复通知与零用量轮次都不能落库：{:#?}", p3.events.iter().map(|e| e.tokens.total()).collect::<Vec<_>>());
+    assert_eq!(p3.events[0].tokens.total(), 250);
+    assert!(
+        p3.events.iter().all(|e| e.tokens.total() > 0),
+        "两端都不许产出各列全 0 的事件"
+    );
+}
+
+/// #75③：`cache_creation_input_tokens` 与 `cache_write_input_tokens` 是同一个累计量的
+/// 两个写法。旧规则 `.max()` 假设"同一条记录只会出一种"，此前没有任何 fixture 证明过
+/// 这个假设，而它在两处会错：
+///  · 同一条记录两种都写且数值不同 → 无法判定，`.max()` 等于凭空取较大者。规则改为**拒读**
+///    记 0（写法标 4），两端同式。
+///  · 相邻两条采样各只写一种（codex 升级换字段名）→ 跨写法差分必然为负，被 `delta()`
+///    的 `.max(0)` 静默清零，那一轮的缓存写入就这么没了。规则改为"写法变了 = 累计序列
+///    断了"，与回落同一条处理：改读本条采样的 `last_token_usage`。
+/// Node 侧同一组期望数字见 test/windows/jsonl-a.test.mjs 的 [#75] 段。
+#[test]
+fn codex_cache_write_spellings_conflict_and_switch() {
+    let head = r#"{"type":"session_meta","payload":{"id":"codex-75c","cwd":"D:\\我的 项目"}}"#;
+    let conflict = r#"{"timestamp":1800000000000,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_creation_input_tokens":999,"cache_write_input_tokens":10,"output_tokens":100,"reasoning_output_tokens":40,"total_tokens":1800},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_creation_input_tokens":999,"cache_write_input_tokens":10,"output_tokens":100,"reasoning_output_tokens":40}}}}"#;
+    let p = tokenmonitor_core::collectors::parse_jsonl("codex", "codex/75c.jsonl", &format!("{head}\r\n{conflict}\r\n"));
+    assert_eq!(p.events.len(), 1);
+    assert_eq!(p.events[0].tokens.cache_write, 0, "两种写法数值冲突时无法判定，不许取较大者");
+    assert_eq!(p.events[0].tokens.total(), 1100, "400+600+0+100");
+
+    let agreed = conflict.replace("\"cache_creation_input_tokens\":999", "\"cache_creation_input_tokens\":45")
+        .replace("\"cache_write_input_tokens\":10", "\"cache_write_input_tokens\":45");
+    let p2 = tokenmonitor_core::collectors::parse_jsonl("codex", "codex/75d.jsonl", &format!("{head}\r\n{agreed}\r\n"));
+    assert_eq!(p2.events.len(), 1);
+    assert_eq!(p2.events[0].tokens.cache_write, 45, "两种写法一致只是重复写了一遍，照用");
+    assert_eq!(p2.events[0].tokens.total(), 1145);
+
+    // 跨写法：第一条只写 write（累计 500），第二条只写 creation（累计 345）。
+    // 修前：345-500 = -155 → .max(0) → 这一轮 cache_write 记 0、总量 450。
+    // 修后：写法变了按回落处理，读本条 last（本轮 creation 45）→ 45、总量 495。
+    let s1 = r#"{"timestamp":1800000000000,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":40,"total_tokens":2500},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":500,"output_tokens":100,"reasoning_output_tokens":40}}}}"#;
+    let s2 = r#"{"timestamp":1800000001000,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1400,"cached_input_tokens":1000,"cache_creation_input_tokens":345,"output_tokens":150,"reasoning_output_tokens":60,"total_tokens":3000},"last_token_usage":{"input_tokens":400,"cached_input_tokens":200,"cache_creation_input_tokens":45,"output_tokens":50,"reasoning_output_tokens":20}}}}"#;
+    let p3 = tokenmonitor_core::collectors::parse_jsonl("codex", "codex/75e.jsonl", &format!("{head}\r\n{s1}\r\n{s2}\r\n"));
+    let totals: Vec<i64> = p3.events.iter().map(|e| e.tokens.total()).collect();
+    let writes: Vec<i64> = p3.events.iter().map(|e| e.tokens.cache_write).collect();
+    assert_eq!(totals, vec![1600, 495], "换写法那一轮不能再被 .max(0) 清零：{totals:?}");
+    assert_eq!(writes, vec![500, 45]);
+
+    // 写法不变时相邻差分不受影响（防止把这条修成"每轮都回落"）
+    let s3 = s2.replace("cache_creation_input_tokens", "cache_write_input_tokens");
+    let p4 = tokenmonitor_core::collectors::parse_jsonl("codex", "codex/75f.jsonl", &format!("{head}\r\n{s1}\r\n{s3}\r\n"));
+    assert_eq!(p4.events.iter().map(|e| e.tokens.total()).collect::<Vec<_>>(), vec![1600, 450],
+        "同为 write 写法时走差分：400+200+0+50");
+}
+
 /// #78（落库层）：两个来源把同一个模型写成不同大小写时，面板必须只出一行。
 /// 修前 codex 记 `GLM-5.3-Flash`、claude-code 记 `glm-5.3-flash` 会在模型分组里
 /// 拆成两行，而且只有与价目表键完全一致的那一行拿得到成本——另一行静默 unpriced。
