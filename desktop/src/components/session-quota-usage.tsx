@@ -130,7 +130,7 @@ export function SessionQuotaUsageView({ usage, detailed = false }: SessionQuotaU
             ) : (
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {group.windows.map((window, index) => (
-                  <div key={index} className="text-muted-foreground" title={`${formatTime(window.observedStartAt, i18n.language)} – ${formatTime(window.observedEndAt, i18n.language)}\n${t("sessions.quota.resets", { value: window.resetsAt ? formatTime(window.resetsAt, i18n.language) : "--" })}`}>
+                  <div key={index} className="text-muted-foreground" title={`${formatTime(window.observedStartAt, i18n.language)} – ${formatTime(window.observedEndAt, i18n.language)}\n${window.resetsAt ? t("sessions.quota.resets", { value: formatTime(window.resetsAt, i18n.language) }) : t("sessions.quota.resets_unknown")}`}>
                     <span className="font-bold text-foreground">
                       {t("sessions.quota.used_and_remaining_change", {
                         usage: formatDetailedUsage(window),

@@ -32,6 +32,26 @@ const RAW_PAGE_LINES = 2_000;
 const RAW_RENDER_CAP_LINES = 20_000;
 // How long a copy confirmation or a copy failure stays on screen.
 const COPY_FEEDBACK_MS = 1_400;
+// `status` arrives verbatim from the log file (session_replay.rs keeps anything
+// in `success | ok | completed | running | stopped`, and can also emit `failed`),
+// so the renderer used to paste a raw backend token into the UI. Known tokens get
+// the active language; an unrecognised one stays visible as-is rather than being
+// dropped, and a session that recorded no status is no longer shown as
+// "completed", which was a state that never happened.
+const TOOL_STATUS_KEYS: Record<string, string> = {
+  completed: "sessions.detail.status_completed",
+  running: "sessions.detail.status_running",
+  stopped: "sessions.detail.status_stopped",
+  failed: "sessions.detail.status_failed",
+  success: "sessions.detail.status_success",
+  ok: "sessions.detail.status_success",
+};
+
+function toolStatusLabel(status: string | null | undefined, t: (key: string) => string) {
+  if (!status) return t("sessions.detail.status_unrecorded");
+  const key = TOOL_STATUS_KEYS[status.toLowerCase()];
+  return key ? t(key) : status;
+}
 const COLLAPSED_PREVIEW_LINE_LENGTH = 240;
 const COLLAPSED_AGENT_LIMIT = 3;
 const DISCLOSURE_BUTTON_CLASS = "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -821,7 +841,7 @@ function ToolCallItem({ item, activity, tokenUsage, rawJsonl }: { activity: Tool
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <Terminal className="h-3.5 w-3.5 shrink-0 text-cyan-700 dark:text-cyan-300" />
-            <span className="truncate">{item.name} · {item.status ?? "completed"} · {t("sessions.detail.tool_count", { count: batchActivities.length })}</span>
+            <span className="truncate">{item.name} · {toolStatusLabel(item.status, t)} · {t("sessions.detail.tool_count", { count: batchActivities.length })}</span>
           </span>
           <span className="flex shrink-0 items-center gap-3 font-sans text-muted-foreground">
             {tokenUsage ? <TokenMetadata usage={tokenUsage} /> : null}
@@ -936,7 +956,7 @@ function ToolCallItem({ item, activity, tokenUsage, rawJsonl }: { activity: Tool
       >
         <span className="flex min-w-0 items-center gap-1">
           <Terminal className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate">{displayToolName} {item.status ? `· ${item.status}` : ""}</span>
+          <span className="truncate">{displayToolName} {item.status ? `· ${toolStatusLabel(item.status, t)}` : ""}</span>
         </span>
         <span className="flex shrink-0 items-center gap-3">
           {tokenUsage ? <TokenMetadata usage={tokenUsage} /> : null}
@@ -1421,7 +1441,10 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             {metric(t("sessions.detail.total_tokens"), formatNumber(detail?.summary.totalTokens ?? session.totalTokens), <Database className="h-3.5 w-3.5" />, "violet")}
             {metric(t("sessions.detail.input_tokens"), formatNumber(detail?.summary.inputTokens ?? session.inputTokens), <Database className="h-3.5 w-3.5" />, "blue")}
             {metric(t("sessions.detail.output_tokens"), formatNumber(detail?.summary.outputTokens ?? session.outputTokens), <Database className="h-3.5 w-3.5" />, "green")}
-            {metric(t("sessions.detail.cost"), detail ? formatCurrency(detail.summary.costUSD) : "加载中…", <Coins className="h-3.5 w-3.5" />, "emerald")}
+            {/* The whole strip is gated on `detail`, so the cost never had a state
+                to show while loading: the hardcoded "加载中…" fallback was both
+                unreachable and the only Chinese literal left in the row. */}
+            {metric(t("sessions.detail.cost"), formatCurrency(detail.summary.costUSD), <Coins className="h-3.5 w-3.5" />, "emerald")}
             {metric(t("sessions.detail.cache"), formatPercent(cacheRate), <Database className="h-3.5 w-3.5" />, "cyan")}
             {metric(t("sessions.detail.tool_calls"), formatNumber(detail?.summary.toolCallCount ?? 0), <Wrench className="h-3.5 w-3.5" />, "amber")}
             {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
@@ -1474,7 +1497,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
               <span>·</span>
               <span>{t("sessions.detail.first_token", { value: formatDuration(detail?.summary.timeToFirstTokenMs) })}</span>
               <span>·</span>
-              <span>{t("sessions.detail.cli", { value: detail?.summary.cliVersion ?? "--" })}</span>
+              <span>{detail?.summary.cliVersion ? t("sessions.detail.cli", { value: detail.summary.cliVersion }) : t("sessions.detail.cli_unrecorded")}</span>
             </div>
           ) : null}
           {detail && activePath === session.path ? <div className="mt-1.5 border-t border-border/50 pt-1.5"><SessionQuotaUsageView usage={session.quotaUsage} detailed /></div> : null}

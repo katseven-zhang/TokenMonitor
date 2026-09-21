@@ -70,7 +70,10 @@ function MarkdownCode({ className, children }: ComponentPropsWithoutRef<"code">)
   return (
     <code
       className={`${className ?? ""} hljs`}
-      dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language }).value }}
+      // The fenced text comes from a transcript the user did not write, and hljs
+      // throws on input its grammar cannot finish with; a throw here would take the
+      // whole replay tab down with it.
+      dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language, ignoreIllegals: true }).value }}
     />
   );
 }

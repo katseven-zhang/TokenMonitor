@@ -497,7 +497,8 @@
     "aria_label": "Estimated 5-hour and weekly quota usage and remaining quota",
     "usage_label": "{{window}} usage {{usage}}, remaining {{remaining}}",
     "resets": "Reset: {{value}}",
-    "caveat": "The list shows quota remaining at the latest observed snapshot. Values are estimated from integer log snapshots; each reset window is shown separately."
+    "caveat": "The list shows quota remaining at the latest observed snapshot. Values are estimated from integer log snapshots; each reset window is shown separately.",
+    "resets_unknown": "Reset: not recorded by this observation"
   },
   "detail": {
       "modal_title": "Session Details",
@@ -628,10 +629,28 @@
       "markdown_link_title": "Copy the link (web pages are not opened in offline mode)",
       "copy_session_id": "Copy session ID",
       "session_id_copied": "Session ID copied",
-      "reveal_in_file_manager": "Show in File Manager"
+      "reveal_in_file_manager": "Show in File Manager",
+      "status_completed": "Completed",
+      "status_running": "Running",
+      "status_stopped": "Stopped",
+      "status_failed": "Failed",
+      "status_success": "Succeeded",
+      "status_unrecorded": "No status recorded",
+      "cli_unrecorded": "CLI: not recorded"
     }
   },
   "settings": {
+    "currency": {
+      "rate_label": "Local rate: 1 USD = how many CNY",
+      "rate_aria": "Local USD to CNY exchange rate",
+      "rate_placeholder": "Enter the rate to use",
+      "rate_invalid": "The rate must be a decimal number, for example 7.2.",
+      "fix_json_first": "Fix the JSON below before editing the currency or the rate.",
+      "display_currency_label": "Unified display currency",
+      "currency_usd": "US dollar USD",
+      "currency_cny": "Chinese yuan CNY",
+      "manual_rate_note": "A manual rate that never updates from the network. Saving below applies it to every page and export and re-converts historical usage; the recorded price numbers stay unchanged. Each model price may set currency to USD or CNY, and the top-level JSON currency is used when it is omitted."
+    },
     "title": "Settings",
     "subtitle": "Manage local app state and recovery actions.",
     "nav_aria": "Settings sections",

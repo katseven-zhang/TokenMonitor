@@ -55,7 +55,29 @@ function placeholders(value: string): string[] {
   return [...value.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]).sort();
 }
 
-const referenced = [...referencedKeys()];
+// Keys the UI assembles at runtime are invisible to the literal scan above:
+// `t(`sessions.detail.${toneKey}`)` for a message role, `patch_${action}` for a
+// diff header, `tool_argument_labels.${key}` per argument, and the status token
+// map the replay header reads. Listing them here is what proves they exist in all
+// three tables, and it keeps task #88's pruning from deleting a live key.
+const DYNAMIC_KEYS = [
+  "sessions.detail.user",
+  "sessions.detail.assistant",
+  "sessions.detail.developer",
+  "sessions.detail.system",
+  "sessions.detail.patch_added",
+  "sessions.detail.patch_edited",
+  "sessions.detail.patch_deleted",
+  "sessions.detail.status_completed",
+  "sessions.detail.status_running",
+  "sessions.detail.status_stopped",
+  "sessions.detail.status_failed",
+  "sessions.detail.status_success",
+  "sessions.detail.status_unrecorded",
+  ...Object.keys(tables.en).filter((key) => key.startsWith("sessions.detail.tool_argument_labels.")),
+];
+
+const referenced = [...new Set([...referencedKeys(), ...DYNAMIC_KEYS])];
 
 // i18next resolves `t(key, { count })` to `key_one`/`key_other` per language, and
 // zh has no plural forms at all, so a literal key lookup would flag correct

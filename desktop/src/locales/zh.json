@@ -498,7 +498,8 @@
     "aria_label": "估算的 5 小时及每周限额使用度与剩余额度",
     "usage_label": "{{window}} 使用度 {{usage}}，剩余额度 {{remaining}}",
     "resets": "重置时间：{{value}}",
-    "caveat": "列表显示最近一次观测快照时的剩余额度。数值根据日志中的整数快照估算；跨重置周期分别展示。"
+    "caveat": "列表显示最近一次观测快照时的剩余额度。数值根据日志中的整数快照估算；跨重置周期分别展示。",
+    "resets_unknown": "重置时间：该观测未记录"
   },
   "detail": {
       "modal_title": "会话详情",
@@ -636,10 +637,28 @@
       "markdown_link_title": "复制链接（离线模式不会打开网页）",
       "copy_session_id": "复制会话 ID",
       "session_id_copied": "会话 ID 已复制",
-      "reveal_in_file_manager": "在文件资源管理器中显示"
+      "reveal_in_file_manager": "在文件资源管理器中显示",
+      "status_completed": "已完成",
+      "status_running": "运行中",
+      "status_stopped": "已停止",
+      "status_failed": "失败",
+      "status_success": "已成功",
+      "status_unrecorded": "未记录状态",
+      "cli_unrecorded": "CLI：未记录"
     }
   },
   "settings": {
+    "currency": {
+      "rate_label": "本地汇率：1 USD = 多少 CNY",
+      "rate_aria": "美元兑人民币本地汇率",
+      "rate_placeholder": "请输入采用的汇率",
+      "rate_invalid": "汇率只能填写十进制数字，例如 7.2。",
+      "fix_json_first": "请先修正下方 JSON，才能编辑币种和汇率。",
+      "display_currency_label": "统一显示币种",
+      "currency_usd": "美元 USD",
+      "currency_cny": "人民币 CNY",
+      "manual_rate_note": "手动汇率，不联网更新。下方保存后应用于所有页面和导出，也重新换算历史用量；原始价格数字不变。每条模型价格可用 currency 指定 USD 或 CNY，省略时使用 JSON 顶层 currency。"
+    },
     "title": "设置",
     "subtitle": "管理本地应用缓存数据和恢复操作。",
     "nav_aria": "设置分类",

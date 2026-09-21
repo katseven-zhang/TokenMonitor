@@ -539,7 +539,8 @@
       "aria_label": "推定 5 時間および週ごとの割り当て使用量と残りクォータ",
       "usage_label": "{{window}}の使用量 {{usage}}、残り {{remaining}}",
       "resets": "リセット: {{value}}",
-      "caveat": "一覧は最新に観測したスナップショット時点の残りクォータを表示します。値はログ内の整数スナップショットから推定したもので、リセット期間ごとに個別表示します。"
+      "caveat": "一覧は最新に観測したスナップショット時点の残りクォータを表示します。値はログ内の整数スナップショットから推定したもので、リセット期間ごとに個別表示します。",
+      "resets_unknown": "リセット時間：この観測では記録されていません"
     },
     "detail": {
       "modal_title": "セッションの詳細",
@@ -669,10 +670,28 @@
       "markdown_link_title": "リンクをコピー（オフラインではページを開きません）",
       "copy_session_id": "セッションIDをコピー",
       "session_id_copied": "セッションIDをコピーしました",
-      "reveal_in_file_manager": "エクスプローラーで表示"
+      "reveal_in_file_manager": "エクスプローラーで表示",
+      "status_completed": "完了",
+      "status_running": "実行中",
+      "status_stopped": "停止済み",
+      "status_failed": "失敗",
+      "status_success": "成功",
+      "status_unrecorded": "状態は記録されていません",
+      "cli_unrecorded": "CLI：未記録"
     }
   },
   "settings": {
+    "currency": {
+      "rate_label": "ローカルレート：1 USD = 何 CNY か",
+      "rate_aria": "USD から CNY へのローカル為替レート",
+      "rate_placeholder": "適用するレートを入力してください",
+      "rate_invalid": "レートは 7.2 のような 10 進数で入力してください。",
+      "fix_json_first": "通貨とレートを編集するには、まず下の JSON を修正してください。",
+      "display_currency_label": "表示通貨の統一",
+      "currency_usd": "米ドル USD",
+      "currency_cny": "中国人民元 CNY",
+      "manual_rate_note": "手動で設定するレートで、ネットワークからは更新されません。保存するとすべてのページとエクスポートに適用され、履歴上の使用量も再計算されます。記録された価格の数値は変わりません。各モデル価格では currency に USD または CNY を指定でき、省略時は JSON 最上位の currency が使われます。"
+    },
     "title": "設定",
     "subtitle": "ローカルアプリの状態と復旧操作を管理します。",
     "nav_aria": "設定セクション",

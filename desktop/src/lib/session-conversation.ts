@@ -490,7 +490,7 @@ function parseBatchExecResults(value: string | null): BatchExecResult[] | null {
     if (parsed.status === "rejected") {
       return [{
         stdout: null,
-        stderr: typeof parsed.reason === "string" ? parsed.reason : JSON.stringify(parsed.reason ?? "Rejected"),
+        stderr: sanitizeProcessText(typeof parsed.reason === "string" ? parsed.reason : JSON.stringify(parsed.reason ?? "Rejected")),
         exitCode: null,
         wallTimeSeconds: null,
         isRejected: true,
@@ -502,8 +502,8 @@ function parseBatchExecResults(value: string | null): BatchExecResult[] | null {
     const output = result as Record<string, unknown>;
     if (typeof output.exit_code !== "number") return [];
     return [{
-      stdout: typeof output.output === "string" ? output.output : typeof output.stdout === "string" ? output.stdout : null,
-      stderr: typeof output.stderr === "string" ? output.stderr : null,
+      stdout: sanitizeProcessText(typeof output.output === "string" ? output.output : typeof output.stdout === "string" ? output.stdout : null),
+      stderr: sanitizeProcessText(typeof output.stderr === "string" ? output.stderr : null),
       exitCode: typeof output.exit_code === "number" ? output.exit_code : null,
       wallTimeSeconds: typeof output.wall_time_seconds === "number" ? output.wall_time_seconds : null,
       isRejected: false,
@@ -522,7 +522,7 @@ function parseExecOutput(value: string | null): ExecOutput | null {
     : typeof parsed.stdout === "string"
       ? parsed.stdout
       : null;
-  const stderr = typeof parsed.stderr === "string" ? parsed.stderr : null;
+  const stderr = sanitizeProcessText(typeof parsed.stderr === "string" ? parsed.stderr : null);
   const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code : null;
   const wallTimeSeconds = typeof parsed.wall_time_seconds === "number" ? parsed.wall_time_seconds : null;
   const sessionId = typeof parsed.session_id === "string" || typeof parsed.session_id === "number"
@@ -546,6 +546,27 @@ export function cleanExecOutput(text: string) {
       && line !== "Output:")
     .join("\n")
     .trim();
+}
+
+// Control bytes that carry no displayable text: C0 except tab and newline, plus
+// DEL. Built from character codes so the pattern stays readable in the source.
+const CONTROL_CHAR_PATTERN = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(8)}${String.fromCharCode(11)}${String.fromCharCode(12)}${String.fromCharCode(14)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
+  "g",
+);
+
+// `cleanExecOutput` only runs over stdout-shaped text, so stderr — and any output
+// that never went through the exec parser — reached the red error block verbatim:
+// a coloured CLI left raw escape sequences on screen, BEL is audible, and a bare
+// CR made later text overwrite earlier text. Removing the bytes that cannot be
+// shown as text keeps everything the process actually printed.
+export function sanitizeProcessText(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  return value
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(CONTROL_CHAR_PATTERN, "");
 }
 
 function isEmptyExecOutput(text: string | null) {
@@ -669,9 +690,9 @@ function buildToolActivity(item: Extract<ReplayItem, { kind: "toolCall" }>) {
     : nestedWriteStdinArguments
       ? toolName
       : item.name;
-  const rawOutputText = contentBlocks ? contentBlocks.text : execOutput?.stdout ?? (execOutput ? null : item.output);
+  const rawOutputText = sanitizeProcessText(contentBlocks ? contentBlocks.text : execOutput?.stdout ?? (execOutput ? null : item.output));
   const outputText = isExec && isEmptyExecOutput(rawOutputText) ? null : rawOutputText;
-  const stderrText = execOutput?.stderr ?? item.stderr;
+  const stderrText = execOutput?.stderr ?? sanitizeProcessText(item.stderr);
 
   return { outerToolName, backgroundTerminalInput, userInputQuestions, webSearchQueries, webSearchResults, batchActivities, nestedActivities, execArguments, argumentEntries, execOutput, contentBlocks, argumentsText, displayToolName, outputText, stderrText };
 }
