@@ -209,17 +209,7 @@ pub fn run() {
     }
 }
 fn fatal_desktop(error:&str)->! {
-        let message=format!("TokenMonitor 无法打开桌面界面。请确认 Microsoft Edge WebView2 Runtime 已安装且可用。\n\n详细错误：{error}");
-        service::log(&config::data_dir(),&message);
-        #[cfg(windows)]
-        {
-            #[link(name="user32")]
-            extern "system" { fn MessageBoxW(window:*mut std::ffi::c_void,text:*const u16,title:*const u16,flags:u32)->i32; }
-            let text:Vec<u16>=message.encode_utf16().chain(Some(0)).collect();
-            let title:Vec<u16>="TokenMonitor 启动失败".encode_utf16().chain(Some(0)).collect();
-            // Native fallback still works when WebView2 cannot create any UI.
-            unsafe {MessageBoxW(std::ptr::null_mut(),text.as_ptr(),title.as_ptr(),0x10);}
-        }
-        eprintln!("{message}");
-        std::process::exit(1);
+    // MessageBoxW 只在 instance::fatal_startup 里有一份：main.rs 的实例锁故障与
+    // 这里的 WebView2 故障共用同一出口。
+    crate::instance::fatal_startup("请确认 Microsoft Edge WebView2 Runtime 已安装且可用。", error)
 }

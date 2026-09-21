@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod instance;
 pub mod model;
 pub mod pricing;
 pub mod query;

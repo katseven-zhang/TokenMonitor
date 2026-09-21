@@ -26,19 +26,26 @@ fn main() {
         }
         return;
     }
-    let gui_lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(root.join("desktop.lock"))
-        .expect("无法打开桌面实例锁");
-    if gui_lock.try_lock().is_err() {
-        if !args.iter().any(|a| a == "--background") {
-            let _ = std::fs::write(root.join("show-window"), uuid::Uuid::new_v4().to_string());
+    // 三种结局分开：拿到锁继续启动；别的实例持有锁则唤起它的窗口后安静退出
+    // （这是正常路径，不是错误）；锁文件根本打不开则是数据目录故障，release 版
+    // 没有 stderr 也没有 panic 痕迹（panic="abort" + windows_subsystem），必须走
+    // 原生消息框，否则用户看到的就只是"双击了没反应"。
+    // `_gui_lock` 不是丢弃：绑定活到 main 结束，句柄一 drop 锁就放了。
+    let _gui_lock = match tokenmonitor_core::instance::acquire_desktop_lock(&root) {
+        tokenmonitor_core::instance::InstanceLock::Held(lock) => lock,
+        tokenmonitor_core::instance::InstanceLock::Busy => {
+            if !args.iter().any(|a| a == "--background") {
+                let _ = std::fs::write(root.join("show-window"), uuid::Uuid::new_v4().to_string());
+            }
+            return;
         }
-        return;
-    }
+        tokenmonitor_core::instance::InstanceLock::Unusable { path, error } => {
+            tokenmonitor_core::instance::fatal_startup(
+                "本地实例锁文件不可用。请确认数据目录存在且可写，desktop.lock 未被安全软件锁定，且磁盘有空间。",
+                &format!("{}: {error}", path.display()),
+            )
+        }
+    };
     let _ = std::fs::remove_file(root.join("show-window"));
     #[cfg(feature = "desktop")]
     tokenmonitor_core::desktop::run();
