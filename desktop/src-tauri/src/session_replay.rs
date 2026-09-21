@@ -735,6 +735,7 @@ impl ReplayParseState {
         }
         let authoritative_exit_code =
             (recorded_exit_codes.len() == 1).then(|| recorded_exit_codes[0]);
+        let explicit_status = string_field(event, "status");
         let output_state = output
             .as_deref()
             .map(|output| parse_process_output(output, authoritative_exit_code))
@@ -762,11 +763,16 @@ impl ReplayParseState {
         } else if output_state.is_running {
             Some("running".to_string())
         } else {
-            string_field(event, "status").or_else(|| Some("completed".to_string()))
+            explicit_status.clone().or_else(|| Some("completed".to_string()))
         };
+        // Incidental stderr is not a failure verdict: `npm install`, `npx` and
+        // `pnpm` routinely write notices and progress to stderr while exiting 0,
+        // exactly like the stdout text that
+        // `trusts_command_execution_exit_code_over_incidental_stdout_text` already
+        // excuses. stderr only decides when nothing more authoritative exists.
         let is_error = !process_was_stopped
             && ((is_process_activity && output_state.is_error)
-                || status
+                || explicit_status
                     .as_deref()
                     .map(|status| {
                         !matches!(
@@ -775,10 +781,12 @@ impl ReplayParseState {
                         )
                     })
                     .unwrap_or(false)
-                || stderr
-                    .as_deref()
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false));
+                || (explicit_status.is_none()
+                    && !output_state.has_exit_verdict
+                    && stderr
+                        .as_deref()
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)));
 
         let turn = self.turn_mut(&turn_id);
         if let Some(call_id) = &call_id {
@@ -1285,6 +1293,9 @@ struct ProcessOutputState {
     output: Option<String>,
     process_result_count: usize,
     has_process_exit: bool,
+    /// An exit code was read from the event or its output, so the outcome is
+    /// already authoritative and incidental text such as stderr adds no evidence.
+    has_exit_verdict: bool,
     is_running: bool,
     is_stopped: bool,
     is_error: bool,
@@ -1377,6 +1388,7 @@ fn parse_process_output(output: &str, authoritative_exit_code: Option<i64>) -> P
 
     ProcessOutputState {
         cell_id,
+        has_exit_verdict: exit_code.is_some(),
         duration_ms,
         output: process_output,
         process_result_count,
@@ -2314,6 +2326,74 @@ mod tests {
         );
         assert!(detail.turns[0].patch_results[0].is_error);
         assert_eq!(detail.summary.error_count, 2);
+    }
+
+    #[test]
+    fn trusts_exit_code_over_incidental_stderr_and_still_flags_stderr_without_evidence() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": "call-1",
+                    "name": "exec",
+                    "input": "const r = await tools.exec_command({\"cmd\":\"npm install\"}); text(r.output);"
+                }),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                serde_json::json!({
+                    "type": "item_completed",
+                    "item": { "type": "CommandExecution", "status": "completed", "exit_code": 0 }
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:04.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": "added 1 package",
+                    "stderr": "npm notice notice details"
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:05.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": "call-2",
+                    "name": "exec",
+                    "input": "const r = await tools.exec_command({\"cmd\":\"pnpm test\"}); text(r.output);"
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:06.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-2",
+                    "stderr": "something on stderr"
+                }),
+            ),
+        ].join("\n");
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+
+        // Exit code 0 wins: the notice stays visible as extra output, but the
+        // command is no longer red and no longer inflates the session error count.
+        assert!(!detail.turns[0].tool_calls[0].is_error);
+        assert_eq!(
+            detail.turns[0].tool_calls[0]
+                .stderr
+                .as_deref(),
+            Some("npm notice notice details")
+        );
+        assert!(detail.turns[0].tool_calls[0]
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("added 1 package")));
+        assert_eq!(detail.summary.error_count, 1);
+        // Nothing authoritative at all: stderr still has to surface the failure.
+        assert!(detail.turns[0].tool_calls[1].is_error);
     }
 
     #[test]
