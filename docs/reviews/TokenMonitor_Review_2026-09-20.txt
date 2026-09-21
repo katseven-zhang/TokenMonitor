@@ -1,0 +1,307 @@
+﻿TokenMonitor 开源发布前 Code Review
+审查日期：2026-09-20
+仓库：katseven-zhang/TokenMonitor
+分支：main
+审查提交：05c90c6850d9cf70ffcc7fe79967da4a405df766
+提交说明：docs: streamline README for developers
+审查性质：只读。未修改仓库文件，未提交代码，未创建 PR 或 Issue。
+
+结论
+============================================================
+建议 changes requested：不建议把当前版本直接作为已充分验证的稳定桌面版发布。
+本报告列出 6 项问题：1 项 P1、5 项 P2。这里的 P1 表示应优先修复的发布入口问题，
+不是“远程高危漏洞”的意思。P2 表示应排期修复的功能、性能或发布保障问题。
+
+其中，首次源码构建、发行包许可证、新桌面 CI 是发布准备问题；
+日期分组、来源健康状态、分页查询是运行行为问题。
+建议先修复发布入口与明确的统计/状态缺陷，再补 Windows 验收。
+是否先发布预览版，可根据已明确披露的限制决定；本报告不等于安全认证。
+
+审查范围与验证方式
+============================================================
+主要读取和交叉检查了：
+- 根目录和 desktop 的 README、根 LICENSE、package.json、test/run.mjs、Rust 工具链配置；
+- desktop/src-tauri/src 中的 collectors、config、db、desktop、main、model、pricing、
+  query、scanner，以及 service 的主要实现和部分测试；
+- Codex session_replay 的入口、层级装配和数据库适配路径，非整个回放文件逐行覆盖；
+- React App 的筛选、请求、刷新、导出与设置流程，以及 range、currency、latest-loader；
+- 新桌面的 Tauri 安全配置、Cargo 清单、来源测试和重复快照测试；
+- 两份 GitHub Actions 工作流和 Windows 桌面打包脚本；
+- 旧 Node dsh/OpenCode 采集器的部分兼容性逻辑。
+
+实际执行的是两个隔离的最小复现：
+A. Node.js v22.16.0：复现固定时区偏移与本地日范围计算的不一致。
+B. Python SQLite 3.46.1：使用与审查代码对应的去重视图和查询 SQL、10 万条合成数据，
+   检查查询计划，并复现先加载全部记录再取 100 条的分页行为。
+
+没有执行整仓 npm test、原项目 cargo test、Windows 桌面构建或实机 GUI 测试。
+没有把仓库内的验收文档或已有测试代码当作本次实际测试结果。
+没有完成全部依赖的漏洞库审计、完整 Git 历史敏感信息扫描或所有上游真实日志格式验证。
+旧 Node 产品只做部分交叉检查，不代表旧产品已获得完整安全审计。
+所有结论针对上面固定的提交；不自动适用于后续修改。
+
+
+R1 [P1] 文档中的首次源码构建，在空 Cargo 缓存环境下会失败
+============================================================
+位置：
+  README.md / 从源码构建
+  desktop/scripts/build-windows.ps1 / native build 与 cargo metadata
+
+证据：
+  根 README 的构建流程只有 desktop/npm install，随后执行打包脚本。
+  脚本固定执行：
+    cargo build --release --offline --locked
+  后面的许可证元数据收集同样使用 cargo metadata --offline --locked。
+  文档没有给出 Cargo 依赖预取步骤，也没有在上述流程中提供 vendored crates。
+
+触发条件：
+  新贡献者在一台已经装好 Node、Rust 和 C++ 构建工具、但没有项目 crates 缓存的
+  Windows 机器上，严格按照根 README 操作。
+
+结果：
+  npm install 只准备前端依赖，不会下载 Rust crates。Cargo 被禁止访问网络，
+  因而无法补齐缺少的 crates。开发者自己的缓存会掩盖这个首次使用问题。
+  这是静态确认的构建前置条件缺失，本次未在 Windows 上重跑构建。
+
+建议：
+  选一种明确的行为：
+  1. 默认 cargo build --release --locked，离线模式改为可选开关；或者
+  2. 保持离线构建，但在 README 和 CI 中明确先执行：
+       cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
+     然后再运行构建脚本。
+  对 npm 同样优先使用 npm ci，保持锁文件对应的依赖集合。
+  构建时下载依赖与应用运行时不联网是两件不同的事，不需要为此改变运行时隐私设计。
+
+回归验收：
+  在空项目依赖缓存的 Windows runner 上从 checkout 开始，仅按公开文档完成
+  依赖准备、前端构建、Rust 构建和打包。不要依靠开发机上已有的 Cargo registry。
+
+依据：固定提交 README.md、desktop/scripts/build-windows.ps1；
+Cargo Book 的 cargo build / --offline 文档明确要求提前下载依赖。
+
+
+R2 [P2] 桌面发行包白名单遗漏了 TokenMonitor 自身的 LICENSE
+============================================================
+位置：
+  LICENSE
+  desktop/scripts/build-windows.ps1 / Copy-Item、$names、$archiveInputs
+  desktop/README.md / 许可说明
+
+证据：
+  根 LICENSE 是 MIT，版权行为：
+    Copyright (c) 2026 TokenMonitor contributors
+  脚本列入发行包的文件为 EXE、desktop README、LICENSE.codex-usage-desktop、
+  prices.example.json、THIRD-PARTY-NOTICES.txt 和 manifest.json。
+  没有复制根 LICENSE，也没有把它放入白名单或 manifest 的 files 集合。
+  Cargo notices 收集还会跳过 tokenmonitor-desktop 自身。
+  随包 desktop README 只指向移植代码许可与依赖汇总，并没有嵌入本项目 MIT 全文。
+
+影响：
+  只收到 ZIP 的使用者得到了参考项目和依赖的许可，却缺少本项目自身的完整许可文本。
+  这不是“仓库没有 LICENSE”，也不是对侵权的法律定性，而是明确的发布包内容缺项。
+  本次检查的是脚本与打包名单，不是已经生成的 Windows ZIP 实物。
+
+建议：
+  将仓库根 LICENSE 复制到 outputRoot；加入 $names，让 manifest 的哈希记录与 ZIP
+  都包含它。同时保留现有参考项目许可和第三方依赖说明，不能用其中一个替代另外一个。
+
+回归验收：
+  解压新生成的发行包，检查存在 LICENSE，且其内容/哈希与仓库根 LICENSE 一致。
+  包内应同时存在 LICENSE.codex-usage-desktop 和 THIRD-PARTY-NOTICES.txt。
+
+依据：固定提交 LICENSE、desktop/README.md、desktop/scripts/build-windows.ps1。
+
+
+R3 [P2] 现有 CI 没有为 README 主推的新 Tauri 桌面建立测试和构建门禁
+============================================================
+位置：
+  .github/workflows/test.yml
+  .github/workflows/windows.yml
+  package.json / scripts.test
+  test/run.mjs
+
+证据：
+  test.yml 围绕根目录 Node 产品执行 npm test、npm 安装冒烟、src/**/*.js 与 web/lib
+  的 import 冒烟。
+  windows.yml 的 GUI 构建目标是 windows/gui/Cargo.toml，行为测试也是旧 Windows GUI。
+  根 npm test 指向 test/run.mjs，并不是 desktop 的前端测试入口。
+  工作流没有为 desktop npm test/build、新的 desktop/src-tauri Cargo 工程和新的
+  desktop/scripts/build-windows.ps1 建立对应 job。
+
+影响：
+  旧产品的检查通过，不等于将要发布的 Tauri 2.0 产品能构建、能启动或统计正确。
+  新桌面有测试文件和本地验收记录，但缺少在 PR / push 上自动执行的发布保障。
+  本报告没有声称当前 Actions 实际全绿；这里讨论的是测试目标覆盖范围。
+
+建议：
+  新增独立 Windows desktop job，至少包含：
+    在 desktop 下 npm ci；
+    执行桌面前端测试；
+    npm run build；
+    对 desktop/src-tauri 执行 cargo test --locked --tests；
+    执行 release 构建和新的打包脚本；
+    检查发行包白名单和许可证；
+    对服务模式做启动、状态、扫描、停止的冒烟测试。
+  不要为了让 job 通过而使用 continue-on-error 隐藏失败。
+  没有交互桌面的 runner 无法取代 WebView2、托盘、自启等 Windows 实机验收。
+
+回归验收：
+  故意让一个桌面前端测试或一个新 Rust 测试失败，PR 对应 job 必须失败；
+  故意破坏 desktop 的编译，新桌面构建门禁必须能发现，不能仅剩旧产品的绿灯。
+
+依据：固定提交两份工作流、package.json、test/run.mjs。
+
+
+R4 [P2] 跨夏令时范围会把事件归到错误日期，点击该日后明细不包含该事件
+============================================================
+位置：
+  desktop/src/App.tsx / applyRange()、drill()
+  desktop/src/lib/range.ts / preset()、dateRange()
+  desktop/src-tauri/src/query.rs / dashboard() 的 shifted、day、month 分组
+  desktop/src-tauri/src/model.rs / Query.offset_minutes
+
+原因：
+  查询只携带一个固定 offsetMinutes：手动范围来自开始时刻，快捷范围来自结束时刻。
+  Rust 对整个范围所有事件使用同一个偏移：
+    e.ts + q.offset_minutes * 60_000
+  但前端 dateRange() 用本机 Date 计算当日边界，会采用该日期实际的夏令时规则。
+  因此“分组属于哪一天”和“点击那一天查询哪些 UTC 时间”不是同一种计算。
+
+本次实际执行的隔离复现：
+  TZ = America/New_York
+  手动查询开始：2026-03-07 00:00，offsetMinutes = -300
+  事件本地时间：2026-03-09 00:30，此时偏移为 -240
+  事件 UTC：2026-03-09T04:30:00Z
+  当前后端公式把该事件归入：2026-03-08
+  点击 2026-03-08 后，dateRange() 得到：
+    [2026-03-08T05:00:00Z, 2026-03-09T04:00:00Z)
+  04:30Z 不在这个范围中。结果是日汇总有这条用量，点进去却找不到。
+
+影响范围：
+  采用夏令时、且所选范围跨偏移变化的本机时区；日汇总、月边界附近分组和下钻一致性。
+  不应把它描述为所有用户的 Token 总数错误；固定偏移时区的普通范围不受此例影响。
+  本次运行的是等价日期逻辑，不是 Windows Tauri UI。
+
+建议：
+  查询携带时区标识而不仅是单个 UTC 偏移，后端按每条事件对应的时区规则分组；
+  前端下钻与后端必须共享一致的日期边界语义。
+  另一种受限方案是明确采用固定 UTC 偏移视图，并让下钻也使用完全相同的固定边界，
+  但这时不能继续把结果表述为本机日历日期。
+
+回归验收：
+  补春季/秋季夏令时切换、23/25 小时日期、月边界，以及无夏令时时区的对照测试。
+  每个日/月汇总行的数量与点击后查询、导出对应范围的数量应一致。
+
+附件：reproduce_dst.cjs、dst_result.json。
+依据：上述固定提交文件；MDN Date.prototype.getTimezoneOffset() 对随日期变化的
+夏令时偏移有明确说明。
+
+
+R5 [P2] 复用缓存后无效 JSON 行计数丢失，损坏来源会重新显示成正常
+============================================================
+位置：
+  desktop/src-tauri/src/collectors.rs / parse_jsonl()
+  desktop/src-tauri/src/scanner.rs / ScanStatus、collect_file()、scan_cancellable()
+  desktop/src-tauri/src/db.rs / source_files、replace_file()
+
+原因：
+  parse_jsonl() 遇到无法解析的行，增加 malformed_lines 后跳过。
+  collect_file() 只有本次重新解析时才累加该数量；文件 unchanged 时只加 reused 就返回。
+  每轮 ScanStatus 都从默认值重新创建，没有从 source_files 恢复之前的无效行数量。
+  同时 state 的 error 分支只检查 errors，不检查 malformed_lines。
+
+可直接从控制流确定的场景：
+  文件包含一条正常 JSONL 和一条已写完但无效的 JSON 行。
+  第一次扫描：malformedLines = 1，但 errors 为空，来源仍可以是 ready。
+  不修改文件再次扫描：命中 unchanged 分支，malformedLines 变成 0，仍为 ready。
+  这是状态丢失，不是说缓存中已成功解析的正常事件会被删除。
+
+影响：
+  用户在第二次刷新之后更难知道为什么有记录没有被统计；
+  来源绿色状态和“0 无效行”可能与文件实际内容不符。
+  这不是通过捕获错误就能彻底解决的异常；需要持久化健康元数据。
+
+建议：
+  为每个已索引文件持久化无效行计数/最后有效解析状态，cache hit 时仍参与来源汇总。
+  对完整的损坏记录显示 warning 或部分成功，而不是简单 ready。
+  区分实时写入中的未完成尾行与已经确定损坏的完整记录，避免把正常写入误报成故障。
+
+回归验收：
+  坏行首次扫描、文件不变重复扫描、修复坏行后扫描三个阶段分别保持 1、1、0；
+  另加未完成尾行后续补齐的测试，确认不会重复计数或永久误报。
+
+依据：固定提交 collectors.rs、scanner.rs、db.rs。
+本项为静态控制流确认，未运行原 Rust scanner 测试。
+
+
+R6 [P2] 明细分页在内存中截取，短时间查询也可能先遍历全历史去重视图
+============================================================
+位置：
+  desktop/src-tauri/src/query.rs / event_page()、activity_page()
+  desktop/src-tauri/src/db.rs / events()、activities()、events/activities 视图
+  desktop/src/App.tsx / 5 秒刷新与明细请求 effect
+
+证据：
+  event_page() 先调用 db::events() 得到全部匹配 Event，再 rev/skip/take。
+  activity_page() 先得到全部活动，排序后才分页。
+  events/activities 视图通过 ROW_NUMBER() OVER(PARTITION BY agent,id ...) 做去重，
+  时间条件放在该视图外层。
+  App 周期刷新 dashboard，明细页请求又依赖 dashboard data 更新。
+
+本次实际执行的隔离复现：
+  SQLite 3.46.1，合成 100,000 条记录。
+  按当前 event_page 模式：第一页返回 100 条之前，先加载 100,000 条匹配记录。
+  把范围缩小到只有 5 条记录时，EXPLAIN QUERY PLAN 仍包含：
+    SCAN e USING INDEX event_identity
+    USE TEMP B-TREE FOR LAST 3 TERMS OF ORDER BY
+  未表现为直接利用 event_time 的小范围查询。
+
+影响：
+  返回页大小受限，不代表解析、排序、数据库读量和内存也受限。
+  数据量增长后，刷新和翻页的成本增长；本次没有测量真实 Windows 界面的卡顿、
+  内存占用或耗时阈值，不能把合成测试时间当作用户机器性能。
+
+建议：
+  将分页、排序、计数尽量下沉到 SQL；需要文本搜索时也避免先反序列化整个范围。
+  为主要筛选和排序建立匹配索引，考虑在写入时维护已去重的规范事件表，
+  保留 raw snapshots 作为审计/回退来源。
+  不要简单把时间筛选移动到 ROW_NUMBER 前面：那可能把本应被更新版本替代的旧快照
+  重新选出来，破坏现有“最新观察优先”的正确性。
+  页面排序应保留稳定的时间/Agent/ID tie-break，优化不能牺牲分页一致性。
+
+回归验收：
+  用十万及百万级合成历史测试窄范围、首/后页、搜索和同时扫描。
+  除检查返回 100 行之外，还要检查实际处理量、查询计划、耗时和峰值内存。
+  保留 duplicate_snapshots 测试，验证优化后不会复活旧快照或重复计数。
+
+附件：reproduce_query.py、query_result.json。
+依据：固定提交 query.rs、db.rs、App.tsx；隔离 SQL 复现。
+
+
+已检查到的有效设计
+============================================================
+- 本地服务明确绑定 IPv4 loopback，使用 service-token 校验，不是无鉴权的公网服务。
+- 来源 SQLite 使用只读打开；采集先解析，再通过短事务替换该文件缓存。
+- 有来源版本失效、重复快照优先级、半开时间范围和重复扫描的测试代码。
+- 定价把未知费用与零费用区分开，保留已定价部分和未定价数量，不把缺价伪装成免费。
+- Tauri 配置包含 CSP，外部导航和新窗口有约束。
+- 打包使用明确白名单，避免把整个运行目录一股脑压入发行包。
+- 已有参考项目移植许可与依赖 notices 的收集机制；R2 是补齐本项目许可，不是推翻它。
+以上为已读取代码中的设计观察，不等于所有场景都已经通过实机测试。
+
+
+发布前验收建议
+============================================================
+先完成 R1、R2、R3 的构建/许可/CI闭环，同时修正 R4、R5 的明确行为缺陷。
+R6 至少需要目标规模下的性能证据；若暂缓优化，应明确预览版的数据规模限制。
+
+Windows 实机至少覆盖：
+首次启动空缓存；大量历史首次扫描；扫描期间关闭窗口；托盘退出；登录自启；
+端口冲突；非 ASCII 路径；两个实例连续启动；来源损坏/不可读；导出覆盖确认；
+安装了/未安装 WebView2 时的实际反馈。
+
+公开仓库前还应补完整 Git 历史的敏感信息扫描。只检查当前工作树、当前 README，
+不能证明旧提交中没有 API Key、会话凭据、用户日志或个人路径。
+本次没有执行该项，也没有提供“整个仓库不存在秘密”的保证。
+
+本报告仅用于审查和安排修复，不含自动修改仓库的操作。

@@ -1,0 +1,375 @@
+TokenMonitor 代码 Review 问题清单
+仓库：katseven-zhang/TokenMonitor
+分支：main
+Review 基准提交：754313cf22079aaeb67cbc6524e6b076e180942e
+提交信息：style(gui): modernize Win32 launcher typography, layout and palette (#33)
+
+说明：
+本次仅做代码 Review，没有修改任何仓库代码。
+重点检查了最新 Win32 GUI 改动，同时查看了 scanner / store / server / balance / Codex collector 等核心链路。
+
+============================================================
+1. [P1 / 高优先级] WM_DPICHANGED 存在潜在自锁死风险
+============================================================
+
+文件：
+windows/gui/src/main.rs
+
+大致位置：
+WM_SIZE：885-889
+WM_DPICHANGED：891-924
+
+问题：
+WM_DPICHANGED 通过 with_app() 持有全局 Mutex<App> 后，
+在锁内部调用 SetWindowPos(hwnd, ...) 修改主窗口尺寸。
+
+SetWindowPos 可能同步触发窗口尺寸相关消息，
+随后 WM_SIZE 又会调用 with_app()，尝试再次锁同一个 std::sync::Mutex。
+
+调用链可能变成：
+
+WM_DPICHANGED
+  -> lock APP
+  -> SetWindowPos(hwnd)
+  -> WM_SIZE
+  -> lock APP
+  -> 当前线程等待自己释放锁
+
+潜在结果：
+GUI 卡死。
+
+典型触发场景：
+把窗口从 100% DPI 的显示器拖到 150% / 200% DPI 的显示器。
+
+建议：
+不要在持有 APP mutex 时调用可能同步重入窗口过程的 Win32 API。
+可以先在锁内完成字体/状态修改并复制所需参数，
+释放锁后再对顶层窗口调用 SetWindowPos。
+
+------------------------------------------------------------
+
+============================================================
+2. [P2 / 较高优先级] Scanner 在 await 期间保持 SQLite Transaction
+============================================================
+
+文件：
+src/scanner.js
+
+位置：
+约 115-133
+
+当前逻辑：
+
+BEGIN
+await src.collect(...)
+COMMIT
+
+问题：
+collector 会进行异步文件读取。
+因此 await 文件 IO 时 SQLite transaction 仍保持开启。
+
+与此同时，同一进程里的其他异步任务仍可能运行，例如：
+BalancePoller -> store.saveQuota(...)
+HTTP 请求 -> 查询数据库
+
+这些操作与 Scanner 共用同一个 Store / SQLite connection。
+
+风险：
+1. 其他异步写入可能被意外包含在 Scanner 的 transaction 中。
+2. 如果 collector 随后异常并 ROLLBACK，
+   中间其他任务的写入也可能被一起回滚。
+3. API 请求可能在一次尚未完成的扫描 transaction 中读取状态。
+4. transaction 生命周期比必要时间长。
+
+建议：
+先完成异步解析，然后把待写入数据组成 batch，
+最后再开启短生命周期同步 transaction 统一写 SQLite。
+
+------------------------------------------------------------
+
+============================================================
+3. [P2 / 较高优先级] Rust GUI 没有真正进入 CI 编译与行为测试
+============================================================
+
+文件：
+.github/workflows/windows.yml
+test/windows/gui.test.mjs
+
+问题：
+当前 Windows CI 主要运行：
+- npm ci
+- Node smoke
+- npm test
+- source verifier
+
+没有看到 CI 中实际执行：
+cargo build --release
+或
+windows/gui/build.ps1
+
+同时 gui.test.mjs 在找不到：
+windows/gui/publish/TokenMonitorGui.exe
+
+时会直接：
+
+[skip] 未找到 TokenMonitorGui.exe
+
+然后继续成功退出。
+
+结果：
+Rust GUI 即使：
+- 编译失败
+- Win32 API 类型不对
+- Manifest 配置错误
+- GUI runtime 行为回归
+
+CI 仍可能是绿色。
+
+而本次最新 commit 主要修改的恰好就是：
+windows/gui/Cargo.toml
+windows/gui/build.rs
+windows/gui/src/main.rs
+
+建议：
+Windows CI 中加入真实 Rust GUI build，并在 build 成功后强制运行 gui.test.mjs。
+CI 环境中如果 EXE 缺失，不应该 skip，而应该 fail。
+
+------------------------------------------------------------
+
+============================================================
+4. [P2] /api/summary?days=0 实际会变成 30 天
+============================================================
+
+文件：
+src/server.js
+
+位置：
+约 339-340
+
+当前代码：
+
+const days = Math.max(
+  0,
+  Math.min(3650, Number(url.searchParams.get('days')) || 30)
+);
+
+问题：
+请求：
+
+/api/summary?days=0
+
+时：
+
+Number('0') = 0
+0 || 30 = 30
+
+因此 days=0 永远无法表达“全部历史”。
+
+代码的其他位置明显已经把 days=0 当作 all-time 使用，
+所以这里属于参数解析 bug。
+
+建议：
+不要用 || 设置数字默认值。
+先判断参数是否为 null / 空，再 Number()。
+
+例如逻辑应区分：
+- 未提供 days -> 30
+- days=0 -> 0
+- days=7 -> 7
+
+------------------------------------------------------------
+
+============================================================
+5. [P2/P3] 损坏的 state_json 会让整轮 scanAll 失败
+============================================================
+
+文件：
+src/scanner.js
+
+位置：
+约 102-103
+
+当前逻辑：
+
+const prev = row?.state_json
+  ? JSON.parse(row.state_json)
+  : undefined;
+
+问题：
+JSON.parse 在文件级 collector 的 try/catch 外面。
+
+如果 files.state_json 某一行损坏，例如：
+- 旧版本数据异常
+- 数据库损坏
+- 手动修改
+- 不兼容格式
+
+JSON.parse 会直接抛错，导致整个 scanAll reject。
+
+更合理行为应该是：
+某一个文件 state 损坏
+-> 记录 warning
+-> state 视为 undefined
+-> 对该文件执行 full rescan
+
+因为 dedup_key 已经用于去重，
+重新扫描通常是安全的。
+
+------------------------------------------------------------
+
+============================================================
+6. [P3] Scanner 健康统计会残留旧错误，files 计数也会累计
+============================================================
+
+文件：
+src/scanner.js
+
+位置：
+约 88-100
+
+当前每轮扫描重置：
+
+st.parse_errors = 0;
+st.last_scan_ms = Date.now();
+
+但没有重置：
+
+st.last_error
+
+结果：
+某次解析失败后，即使后续扫描已经成功，
+last_error 仍保留旧错误。
+
+前端 health tooltip 可能出现：
+状态已经是绿色 OK，
+鼠标悬停却仍显示几小时前/几天前的错误。
+
+另外：
+
+st.files++;
+
+每轮扫描都累计，
+但没有每轮：
+
+st.files = 0;
+
+所以 st.files 更像“累计扫描过多少次文件”，
+而不是当前扫描轮次的文件数量。
+
+建议：
+每轮开始时明确重置当前轮统计字段：
+parse_errors
+files
+last_error（或另外保存 last_error_at / last_success_at）
+
+------------------------------------------------------------
+
+============================================================
+7. [P3] GUI 日志被清空或轮转后仍显示旧内容
+============================================================
+
+文件：
+windows/gui/src/main.rs
+
+位置：
+约 616-625
+
+当前：
+
+let lines = tail_file(...);
+
+if lines.is_empty() {
+    return;
+}
+
+问题：
+如果日志文件：
+- 被 truncate
+- 被轮转
+- 被删除后重新创建
+- 当前暂时为空
+
+GUI 不会更新文本框，
+会继续显示上一次的旧日志。
+
+用户可能误以为旧错误仍然存在。
+
+建议：
+当 lines 为空时：
+- 清空 log_box
+或
+- 显示“暂无日志”
+
+而不是直接 return 保留旧内容。
+
+------------------------------------------------------------
+
+============================================================
+8. [P3] 文件 root 判断使用字符串 startsWith，可能误判目录归属
+============================================================
+
+文件：
+src/scanner.js
+
+位置：
+约 166
+
+当前：
+
+liveRoots.some(root => r.path.startsWith(root))
+
+例如：
+
+root:
+C:\data\codex
+
+path:
+C:\data\codex-old\abc.jsonl
+
+path.startsWith(root) 仍然是 true。
+
+结果：
+同前缀但不属于该目录的 files 记录可能被当成当前 root 下的文件处理。
+
+目前 _pruneMissingFiles 只删除 files cursor，
+不会删除 events 历史数据，
+因此数据破坏风险较低，
+但可能导致：
+- cursor 被误删
+- 后续重新扫描
+- 健康统计异常
+- 不必要的 IO
+
+建议：
+用真正的路径 containment 判断。
+例如使用 path.relative(root, target)，确认结果：
+- 不是 ..
+- 不是绝对路径
+- 确实位于 root 内部
+
+------------------------------------------------------------
+
+============================================================
+建议修复顺序
+============================================================
+
+1. P1：WM_DPICHANGED / Mutex 自锁风险
+2. P2：Scanner transaction 跨 await
+3. P2：Rust GUI 纳入 CI 编译和行为测试
+4. P2：days=0 参数解析
+5. P2/P3：state_json 解析容错
+6. P3：Scanner health 状态重置
+7. P3：GUI 空日志刷新
+8. P3：路径 startsWith 判断
+
+============================================================
+结论
+============================================================
+
+最新 GUI 美化改动整体方向没有明显问题，
+但 WM_DPICHANGED + 全局 Mutex 的组合值得优先处理。
+
+另外目前 CI 对 Rust GUI 的实际覆盖不足，
+这是 Win32 GUI 类问题比较容易漏过自动测试的主要原因之一。
+
+本 Review 仅列问题，没有对仓库进行任何修改。
