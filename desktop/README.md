@@ -35,7 +35,12 @@ pwsh -File desktop/scripts/build-windows.ps1
 cd desktop
 npm test
 cd src-tauri
-cargo test --offline --no-default-features
+cargo test --offline --locked --tests
 ```
+
+Rust 测试的命令行与根 `README.md` 和 `.github/workflows/desktop.yml` 保持一致（#74）：
+这里原先写的是 `cargo test --offline --no-default-features`，而 CI 与根文档跑的是默认
+feature。`--no-default-features` 会关掉 `desktop`（即不编译 tauri 那一半），照它执行
+等于在本地测一个发不出去也从来不发布的构建，绿了也证明不了 CI 那一步。
 
 本项目 MIT 许可见发布包中的 `LICENSE`；参考项目移植代码的许可见 `LICENSE.codex-usage-desktop`，分发依赖许可汇总见 `THIRD-PARTY-NOTICES.txt`。再分发时请保留这些许可文件。

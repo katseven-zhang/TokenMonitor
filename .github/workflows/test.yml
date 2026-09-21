@@ -27,6 +27,19 @@ on:
 permissions:
   contents: read
 
+# #74：并发组。同一分支的 push 与它那条 PR 是两个事件、两个 ref，以前互相不认识，
+# 于是每个改动都跑两遍；而且旧提交那条跑完的时间可能晚于新提交那条，屏幕上留下的
+# 最后一条绿/红不一定是最新代码的结果。组的键取"PR 的源分支名，否则当前分支名"，
+# 让这两者落进同一个组；cancel-in-progress: true 在这里是安全的——本 workflow 只做
+# 验证（npm test / 打包后装进临时目录冒烟 / import 冒烟），不产出任何要留存的东西，
+# 把被新提交取代的旧跑法掐掉正是我们想要的。
+# 已知代价（写在这里而不是藏在心里）：两个 fork 上同名分支的 PR 会落进同一个组，
+# 后触发的会把前一条掐了；对本仓库这种单机协作 + codex/** 分支流的工程，这个概率
+# 远低于"每个改动跑两遍"的成本。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # 回归测试跑在离线模式下（TOKENMONITOR_OFFLINE=1），不依赖汇率 / LiteLLM 牌价等公网接口

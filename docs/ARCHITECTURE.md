@@ -11,11 +11,15 @@ src/
   source-registry.js     来源加载器：枚举 src/sources/*.js → 校验 manifest → 解析 roots → 绑定 collector
   sources/               每源一个 manifest（<slug>.js 即注册键）：antigravity/ccmr/claude-code/codex/
                          dsh/grok/opencode/pi/workbuddy/zcode（+ contract.js：kind 枚举、context、校验、去重）
-  store.js               SQLite（node:sqlite）：events / files游标 / quota / rates / tool_calls / balance_history
-  scanner.js             按源类型枚举 + 增量扫描 + FSEvents + 版本回填 + resume链模型继承
+  store.js               SQLite（node:sqlite）：events / files游标 / quota / rates / tool_calls /
+                         balance_history / codex_quota_history（#45 的配额快照历史）
+  scanner.js             按源类型枚举 + 增量扫描 + 文件监听 + 版本回填 + resume链模型继承
+                         （监听走 platform/watch.js 的 fs.watch，不是 macOS FSEvents：
+                         Windows 上 recursive 不可靠，会自动降级为目录级监听 + 周期兜底扫描）
   server.js              HTTP API + SSE + 健康计算 + Claude 5h 推算 + 每日备份
-  balance.js             厂商余额轮询（DeepSeek/Kimi）
-  pricing.js             ccmr 费用折算 + 余额对账
+  balance.js             厂商余额轮询（DeepSeek / Kimi / GLM，三家都有连续 4xx 熔断）
+  pricing.js             全源费用折算（priceOf 单一计价入口 + PEAK_SQL 峰谷 + pricedCostCny
+                         单一成本公式）+ 余额对账（同一公式，#74 起两边不再各写一份）
   rates.js               WorkBuddy 积分费率自学习（最小二乘）
   models.js              模型名归一化（跨源大小写合并）
   bar.js                 `bar` 分发：macOS 胶囊 / Windows 托盘 EXE 查找与拉起
@@ -154,7 +158,7 @@ kind=sqlite，manifest version 1，`apiBilled` 未置（订阅制计量，无证
 - **整个周末**都是谷时，哪怕落在窗口时刻上
 - 两段峰时之间 **04:00-06:00 是空档**，属谷时
 
-判定以 `PEAK_SQL` 片段落地而非 JS 函数，让分组与计价共用同一份定义；费用卡、按天堆叠图、余额对账三处聚合都带上它。`off_peak` 缺失时回落种子表——老用户的 `pricing.json` 里没有这个字段，若实现成"缺失即不打折"，这个规则对他们就是个静默空操作。
+判定以 `PEAK_SQL` 片段落地而非 JS 函数，让分组与计价共用同一份定义；费用卡、按天堆叠图、余额对账三处聚合都带上它。金额表达式同样只有一份——`pricedCostCny(priceOf 的单价, {fi,ci,cw,oi}, peak)`（#74：此前费用卡与余额对账各写一份，而对账那一份漏了 `cache_write` 项，两边算的不是同一件事；`pricing.js` 里另有一个零调用、字段名早已过时的 `modelCostCny` 副本，已删除，防止再被照抄）。`off_peak` 缺失时回落种子表——老用户的 `pricing.json` 里没有这个字段，若实现成"缺失即不打折"，这个规则对他们就是个静默空操作。
 
 ## 关键机制
 

@@ -34,6 +34,17 @@ on:
 permissions:
   contents: read
 
+# #74：并发组把"同分支 push + 它的 PR"合并成一条队列（组的键与另外两个 workflow 同
+# 一套写法，见 test.yml 里的注释）。但这里 **cancel-in-progress: false**，是三个
+# workflow 里唯一不敢 cancel 的：这个 job 是全仓库唯一会产出可下载发布物的地方，
+# 最后一步 upload-artifact 交出的 dist/TokenMonitor-desktop-windows-x64.zip 是
+# 人工核包/reviewer 回看时的对象。cancel 掉一条正在跑的构建，最坏情况是
+# 已经点开的 run 从此没有对应产物（zip 只写了一半、artifact 步骤没跑到），
+# 这比"多花 45 分钟把上一条跑完"贵得多。所以这里宁可排队也不掐。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   windows-desktop:
     runs-on: windows-latest

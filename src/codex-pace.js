@@ -37,8 +37,11 @@
  *    历史样本按 α=0.5 指数衰减参与，窗口内速率稳定时趋近平均差商。
  * 2. 窗口重置 / windowId 变化：旧窗口样本全部弃用，只用新窗口样本
  *    （旧窗口速率不得污染新窗口）；样本不足两个 → unknown single_sample。
- * 3. 时间倒退 / 用量回落 / NaN / 负数 / 超范围（used<0 或 capacity<=0）：
+ * 3. 时间倒退 / 用量回落 / NaN / 负数 / 超范围（used<0 或 capacity<0）：
  *    该样本丢弃；若因此无可信样本 → unknown invalid_values；绝不产生假 ETA。
+ *    （#74：这一条原先写的是 capacity<=0。改注释而不是改代码——规则 6 明确把
+ *    capacity=0 定成"容量为零＝已耗尽"的合法事实，usable() 也只挡 <0；把 0 当脏
+ *    样本丢掉会让耗尽状态退化成 unknown，规则 6 与 #47 的 cap0→risk=high 测试双双作废。）
  * 4. 陈旧样本：最新样本距 now 超过 STALE_SAMPLE_MS（默认 30 分钟）→ unknown
  *    stale_samples（仍返回 used/capacity 事实字段）。
  * 5. capacity 缺失：used/burn 可给，但 remaining/percent/risk/ETA → unknown no_capacity。

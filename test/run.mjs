@@ -2720,6 +2720,367 @@ console.log('\n[29] 打包脚本与 crate（#102）：版本单一来源 / 输�
   }
 }
 
+/* ---------- [30] #74 收尾守卫 ---------- */
+console.log('\n[30] #74 收尾：静态资源边界 / 两条 CSV 导出同一规矩 / 对账与费用共用一份公式 / 打包脚本不许静默通过');
+{
+  /*
+   * 这一节守的是 #74 那批改动里"改对了但当时没有门"的部分。三个坑各按自己最常见的
+   * 死法来钉：
+   *  1) containment 补上了路径分隔符。实测记在这里，免得后人把 404 断言读成"它挡住了
+   *     越界"：本服务用 `new URL(req.url,…)` 取 pathname，而 WHATWG 会先吃掉点段
+   *     （`/../package.json` → `/package.json`，`/%2e%2e/` → `/`，百分号形式同样按
+   *     `.` 识别），且后续没有任何一处对 pathname 做 decodeURIComponent——所以今天
+   *     没有任何一个 HTTP 请求能让 `safe` 跑到 web 根外面去，containment 是纯纵深防御
+   *     的一层（改前改后这些请求都是 404）。于是 404 断言只能钉"结果"，判定本身要靠
+   *     同前缀兄弟目录的算术反例来钉，否则这行代码退回去也没人知道。
+   *  2) 成本公式合并成 pricedCostCny。当前牌价下 cache_write 单价为 0（本地直价表
+   *     干脆写死 cacheWCny: 0），所以漏掉 cw 项不会让任何端到端数字变——只能直接
+   *     喂一个非零的 cacheWCny 去测公式本身，再钉住"对账那条 SQL 取了 cw"。
+   *  3) 两支打包脚本的修复全部是"从静默通过变成显式失败"。这类改动最容易被换成
+   *     Write-Warning 而悄悄失效（比较还在、输出还在、故障不再让 CI 红），所以每条
+   *     都配"把 throw/Fail 换掉就判红"的负例自检。
+   */
+  const { resolve, sep } = await import('node:path');
+  /** 行尾归一：本仓库里 .yml 与 .js/.ps1 的 CRLF/LF 状态并不统一（test.yml 是 CRLF、
+   * desktop.yml 是 LF），用 `…:\n` 这种形状去锚一个块会在其中一半文件上失明。 */
+  const norm = (s) => s.replace(/\r\n/g, '\n');
+  const serverSrc = norm(read(join(ROOT, 'src/server.js')));
+  const pricingSrc = norm(read(join(ROOT, 'src/pricing.js')));
+
+  /* ---- 1a. 真实 HTTP：三个越界写法 + 泄漏判据 ---- */
+  {
+    const { startServer } = await import(pathToFileURL(join(ROOT, 'src/server.js')).href);
+    const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+    const { EventEmitter } = await import('node:events');
+    const base74 = mkdtempSync(join(tmpdir(), 'static74-'));
+    const s74 = new Store(join(base74, 't.db'));
+    const scanner74 = Object.assign(new EventEmitter(), { stats: {} });
+    const port74 = await new Promise((r) => {
+      const so = net.createServer();
+      so.listen(0, '127.0.0.1', () => { const pp = so.address().port; so.close(() => r(pp)); });
+    });
+    const srv = await startServer({ store: s74, scanner: scanner74, port: port74, log: () => {} });
+    await new Promise((r) => setTimeout(r, 400));
+    /** 用 http.request 而不是 fetch：undici 会在客户端就把点段规范化掉，测不到服务端这一层。 */
+    const rawGet = (path) => new Promise((res, rej) => {
+      const req = http.get({ host: '127.0.0.1', port: port74, path }, (r) => {
+        let body = '';
+        r.setEncoding('utf8');
+        r.on('data', (d) => { body += d; });
+        r.on('end', () => res({ status: r.statusCode, body }));
+      });
+      req.on('error', rej);
+    });
+    try {
+      // 先看正例：服务活着、静态目录可达。没有这条，下面所有 404 都可能只是"服务没起来"。
+      const good = await rawGet('/index.html');
+      ok('#74 静态门自检：/index.html 200 且有正文（否则下面的 404 是假绿）',
+        good.status === 200 && good.body.length > 50, `status=${good.status} bytes=${good.body.length}`);
+
+      // web 根之外那个真实存在的文件：仓库根的 package.json。判据不只看状态码，
+      // 还看正文里有没有它的内容——万一哪天 404 变成"200 + 别的东西"，也能红。
+      const marker = JSON.parse(read(join(ROOT, 'package.json'))).homepage;
+      ok('#74 泄漏判据本身可用（根 package.json 里取到了一个独特串，且它不在 index.html 里）',
+        typeof marker === 'string' && marker.length > 10 && !good.body.includes(marker),
+        String(marker));
+
+      const tries = ['/../package.json', '/%2e%2e/package.json', '/..%5c', '/..%5cpackage.json'];
+      for (const t of tries) {
+        const r = await rawGet(t);
+        ok(`#74 越界写法 ${t} 不放行（404 且正文里没有 web 根之外的文件）`,
+          r.status === 404 && !r.body.includes(marker), `status=${r.status} body=${r.body.slice(0, 60)}`);
+      }
+      // 任务点名的 `/%2e%2e/`：百分号编码的 `..` 在 WHATWG 里等价于 `..`，会被规范化成
+      // `/`，于是它命中的是"根路径→index.html"这条分支，不是 404。这里钉住它真正的
+      // 行为（被折回根、没跑到上面去），而不是写一条永远红不了的 404 断言。
+      const enc = await rawGet('/%2e%2e/');
+      const root = await rawGet('/');
+      ok('#74 `/%2e%2e/` 被折回 web 根（与 `/` 同一份 index.html，且不含根外文件）',
+        enc.status === 200 && enc.body === root.body && !enc.body.includes(marker),
+        `status=${enc.status} sameAsRoot=${enc.body === root.body}`);
+      ok('#74 越界请求没有把服务打挂（后续请求照常 200）',
+        (await rawGet('/index.html')).status === 200);
+    } finally {
+      srv.close();
+      try { s74.db.close(); } catch { /* 句柄 */ }
+      try { rmSync(base74, { recursive: true, force: true }); } catch { /* 延迟 */ }
+    }
+  }
+
+  /* ---- 1b. containment 判定本身：同前缀兄弟目录不是子目录 ---- */
+  {
+    const base = mkdtempSync(join(tmpdir(), 'contain74-'));
+    const webRoot = join(base, 'web');                       // 假的 web 根
+    const sibling = join(base, 'web-internal', 'secret.txt'); // 同前缀、但不是子目录
+    mkdirSync(webRoot, { recursive: true });
+    mkdirSync(dirname(sibling), { recursive: true });
+    writeFileSync(join(webRoot, 'index.html'), 'inside\n');
+    writeFileSync(sibling, 'SECRET-OUTSIDE-WEB\n');
+    // 修前的判定式（`safe.startsWith(resolve(WEB_DIR))`）与修后的判定式，跑的是同一对
+    // 真实路径：修前必须"放行兄弟目录"，修后必须"拒绝它、同时仍放行真子目录"。
+    // 只有把两条都写在这里，才能证明加分隔符改的是行为而不是排版。
+    const legacyInside = (safe) => safe.startsWith(webRoot);
+    const fixedInside = (safe) => safe === webRoot || safe.startsWith(webRoot + sep);
+    const child = join(webRoot, 'lib', 'a.js');
+    ok('#74 containment 反例可用（同前缀兄弟目录在修前判定里会被放行）',
+      legacyInside(sibling) && !legacyInside(join(base, 'other')));
+    ok('#74 containment 修后判定拒绝同前缀兄弟目录、放行真子目录与根本身',
+      !fixedInside(sibling) && fixedInside(child) && fixedInside(webRoot), sibling);
+    ok('#74 containment 的修后判定确实来自修前的那种写法之差（两条判定结果必须不同）',
+      legacyInside(sibling) !== fixedInside(sibling));
+    // 上面钉的是算术，这里钉的是"仓库里跑的确实是那个算式"：整条 startsWith 比较
+    // 必须带上分隔符，且不允许留一处裸前缀比较。
+    ok('#74 src/server.js 的 containment 比较的是"web 根 + 分隔符"',
+      /safe\.startsWith\(webRoot \+ sep\)/.test(serverSrc)
+      && /safe === webRoot \|\| safe\.startsWith\(webRoot \+ sep\)/.test(serverSrc), '没找到带 sep 的比较');
+    ok('#74 src/server.js 里不残留裸前缀式 containment（那会放行同前缀兄弟目录）',
+      !/safe\.startsWith\(resolve\(WEB_DIR\)\)/.test(serverSrc));
+    ok('#74 WEB_DIR 就是那个 web 根（判定的基准没被换成别的目录）',
+      /export const WEB_DIR = join\(import\.meta\.dirname, '\.\.', 'web'\)/.test(read(join(ROOT, 'src/config.js'))));
+    rmSync(base, { recursive: true, force: true });
+  }
+
+  /* ---- 2. 两条 CSV 导出的引号规矩（把源码里真正跑的那两个 esc 取出来执行） ---- */
+  {
+    // 取的是源码里真正跑着的那两个箭头函数，不是在测试里重写一份规矩；行尾那条语句的
+    // 分号必须剪掉，否则 `return ((v) => …;)` 是语法错（第一次就红在这里）。
+    const escSrc = [...serverSrc.matchAll(/const esc = (\(v\) =>[^\r\n]*)/g)]
+      .map((m) => m[1].replace(/;+$/, ''));
+    ok('#74 两条导出各自定义了 esc（提取式判定不是空转：应正好 2 处）',
+      escSrc.length === 2, `${escSrc.length} 处`);
+    const fns = escSrc.map((src) => new Function(`return (${src})`)());
+    const cases = [
+      { in: 'a\rb', want: '"a\rb"', why: '裸 CR：分隔符判定里必须算它（#74 修的就是这条）' },
+      { in: 'a\r\nb', want: '"a\r\nb"', why: 'CRLF' },
+      { in: 'a,b', want: '"a,b"', why: '逗号' },
+      { in: 'a"b', want: '"a""b"', why: '双引号要翻倍' },
+      { in: 'a\nb', want: '"a\nb"', why: '换行' },
+      { in: 'plain', want: 'plain', why: '普通值不该被加引号（否则两列判定就是恒真）' },
+    ];
+    for (const { in: v, want, why } of cases) {
+      const got = fns.map((f) => f(v));
+      ok(`#74 两条导出对 ${JSON.stringify(v)} 的转义一致且正确（${why}）`,
+        got.every((g) => g === want), JSON.stringify(got));
+    }
+    // 规矩合一：两处判"要不要加引号"的字符集必须一模一样——#74 报的就是"同一个仓库
+    // 里两条导出走两套规矩"，只测今天的值相等守不住明天有人只改一处。
+    const classes = escSrc.map((s) => (/\/\[([^\]]*)\]\//.exec(s) || [])[1]);
+    ok('#74 两处 esc 的分隔符字符集完全相同（一条规矩，不是两份抄本）',
+      classes.every((c) => c === classes[0]) && classes[0].includes('r'), JSON.stringify(classes));
+
+    /* 负例自检：把 \r 从判定里拿掉（也就是修前的写法）必须让上面那条红。 */
+    {
+      const oldWay = escSrc[0].replace(/\[",[^\]]*\]/, '[",\\n]');
+      const oldFn = new Function(`return (${oldWay})`)();
+      ok('#74 自检·esc 少判 \\r 时判红（修前写法确实守不住）',
+        oldFn('a\rb') !== '"a\rb"' && /\\r/.test(classes[0] || ''), oldWay);
+      const noQuote = escSrc[0].replace(/\[",[^\]]*\]/, '/x/');
+      ok('#74 自检·esc 的引号判定被换掉时字符集比对判红',
+        !(/\/\[([^\]]*)\]\//.exec(noQuote) || [])[1], noQuote);
+    }
+  }
+
+  /* ---- 3. 成本公式只有一份，且 cache_write 在账内 ---- */
+  {
+    const { pricedCostCny, computeRecon } = await import(pathToFileURL(join(ROOT, 'src/pricing.js')).href);
+    // 直接喂一个非零的 cache_write 单价：走公开 API 是拿不到非零 cw 单价的（本地直价表
+    // 写死 cacheWCny: 0，LiteLLM 那条在离线测试里是空表），所以只能测公式本身。
+    const p = { inCny: 2, cacheCny: 1, cacheWCny: 5, outCny: 3, offPeak: 0.5 };
+    const row = { fi: 1e6, ci: 1e6, cw: 2e6, oi: 1e6 };
+    ok('#74 pricedCostCny 计入 cache_write 项（漏掉 cw 就少 10 元）',
+      pricedCostCny(p, row, true) === 2 + 1 + 10 + 3, String(pricedCostCny(p, row, true)));
+    ok('#74 pricedCostCny 的谷时折扣乘在含 cw 的总额上（不是只乘部分项）',
+      pricedCostCny(p, row, false) === (2 + 1 + 10 + 3) * 0.5, String(pricedCostCny(p, row, false)));
+    ok('#74 cw=0 时 pricedCostCny 与旧三项式等价（合并公式没有改变既有口径）',
+      pricedCostCny(p, { ...row, cw: 0 }, true) === (row.fi / 1e6) * p.inCny + (row.ci / 1e6) * p.cacheCny + (row.oi / 1e6) * p.outCny);
+    // 公式只有一份：pricing.js 里读单价做乘法的行必须只剩 pricedCostCny 那一条。
+    // 判据取 `p.inCny` 出现的行数（`row.fi` 在同一行，证明它是那份公式而不是别的什么），
+    // 而不是把整条表达式跨行拼出来——上一版在这里数到了公式的第一行，然后拿第二行的
+    // `row.cw` 去要求第一行，自己先红了。
+    const priceUses = pricingSrc.split('\n')
+      .filter((l) => /p\.inCny/.test(l) && !/^\s*(\/\/|\*|\/\*)/.test(l));
+    ok('#74 pricing.js 里手写的金额表达式只剩 pricedCostCny 一处',
+      priceUses.length === 1 && /row\.fi/.test(priceUses[0]), priceUses.join(' | '));
+    // 对账那条 SQL 必须把 cw 取出来，否则公式再对也乘的是 undefined（NaN 会一路传到面板）。
+    // 认准 `WHERE tool IN (${ph})` 这一条：computeCosts 里另有两处形状几乎一样的 SQL，
+    // 用第一个匹配会量到别的工作。
+    const reconSql = /SELECT model, \$\{PEAK_SQL\} AS peak,([\s\S]{0,200}?)FROM events WHERE tool IN \(\$\{ph\}\)/.exec(pricingSrc);
+    ok('#74 computeRecon 的 SQL 取 SUM(cache_write) cw（不然 cw 项是空的）',
+      !!reconSql && /SUM\(cache_write\) cw/.test(reconSql[1]), reconSql ? reconSql[1].trim().slice(0, 90) : '没匹配到对账 SQL');
+    ok('#74 computeRecon 走 pricedCostCny 而不是自己那份表达式',
+      /spend \+= pricedCostCny\(p, m, m\.peak\)/.test(pricingSrc));
+    ok('#74 computeCosts 的两处消费方也走同一份公式',
+      (pricingSrc.match(/const c = pricedCostCny\(p, r, r\.peak\)/g) || []).length === 2);
+    ok('#74 死掉的 modelCostCny 没有复活（零调用点且字段名已过时）',
+      !/function modelCostCny/.test(pricingSrc) && !/modelCostCny\s*\(/.test(pricingSrc));
+    ok('#74 computeRecon 仍是同步导出（消费方按同步用）',
+      typeof computeRecon === 'function' && computeRecon.constructor.name !== 'AsyncFunction');
+
+    /* 负例自检：把 cw 项从公式/SQL 里拿掉，上面两条必须红。 */
+    {
+      const noCw = '((row.fi / 1e6) * p.inCny + (row.ci / 1e6) * p.cacheCny + (row.oi / 1e6) * p.outCny) * (peak ? 1 : p.offPeak)';
+      const noCwFn = new Function('p', 'row', 'peak', `return ${noCw}`);
+      ok('#74 自检·公式漏掉 cache_write 时判红',
+        noCwFn(p, row, true) !== pricedCostCny(p, row, true), String(noCwFn(p, row, true)));
+      // 精确剥掉"对账那一条"SQL 里的 cw 列：文件里另有两处形状几乎一样的查询，
+      // 全局/首个 replace 会剥错那一条，自检就会"以为删掉了其实没删"。
+      const reconRe = /SELECT model, \$\{PEAK_SQL\} AS peak,[\s\S]*?GROUP BY model, peak/;
+      const reconText = (reconRe.exec(pricingSrc) || [''])[0];
+      const sqlNoCw = pricingSrc.replace(reconRe, () => reconText.replace(/SUM\(cache_write\) cw, /, ''));
+      const m2 = /SELECT model, \$\{PEAK_SQL\} AS peak,([\s\S]{0,200}?)FROM events WHERE tool IN \(\$\{ph\}\)/.exec(sqlNoCw);
+      ok('#74 自检·对账 SQL 不取 cache_write 时判红',
+        sqlNoCw !== pricingSrc && reconText.includes('SUM(cache_write) cw')
+        && (!m2 || !/SUM\(cache_write\) cw/.test(m2[1])), reconText.trim().slice(0, 90));
+      const revived = pricingSrc.replace('export function pricedCostCny', 'function modelCostCny(p, m) { return 0 }\nexport function pricedCostCny');
+      ok('#74 自检·modelCostCny 回来时判红', /function modelCostCny/.test(revived));
+      const secondFormula = pricingSrc.replace(/const c = pricedCostCny\(p, r, r\.peak\);/,
+        'const c = ((r.fi / 1e6) * p.inCny + (r.oi / 1e6) * p.outCny) * (r.peak ? 1 : p.offPeak);');
+      const recount = secondFormula.split('\n').filter((l) => /p\.inCny/.test(l) && !/^\s*(\/\/|\*|\/\*)/.test(l));
+      ok('#74 自检·有人重新手写一份表达式时判红（金额表达式必须只剩一处）',
+        secondFormula !== pricingSrc && recount.length !== priceUses.length,
+        `${priceUses.length} → ${recount.length}`);
+    }
+  }
+
+  /* ---- 4. 两支打包脚本：把"静默通过"改回"显式失败"的三处 ---- */
+  {
+    const desktopBuild = norm(read(join(ROOT, 'desktop/scripts/build-windows.ps1')));
+    const rootBuild = norm(read(join(ROOT, 'scripts/build-windows.ps1')));
+
+    /* 4a. desktop：git rev-parse 的退出码必须查 */
+    const revGuard = /& git rev-parse HEAD[\s\S]{0,120}?if \(\$LASTEXITCODE -ne 0\) \{[^}]*throw/;
+    ok('#74 desktop 打包脚本查 git rev-parse 的退出码（非零即 throw，不落空 revision）',
+      revGuard.test(desktopBuild), '没找到 $LASTEXITCODE 判定 + throw');
+    ok('#74 desktop 打包脚本还核对 revision 形状（空串/杂输出同样失败）',
+      /\$revision -notmatch '\^\[0-9a-f\]\{7,40\}\$'\) \{ throw/.test(desktopBuild));
+    ok('#74 manifest 里的 revision 来自被守住的那个变量（不是绕开判定另取一份）',
+      /revision=\$revision/.test(desktopBuild) && !/\$revision = \(& git rev-parse HEAD\)\.Trim\(\)/.test(desktopBuild));
+
+    /* 4b. root：bin\ 逐条目复制，macOS 胶囊留在原地 */
+    ok('#74 Windows 打包按条目复制并点名排除 tokenmonitor.app',
+      /\$copyExclude = @\('tokenmonitor\.app'\)/.test(rootBuild)
+      && /if \(\$copyExclude -contains \$entry\.Name\)/.test(rootBuild));
+    ok('#74 整目录 Copy-Item -Recurse 的旧写法已消失（它正是 mac 胶囊混进包的原因）',
+      !/Copy-Item -Path \(Join-Path \$repoFull \$dir\) -Destination[^\n]*-Recurse/.test(rootBuild));
+    ok('#74 目标目录预建一层，条目交给 Copy-Item 落位（避免 runtime\\web\\web 那种嵌套）',
+      /New-Item -ItemType Directory -Path \$target -Force/.test(rootBuild)
+      && /Copy-Item -LiteralPath \$entry\.FullName -Destination \(Join-Path \$target \$entry\.Name\)/.test(rootBuild));
+    ok('#74 .app 作为目录名也被拦（DirectoryInfo 没有 Extension，用 Extension 会在 StrictMode 下炸）',
+      /\$_.Name -like '\*\.app'/.test(rootBuild) && !/\$_.Extension -eq '\.app'/.test(rootBuild));
+    // 注释里的因果（"它被 .gitignore 忽略，所以 git status 里看不见"）要成立，
+    // 否则这条排除是在守一个仓库里根本不会出现的东西。
+    ok('#74 bin/tokenmonitor.app 确实被 .gitignore 忽略（排除逻辑守的是真会发生的泄漏）',
+      read(join(ROOT, '.gitignore')).split(/\r?\n/).some((l) => /^bin\/tokenmonitor\.app\/?$/.test(l.trim())));
+
+    /* 4c. root：非 PE 的原生二进制一律算违规 */
+    ok('#74 打包脚本定义了非 Windows 二进制的识别（ELF/Mach-O 魔数）',
+      /function Get-ForeignBinaryKind/.test(rootBuild) && /0x7F -and \$bytes\[1\] -eq 0x45/.test(rootBuild));
+    ok('#74 识别结果真的接在产物扫描上并 Fail（不是定义完就不用）',
+      /foreach \(\$f in \(Get-ChildItem -LiteralPath \$dist -Recurse -File\)[\s\S]{0,200}?Get-ForeignBinaryKind -Path \$f\.FullName[\s\S]{0,200}?\$foreignHits\.Count -gt 0\) \{ Fail/.test(rootBuild));
+    ok('#74 逐条目复制与结果级扫描两条都在（只有一条时另一条写错就没人发现）',
+      rootBuild.indexOf('$copyExclude') < rootBuild.indexOf('Get-ForeignBinaryKind -Path'));
+
+    /* 负例自检：四条各拆一处，证明上面的真判定式会红 */
+    {
+      // 得指名 git 那一条：文件里 npm/cargo 之后各有一条形状完全相同的
+      // `if ($LASTEXITCODE -ne 0) { throw … }`，首个匹配会改到前端构建那条上去，
+      // 于是"自检通过"其实什么都没证明。
+      const warnOnly = desktopBuild.replace(/if \(\$LASTEXITCODE -ne 0\) \{ throw "git rev-parse HEAD failed[^\n]*/,
+        () => 'if ($LASTEXITCODE -ne 0) { Write-Warning "no revision" }');
+      ok('#74 自检·rev-parse 失败只 Write-Warning 时判红',
+        warnOnly !== desktopBuild && !revGuard.test(warnOnly), '替换没生效（正则又没指名到 git 那一条）');
+      const oldOneLiner = desktopBuild.replace(/\$revisionOutput = & git rev-parse HEAD[\s\S]*?\$revision = \(\[string\]\$revisionOutput\)\.Trim\(\)/,
+        () => '$revision = (& git rev-parse HEAD).Trim()');
+      ok('#74 自检·退回一行式（不查退出码）时判红',
+        oldOneLiner !== desktopBuild && !revGuard.test(oldOneLiner));
+      const noShape = desktopBuild.replace(/if \(\$revision -notmatch[^\n]*/, '');
+      ok('#74 自检·不核对 revision 形状时判红',
+        !/\$revision -notmatch '\^\[0-9a-f\]\{7,40\}\$'\) \{ throw/.test(noShape));
+      const bulkBack = rootBuild.replace(/foreach \(\$entry in Get-ChildItem -LiteralPath \(Join-Path \$repoFull \$dir\) -Force\) \{[\s\S]*?\n    \}/,
+        "Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $runtime $dir) -Recurse");
+      ok('#74 自检·退回整目录递归复制时判红',
+        /Copy-Item -Path \(Join-Path \$repoFull \$dir\) -Destination[^\n]*-Recurse/.test(bulkBack));
+      const noExclude = rootBuild.replace(/\$copyExclude = @\('tokenmonitor\.app'\)/, '$copyExclude = @()');
+      ok('#74 自检·排除表清空（tokenmonitor.app 又会被复制）时判红',
+        !/\$copyExclude = @\('tokenmonitor\.app'\)/.test(noExclude));
+      const noFail = rootBuild.replace(/if \(\$foreignHits\.Count -gt 0\) \{ Fail/, 'if ($foreignHits.Count -gt 0) { Write-Host');
+      ok('#74 自检·扫到 foreign 二进制却不 Fail 时判红',
+        !/foreach \(\$f in \(Get-ChildItem -LiteralPath \$dist -Recurse -File\)[\s\S]{0,200}?Get-ForeignBinaryKind -Path \$f\.FullName[\s\S]{0,200}?\$foreignHits\.Count -gt 0\) \{ Fail/.test(noFail));
+      const extWay = rootBuild.replace(/\$_.Name -like '\*\.app'/, "$_.Extension -eq '.app'");
+      ok('#74 自检·改用 .Extension 判定 .app 时判红（StrictMode 下那是另一种失败）',
+        /\$_.Extension -eq '\.app'/.test(extWay) && !/\$_.Name -like '\*\.app'/.test(extWay));
+    }
+  }
+  /* ---- 5. 三个 workflow 的 concurrency 组（#74：整块新增，当时一条门都没有） ---- */
+  {
+    const wfDir = join(ROOT, '.github', 'workflows');
+    const wfNames = readdirSync(wfDir).filter((n) => /\.ya?ml$/.test(n)).sort();
+    ok('#74 扫到三个 workflow（concurrency 判定不空转）', wfNames.length >= 3, wfNames.join(','));
+    const concBlock = /^concurrency:\n((?:[ \t]+[^\n]*\n)+)/m;
+    const groupRe = /^[ \t]+group:[ \t]*\$\{\{[ \t]*github\.workflow[ \t]*\}\}-/m;
+    const pairRe = /pull_request\.head\.ref[ \t]*\|\|[ \t]*github\.ref_name/m;
+    const cancelRe = /cancel-in-progress:[ \t]*(true|false)/;
+    // 判"有没有发布步骤"必须看要执行的代码，不能看全文：windows.yml 的注释里就写着
+    // "没有任何 upload-artifact 步骤"，按散文匹配会把这条断言变成永远红（#102 在 [27]
+    // 里立的规矩：反面示例写在注释里，卫生规则查的是代码）。
+    const codeOnly = (t) => t.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    const uploadStep = /uses:[ \t]*actions\/upload-artifact@/;
+    const flags = {};
+    for (const n of wfNames) {
+      const text = norm(read(join(wfDir, n)));
+      const b = concBlock.exec(text);
+      ok(`#74 ${n} 有顶层 concurrency 块（同分支的 push 与 PR 不再互不相识）`, !!b, '整块缺失');
+      if (!b) { flags[n] = null; continue; }
+      ok(`#74 ${n} 的 group 以 github.workflow 起头（三条 workflow 之间不互相取消）`,
+        groupRe.test(b[1]), b[1].trim());
+      ok(`#74 ${n} 的 group 用"PR 源分支名，否则当前分支名"合并同一分支的两个事件`,
+        pairRe.test(b[1]), b[1].trim());
+      const c = cancelRe.exec(b[1]);
+      ok(`#74 ${n} 显式写出 cancel-in-progress（省略会吃 YAML 默认值，行为就变了）`,
+        !!c, b[1].trim());
+      flags[n] = c ? c[1] : null;
+    }
+    // 三个文件的态度必须是有意的不同，而不是有人抄漏：只有产出发布物的那条不许掐。
+    ok('#74 只有 desktop.yml（唯一 upload-artifact 的发布物线）用 cancel-in-progress: false',
+      flags['desktop.yml'] === 'false' && flags['test.yml'] === 'true' && flags['windows.yml'] === 'true',
+      JSON.stringify(flags));
+    const desktopYml = norm(read(join(wfDir, 'desktop.yml')));
+    const reasonZone = desktopYml.slice(0, desktopYml.search(concBlock));
+    ok('#74 desktop.yml 的 false 就近写了理由，且那条发布步骤真的存在（理由不是空话）',
+      /artifact|发布物/.test(reasonZone.slice(-900)) && uploadStep.test(codeOnly(desktopYml)),
+      reasonZone.slice(-200));
+    ok('#74 另两条 workflow 里没有 upload-artifact 步骤（cancel 才不会丢掉谁要留存的东西）',
+      !uploadStep.test(codeOnly(norm(read(join(wfDir, 'test.yml')))))
+      && !uploadStep.test(codeOnly(norm(read(join(wfDir, 'windows.yml'))))),
+      '把散文里的反面示例当成了事实');
+
+    /* 负例自检：三条各造一个反面，证明上面的判定式真的会红 */
+    {
+      const noConc = "on:\n  push:\njobs:\n  a:\n    runs-on: x\n";
+      ok('#74 自检·没有 concurrency 块时判红', !concBlock.test(noConc));
+      const globalGroup = 'concurrency:\n  group: ${{ github.ref_name }}\n  cancel-in-progress: true\n';
+      ok('#74 自检·group 不含 github.workflow 时判红（三条会互掐）',
+        !groupRe.test(concBlock.exec(globalGroup)[1]));
+      const pushOnly = 'concurrency:\n  group: ${{ github.workflow }}-${{ github.ref_name }}\n  cancel-in-progress: true\n';
+      ok('#74 自检·group 只认 ref_name 时判红（PR 与它的 push 仍各跑一遍）',
+        !pairRe.test(concBlock.exec(pushOnly)[1]));
+      const noFlag = 'concurrency:\n  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}\n';
+      ok('#74 自检·不写 cancel-in-progress 时判红（默认值不该由文件缺席来表达）',
+        !cancelRe.test(concBlock.exec(noFlag)[1]));
+      const cancelKey = /^ +cancel-in-progress: false$/m;
+      const cancelDesktop = desktopYml.replace(cancelKey, '  cancel-in-progress: true');
+      ok('#74 自检·发布物那条线被改成 cancel 时判红',
+        cancelDesktop !== desktopYml && !cancelKey.test(cancelDesktop));
+      ok('#74 自检·按散文找发布步骤会误判（windows.yml 的注释里就写着 upload-artifact）',
+        /upload-artifact/.test(read(join(wfDir, 'windows.yml')))
+        && !uploadStep.test(codeOnly(norm(read(join(wfDir, 'windows.yml'))))));
+      ok('#74 自检·CRLF 文本会让行锚判定失明（norm 不是可选步骤）',
+        !concBlock.test('concurrency:\r\n  group: x\r\n  cancel-in-progress: true\r\n')
+        && concBlock.test(norm('concurrency:\r\n  group: x\r\n  cancel-in-progress: true\r\n')));
+    }
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

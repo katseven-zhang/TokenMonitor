@@ -43,6 +43,14 @@ on:
 permissions:
   contents: read
 
+# #74：并发组，理由与 test.yml 里那条注释相同（同分支的 push 与它的 PR 不再各跑一遍，
+# 旧提交那条不会活在新提交那条之后）。这里 cancel-in-progress 同样安全：本文件四个 job
+# 全是验证——gui/tray 的 cargo build 与 build.ps1 产物只喂给本 job 里的行为测试，
+# 没有任何 upload-artifact 步骤，掐掉一条被取代的跑法不会丢掉谁要的东西。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 # Verification only. No secrets, no publish, no artifact upload of DBs/logs.
 env:
   TOKENMONITOR_OFFLINE: '1'

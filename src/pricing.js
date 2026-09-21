@@ -79,9 +79,15 @@ export function isPriced(model, table, rate = 1) {
   return priceOf(model, table || {}, rate) !== null;
 }
 
-function modelCostCny(p, m) {
-  return (m.fi / 1e6) * p.input_miss + (m.ci / 1e6) * p.input_hit + (m.oi / 1e6) * p.output;
-}
+/**
+ * #74：删除 modelCostCny。它零调用点（改前先确认过：整个仓库只剩它自己的定义那一行），
+ * 而且是**一份已经过时的公式副本**——直接读 pricing.json 的原始字段
+ * （input_miss/input_hit/output），既没有 cache_write 项、也没有峰谷折扣，
+ * 跟 priceOf 输出的 inCny/cacheCny/cacheWCny/outCny 根本不是一套东西。
+ * 留着它的害处不是占三行：下次有人要"算某个模型多少钱"时，这个名字看起来正是答案，
+ * 抄过去就把 #74 报的那类漂移重新种下一处。单一公式现在由 pricedCostCny 承担
+ * （吃 priceOf 的输出 + 峰谷判定），computeCosts 与 computeRecon 共用它。
+ */
 
 /** 归一化到人民币（USD 按 usd_to_cny 折算，折算标志返回） */
 function toCny(amount, currency, rate) {
@@ -119,6 +125,19 @@ export function priceOf(model, table, rate) {
   return { inCny: p.input * rate, cacheCny: p.cacheRead * rate, outCny: p.output * rate, cacheWCny: p.cacheWrite * rate, offPeak };
 }
 
+/**
+ * 峰谷 + cache_write 的单一成本公式（#74）：给一条按 token 分组的统计行算人民币成本。
+ * 入参是 priceOf 的返回（四个已折成人民币的单价）与一行 {fi,ci,cw,oi} 聚合值，
+ * peak=false 时套厂商的谷时折扣。以前 computeCosts 与 computeRecon 各写一份表达式，
+ * 而 computeRecon 那一份漏了 cw 项——两边于是用两套公式，对账与费用卡说的不是同一件事
+ * （今天 seed 牌价下 cw 单价为 0，所以看不出来，是个地雷不是当下算错）。
+ * 只留这一份，两个消费方都走它；新增算成本的入口也必须走它，不要再抄表达式。
+ */
+export function pricedCostCny(p, row, peak) {
+  return ((row.fi / 1e6) * p.inCny + (row.ci / 1e6) * p.cacheCny
+    + (row.cw / 1e6) * p.cacheWCny + (row.oi / 1e6) * p.outCny) * (peak ? 1 : p.offPeak);
+}
+
 export async function computeCosts(db, days = 30) {
   const pricing = await loadPricing();
   const fx = await Promise.race([
@@ -142,8 +161,7 @@ export async function computeCosts(db, days = 30) {
       if (tokens <= 0) continue;
       const p = priceOf(r.model, table, rate);
       if (!p) { unpriced.add(r.model); continue; }
-      const c = ((r.fi / 1e6) * p.inCny + (r.ci / 1e6) * p.cacheCny
-        + (r.cw / 1e6) * p.cacheWCny + (r.oi / 1e6) * p.outCny) * (r.peak ? 1 : p.offPeak);
+      const c = pricedCostCny(p, r, r.peak);
       total += c;
       const m = byModel.get(r.model) || { model: r.model, cost_cny: 0, tokens: 0 };
       m.cost_cny += c; m.tokens += tokens; byModel.set(r.model, m);
@@ -172,8 +190,7 @@ export async function computeCosts(db, days = 30) {
   for (const r of dayRows) {
     const p = priceOf(r.model, table, rate);
     if (!p) continue;
-    const c = ((r.fi / 1e6) * p.inCny + (r.ci / 1e6) * p.cacheCny
-      + (r.cw / 1e6) * p.cacheWCny + (r.oi / 1e6) * p.outCny) * (r.peak ? 1 : p.offPeak);
+    const c = pricedCostCny(p, r, r.peak);
     if (!byDayMap.has(r.d)) byDayMap.set(r.d, { day: r.d, models: {}, total: 0 });
     const e = byDayMap.get(r.d);
     e.models[r.model] = (e.models[r.model] || 0) + c;
@@ -219,15 +236,17 @@ export function computeRecon(db, store, pricing, { hours = 24, rate = 7.2 } = {}
       if (!tools.length) { out.push({ provider: b.provider, id: b.id, balance: b.balance, delta, spend: null, hours }); continue; }
       const ph = tools.map(() => '?').join(',');
       for (const m of db.prepare(`
-        SELECT model, ${PEAK_SQL} AS peak, SUM(input_tokens) fi, SUM(cached_input) ci, SUM(output_tokens) oi
+        SELECT model, ${PEAK_SQL} AS peak, SUM(input_tokens) fi, SUM(cached_input) ci,
+               SUM(cache_write) cw, SUM(output_tokens) oi
         FROM events WHERE tool IN (${ph}) AND ts >= ? GROUP BY model, peak`).all(...tools, since)) {
         // 必须连字符：OpenRouter 形态的 'deepseek/deepseek-v4-flash-0731' 扣的是
         // OpenRouter 的钱包，不是 DeepSeek 直连账户，裸前缀会把它误并进来
         if (!(m.model === prefix || m.model?.startsWith(prefix + '-'))) continue;
         const p = priceOf(m.model, table, rate);
         if (!p) continue;
-        spend += ((m.fi / 1e6) * p.inCny + (m.ci / 1e6) * p.cacheCny + (m.oi / 1e6) * p.outCny)
-          * (m.peak ? 1 : p.offPeak);
+        // #74：这里以前自己写了一份表达式并且漏掉 cache_write，于是"费用卡"与
+        // "余额对账"用的是两套公式。现在两边都走 pricedCostCny。
+        spend += pricedCostCny(p, m, m.peak);
       }
     }
     out.push({ provider: b.provider, id: b.id, balance: b.balance, delta, spend, hours });

@@ -123,7 +123,15 @@ try {
         $path = Join-Path $outputRoot $name
         [pscustomobject][ordered]@{name=$name;bytes=(Get-Item -LiteralPath $path).Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
     }
-    $revision = (& git rev-parse HEAD).Trim()
+    # #74：这个脚本在 npm 与 cargo 之后都查了 $LASTEXITCODE，唯独这里没查。
+    # `git` 不在 PATH、或者从没有 HEAD 的仓库里构建时，& git rev-parse 只是往 stderr
+    # 写一行字并把空串留在管道里（原生命令的非零退出不会触发 $ErrorActionPreference），
+    # 于是构建照样成功，manifest 里躺着一个空 revision——事后没人能看出这个包是从
+    # 哪个提交来的。缺版本可以失败，缺来源不可以静默通过。
+    $revisionOutput = & git rev-parse HEAD
+    if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed (exit $LASTEXITCODE); refusing to stamp a release with no revision." }
+    $revision = ([string]$revisionOutput).Trim()
+    if ($revision -notmatch '^[0-9a-f]{7,40}$') { throw "git rev-parse HEAD did not return a commit SHA (got '$revision')." }
     $manifest = [ordered]@{product='TokenMonitor Desktop';version=$appVersion;platform='windows-x64';revision=$revision;sourceHash=$sourceHash.ToLowerInvariant();builtAtUtc=[DateTime]::UtcNow.ToString('o');runtime='system WebView2; no bundled Node';files=@($files)}
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot 'manifest.json') -Encoding utf8
     $archiveInputs = @($names + 'manifest.json') | ForEach-Object { Join-Path $outputRoot $_ }
