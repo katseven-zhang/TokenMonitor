@@ -5,13 +5,15 @@ import { debounce,SEARCH_DEBOUNCE_MS } from './lib/debounce';
 import { Activity,ArrowDownToLine,BarChart3,ChevronRight,Clock3,Coins,Cpu,Database,Folder,HardDrive,Layers,Loader2,Moon,Play,RefreshCw,Search,Settings2,ShieldCheck,Square,Sun,Terminal,X } from 'lucide-react';
 import { UsageTrend } from './components/usage-trend';
 import { save } from '@tauri-apps/plugin-dialog';
-import { request,type Bootstrap,type Dashboard,type EventPage,type Query,type Settings,type Status,type Summary,type SessionDetailRow } from './lib/api';
+import { request,type Bootstrap,type Dashboard,type Query,type Settings,type Status,type Summary,type SessionDetailRow } from './lib/api';
 import { localInput,preset,initialQuery,dateRange } from './lib/range';
 import { latestLoader } from './lib/latest-loader';
 import { sameQuery } from './lib/query-identity';
 import { SummaryTable,type SummaryKind } from './components/summary-table';
 import { PriceCatalog } from './components/price-catalog';
 import { ActivityTable } from './components/activity-table';
+import { Empty } from './components/empty-state';
+import { EventDetailTable } from './components/event-detail-table';
 import { QuotaPanel } from './components/quota-panel';
 import { SessionDetailModal } from './components/session-detail-modal';
 
@@ -21,7 +23,6 @@ const compact=(x:number)=>new Intl.NumberFormat('en',{notation:'compact',maximum
 const time=(x:number)=>new Date(x).toLocaleString('zh-CN',{hour12:false});
 type Tab='overview'|'sessions'|'models'|'projects'|'days'|'months'|'requests'|'tools'|'service'|'settings';
 const tabs:[Tab,string][]=[['overview','仪表盘'],['sessions','会话'],['models','模型'],['projects','项目'],['days','按日'],['months','按月'],['requests','用量明细'],['tools','工具活动']];
-function Empty({text='这个时间范围内没有用量记录'}:{text?:string}){return <div className="empty"><Database size={32}/><h3>{text}</h3><p>选择其他时间范围，或在设置中检查本地数据目录。</p></div>}
 function Metric({label,value,hint,icon}:{label:string;value:string;hint:string;icon:React.ReactNode}){return <div className="metric"><span>{icon}{label}</span><strong>{value}</strong><small>{hint}</small></div>}
 
 export default function App(){
@@ -30,8 +31,9 @@ export default function App(){
  const data=response&&sameQuery(response.query,q)?response:null;
  const [status,setStatus]=useState<Status>({running:false,scanning:false}),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
  const [theme,setTheme]=useState(()=>localStorage.getItem('tm-theme')||'light'),[selected,setSelected]=useState<SessionDetailRow|null>(null);
- const [pageResponse,setPage]=useState<{query:Query;offset:number;result:EventPage}|null>(null),[offset,setOffset]=useState(0),[priceText,setPriceText]=useState(''),[settings,setSettings]=useState<Settings|null>(null),[logs,setLogs]=useState('');
- const page=pageResponse&&sameQuery(pageResponse.query,q)&&pageResponse.offset===offset?pageResponse.result:null;
+ const [priceText,setPriceText]=useState(''),[settings,setSettings]=useState<Settings|null>(null),[logs,setLogs]=useState('');
+ // Bumped when prices are saved so the detail page re-reads its costs without losing its place.
+ const [pricingRevision,setPricingRevision]=useState(0);
  const [priceError,setPriceError]=useState('');
  const [queryError,setQueryError]=useState('');
  const [startText,setStartText]=useState(localInput(q.start)),[endText,setEndText]=useState(localInput(q.end));
@@ -46,10 +48,10 @@ export default function App(){
  const [loader]=useState(()=>latestLoader<Query,Dashboard>(sameQuery,query=>request<Dashboard>('dashboard',{query}),result=>{setData(result);setQueryError('');},e=>setQueryError(String(e))));
  const refresh=useCallback((force=false)=>loader.run(q,force),[q,loader]);
  useEffect(()=>{request<Bootstrap>('bootstrap').then(b=>{setBoot(b);setPriceText(b.prices);setSettings(b.settings);}).catch(e=>setError(String(e)));},[]);
- useEffect(()=>{setStartText(localInput(q.start));setEndText(localInput(q.end));setOffset(0);void refresh();},[q,refresh]);
+ useEffect(()=>{setStartText(localInput(q.start));setEndText(localInput(q.end));void refresh();},[q,refresh]);
  useEffect(()=>{const poll=()=>{void request<Status>('status').then(setStatus).catch(e=>setError(String(e)));};poll();const timer=setInterval(poll,2000);return()=>clearInterval(timer);},[]);
  useEffect(()=>{const timer=setInterval(()=>void refresh(),5000);return()=>clearInterval(timer);},[refresh]);
- useEffect(()=>{let cancelled=false;if(tab==='requests')request<EventPage>('events',{query:q,offset,limit:100}).then(result=>{if(!cancelled)setPage({query:q,offset,result});}).catch(e=>{if(!cancelled)setError(String(e));});if(tab==='service')request<{text:string}>('logs').then(r=>{if(!cancelled)setLogs(r.text);}).catch(e=>{if(!cancelled)setError(String(e));});return()=>{cancelled=true;};},[tab,q,offset,data]);
+ useEffect(()=>{let cancelled=false;if(tab==='service')request<{text:string}>('logs').then(r=>{if(!cancelled)setLogs(r.text);}).catch(e=>{if(!cancelled)setError(String(e));});return()=>{cancelled=true;};},[tab,data]);
  async function action(method:string,args:unknown={},onError?:(message:string)=>void){setBusy(true);setError('');try{await request(method,args);await refresh(true);setStatus(await request<Status>('status'));return true;}catch(e){setError(String(e));onError?.(String(e));return false;}finally{setBusy(false);}}
  function chooseAgent(agent:string|null){setQ({...q,agent,model:null,project:null,session:null,search:''});setTab('overview');}
  function quick(minutes:number){setQ({...q,...preset(minutes)});}
@@ -63,7 +65,7 @@ export default function App(){
     else{setQ({...q,agent:row.agent,session:row.session});setTab('requests');}
    }
  }
- async function savePrices(){setPriceError('');if(await action('save_prices',{text:priceText},setPriceError)){setBoot(b=>b?{...b,prices:priceText}:b);setNotice('价格、币种和汇率已保存，查询费用已重新计算');}}
+ async function savePrices(){setPriceError('');if(await action('save_prices',{text:priceText},setPriceError)){setBoot(b=>b?{...b,prices:priceText}:b);setNotice('价格、币种和汇率已保存，查询费用已重新计算');setPricingRevision(r=>r+1);}}
  async function exportData(format:'csv'|'xlsx'|'markdown'){
   try{const extension=format==='markdown'?'md':format;const path=await save({defaultPath:`TokenMonitor-${q.agent||'all'}.${extension}`,filters:[{name:extension.toUpperCase(),extensions:[extension]}]});if(path&&await action('export',{query:q,format,path}))setNotice(`已导出到 ${path}`);}catch(e){setError(String(e));}
  }
@@ -86,7 +88,7 @@ export default function App(){
       <section className="panel"><div className="panel-heading"><h2>模型消耗</h2><button onClick={()=>setTab('models')}>查看全部 →</button></div>{table(data.models,'models')}</section>
      </>}
      {(['models','projects','days','months','sessions'] as Tab[]).includes(tab)&&<section className="panel"><div className="panel-heading"><h2>{tabs.find(([id])=>id===tab)?.[1]}用量明细</h2><label className="search"><Search size={15}/><input aria-label="搜索" placeholder="搜索标题 / 模型 / 项目 / 会话 ID" value={searchDraft} onChange={e=>{setSearchDraft(e.target.value);commitSearch(e.target.value);}} onKeyDown={e=>{if(e.key==='Enter')commitSearch.flush();}}/></label></div>{table(data[tab as 'models'|'projects'|'days'|'months'|'sessions'],tab)}</section>}
-     {tab==='requests'&&<section className="panel"><div className="panel-heading"><h2>逐条用量记录</h2><span>时间范围内共 {n(page?.total||0)} 条</span></div>{page?.items.length?<div className="table-wrap"><table><thead><tr>{['时间','Agent / 模型','项目 / 会话','输入','缓存读 / 写','输出 / 推理','估算费用','原始位置'].map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{page.items.map(({event:e,costUSD})=><tr key={`${e.agent}:${e.id}`}><td>{time(e.ts)}</td><td>{e.agent}<small className="cell-sub">{e.model}</small></td><td className="long-cell">{e.project||'未记录项目'}<button className="cell-sub row-link" onClick={()=>setQ({...q,agent:e.agent,session:e.session})}>{e.session}</button></td><td className="number">{n(e.tokens.input)}</td><td className="number">{n(e.tokens.cached)} / {n(e.tokens.cacheWrite)}</td><td className="number">{n(e.tokens.output)} / {n(e.tokens.reasoning)}</td><td>{money(costUSD)}</td><td><button title={e.path} onClick={()=>void action('reveal',{path:e.path})}>文件{e.line?` : ${e.line}`:''}</button></td></tr>)}</tbody></table></div>:<Empty/>}<div className="pagination"><button disabled={offset===0} onClick={()=>setOffset(Math.max(0,offset-100))}>上一页</button><span>{Math.floor(offset/100)+1} / {Math.max(1,Math.ceil((page?.total||0)/100))}</span><button disabled={offset+100>=(page?.total||0)} onClick={()=>setOffset(offset+100)}>下一页</button></div></section>}
+     {tab==='requests'&&<EventDetailTable query={q} revision={pricingRevision} onFilterSession={(agent,session)=>setQ({...q,agent,session})} onReveal={path=>void action('reveal',{path})}/>}
      {tab==='tools'&&<section className="panel"><div className="panel-heading"><h2>工具调用活动</h2><span>仅展示日志实际记录的调用；按模型/项目筛选时按会话关联</span></div>{q.agent==='antigravity'?<Empty text="Antigravity 的本地用量库未提供已验证的工具调用字段"/>:<><details><summary>全部工具调用次数 · {n(data.activityCount)} 条</summary><div className="tool-counts">{Object.entries(data.tools).sort((a,b)=>b[1]-a[1]).map(([name,count])=><span key={name}><Terminal size={14}/>{name}<b>{n(count)}</b></span>)}</div></details><ActivityTable query={q} onReveal={path=>void action('reveal',{path})}/></>}</section>}
     </>}
    </>}

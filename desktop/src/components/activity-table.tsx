@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { request, type ActivityPage, type Query } from '../lib/api';
 import { latestLoader } from '../lib/latest-loader';
 import { sameQuery } from '../lib/query-identity';
-import { canStepTo, isCurrentRequest, lastPageOffset, pageCountOf, pageNumberOf, type PagedRequest } from '../lib/page-request';
+import { canStepTo, isCurrentRequest, lastPageOffset, pageNumberOf, pageCountOf, requestFor, type PagedRequest } from '../lib/page-request';
 
 const size = 100;
 const number = (value:number) => value.toLocaleString('zh-CN');
@@ -12,8 +12,9 @@ export function ActivityTable({query,onReveal}:{query:Query;onReveal:(path:strin
   // The loader is created once, so the query travels inside the request key instead of
   // a closure over the first render's props. A new filter restarts paging at the first
   // page here rather than by remounting the table, which used to discard this state.
-  const [paging,setPaging]=useState<PagedRequest<Query>>({key:query,offset:0});
-  if(!sameQuery(paging.key,query)) setPaging({key:query,offset:0});
+  const [stored,setStored]=useState<PagedRequest<Query>>({key:query,offset:0});
+  const paging=requestFor(query,stored,sameQuery);
+  if(paging!==stored) setStored(paging);
   const [response,setResponse]=useState<Loaded|null>(null);
   const [error,setError]=useState('');
   const [loader]=useState(()=>latestLoader<PagedRequest<Query>,Loaded>(
@@ -31,7 +32,7 @@ export function ActivityTable({query,onReveal}:{query:Query;onReveal:(path:strin
   const page=isCurrentRequest(response,paging,sameQuery)?response.page:null;
   const total=page?.total??null;
   const lastOffset=lastPageOffset(total,size);
-  const goTo=(next:number)=>setPaging({key:paging.key,offset:next});
+  const goTo=(next:number)=>setStored({key:paging.key,offset:next});
   return <>
     {error&&<p role="alert" className="error-text">{error}</p>}
     <p className="table-note">{page?`共 ${number(total??0)} 条调用，`:''}按时间从新到旧排列。Codex 会话回放可查看工具参数、输出和补丁。</p>
