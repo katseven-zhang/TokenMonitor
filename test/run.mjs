@@ -2395,6 +2395,49 @@ console.log('\n[27] #89：桌面版卸载目录 vs 旧版运行数据目录；pr
   }
 }
 
+/* ---------- [28] #68：两条版本线各自不漂移，文档数字与真实版本一致 ---------- */
+console.log('\n[28] #68：旧版 1.x 与桌面版 2.x 两条版本线（家族内一致 + 文档不写旧数字）');
+{
+  const json = (p) => JSON.parse(read(join(ROOT, p)));
+  const cargoVersion = (p) => (read(join(ROOT, p)).match(/^\s*version\s*=\s*"([^"]+)"/m) ?? [])[1] ?? null;
+  const root = json('package.json').version;
+  const desktop = json('desktop/package.json').version;
+
+  // 旧版家族：漏改任何一处，安装器/构建清单与 exe 自身报告的版本就会各说各话
+  for (const [label, v] of [
+    ['windows/gui/Cargo.toml', cargoVersion('windows/gui/Cargo.toml')],
+    ['windows/tray/Cargo.toml', cargoVersion('windows/tray/Cargo.toml')],
+    ['windows/gui/Cargo.lock', cargoVersion('windows/gui/Cargo.lock')],
+    ['windows/tray/Cargo.lock', cargoVersion('windows/tray/Cargo.lock')],
+  ]) ok(`#68 旧版家族版本与根 package.json 一致：${label}`, v === root, `${label}=${v} 根=${root}`);
+
+  // 桌面版家族
+  for (const [label, v] of [
+    ['desktop/src-tauri/tauri.conf.json', json('desktop/src-tauri/tauri.conf.json').version],
+    ['desktop/src-tauri/Cargo.toml', cargoVersion('desktop/src-tauri/Cargo.toml')],
+  ]) ok(`#68 桌面版家族版本与 desktop/package.json 一致：${label}`, v === desktop, `${label}=${v} 期望=${desktop}`);
+
+  ok('#68 两条线确实分开（合并版本号需要先产品裁定，不许顺手同步）',
+    root !== desktop, `根=${root} 桌面=${desktop}`);
+
+  // 发行说明写死旧数字正是 #68 报的那类问题：文档里的当前版本必须等于真实值
+  {
+    const rm = read(join(ROOT, 'README.md'));
+    const table = (rm.match(/## 版本线与产品身份[\s\S]*?\n## 快速使用/) ?? [''])[0];
+    const nums = [...table.matchAll(/`\d+\.\d+\.\d+`/g)].map((m) => m[0].replace(/`/g, ''));
+    ok('#68 README 有版本线一节且列了两个当前版本', table.length > 0 && nums.length === 2, JSON.stringify(nums));
+    ok('#68 README 的旧版当前版本不是过期数字', nums.includes(root), `文档=${nums} 实际=${root}`);
+    ok('#68 README 的桌面版当前版本不是过期数字', nums.includes(desktop), `文档=${nums} 实际=${desktop}`);
+    ok('#68 README 说清 tag 指桌面版、两个 exe 同名不能辨身份',
+      /tag.*桌面版/s.test(table) && /TokenMonitor\.exe/.test(table));
+  }
+
+  // 构建清单的版本只能来自根 package.json，不能是脚本里的字面量
+  ok('#68 build-windows.ps1 的版本取自 package.json 而非字面量',
+    /\$version = \[string\]\$pkg\.version/.test(read(join(ROOT, 'scripts/build-windows.ps1')))
+      && !/version\s*=\s*"\d+\.\d+\.\d+"/.test(read(join(ROOT, 'scripts/build-windows.ps1'))));
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
