@@ -4,6 +4,7 @@ use crate::{
     types::{DailyUsageRow, ModelUsage},
 };
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 fn register_query_functions(db:&Connection)->Result<(),String> {
@@ -32,6 +33,9 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
 // while preserving cached data until each replacement transaction is ready.
 // 5 = #71：BOM 不再吞首条、浮点 token 字段不再归零、重复配额快照不入库——
 // 三者都改变已缓存文件的解析结果，旧行必须按新语义重解析。
+// #110 故意**不**升这个号：本次只是开始给"失败"记账（source_files.error 从此有了
+// 写入方），已成功文件的解析结果一个字节都没变。升号等于把全量重扫当代价付掉，
+// 与 #110 要的"少做事"正好相反。
 pub const COLLECTOR_REVISION: &str = "5";
 pub fn open(root: &Path) -> Result<Connection, String> {
     let db = Connection::open(root.join("events-v2.sqlite")).map_err(|e| e.to_string())?;
@@ -97,6 +101,9 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     }
     Ok(db)
 }
+/// 快速路径：这个指纹上有一次**完整成功**的解析，可以直接复用。
+/// `AND error IS NULL` 从 #110 起才真正有内容可挡——在那之前没有任何代码写过
+/// 非 NULL 的 error，这个条件恒真。
 pub fn unchanged(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64) -> bool {
     db.query_row("SELECT 1 FROM source_files WHERE path=?1 AND agent=?2 AND size=?3 AND mtime=?4 AND error IS NULL",params![path,agent,size,mtime],|_|Ok(())).is_ok()
 }
@@ -123,6 +130,122 @@ pub fn cache_hit(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64
         Err(e) => Err(e.to_string()),
     }
 }
+
+/// #110：`source_files.error` 的内容。这一列自 #63 起只有读方（`unchanged()` 的
+/// `AND error IS NULL`）没有写方——`replace_file` 恒写 NULL，所以那道守卫形同虚设，
+/// 解析持久失败的文件每轮重新指纹比对、重新整文件解析、再失败一次，面板上永远是
+/// `error`，没有任何退避或自愈路径。现在它记的是"这个指纹上第几次失败、什么时候
+/// 允许再试"。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Failure {
+    pub reason: String,
+    pub attempt: i64,
+    pub retry_at_ms: i64,
+}
+
+/// #110：连续失败到这个次数之前一律"立刻可以再试"（前两次可能是文件正在被写入、
+/// 采集器刚启动这类瞬时情况），到次数之后才开始退避。
+pub const FAILURE_SKIP_AFTER: i64 = 3;
+const FAILURE_BACKOFF_BASE_MS: i64 = 60_000;
+const FAILURE_BACKOFF_MAX_MS: i64 = 1_800_000;
+
+/// 第 `attempt` 次失败后允许重试的时刻。退避从 60s 起指数增长，封顶 30 分钟：
+/// 再久下去一个被修好的文件要等太久才重新出现在面板上。
+pub fn failure_retry_at(attempt: i64, now_ms: i64) -> i64 {
+    if attempt < FAILURE_SKIP_AFTER {
+        return now_ms;
+    }
+    let step = (attempt - FAILURE_SKIP_AFTER).min(20) as u32;
+    let delay = FAILURE_BACKOFF_BASE_MS
+        .saturating_mul(1i64 << step)
+        .min(FAILURE_BACKOFF_MAX_MS);
+    now_ms.saturating_add(delay)
+}
+
+/// 记下一次解析失败。同一个 `(size, mtime)` 上 `attempt` 递增；文件被改过（或换成了
+/// 别的内容）就从 1 重新开始——负缓存只对"这个指纹确实反复失败"生效，绝不把用户
+/// 修好的文件继续挡在门外。
+///
+/// 一行两用：`error` 非 NULL 让 `unchanged()` 快速路径闭嘴（不会再把它当健康缓存），
+/// 同时 `(size, mtime, retry_at)` 就是退避判据，所以不需要新表、不需要 ALTER TABLE
+/// （存量库的 `CREATE TABLE IF NOT EXISTS` 补不上列，新表能补但列也不能复用）。
+/// 失败改写整行，唯一保留的是上一次的 `title`：面板的会话标签与搜索读它，
+/// 一个读不出内容的文件不该顺手把自己的标题弄没。
+pub fn record_failure(
+    db: &Connection,
+    path: &str,
+    agent: &str,
+    size: i64,
+    mtime: i64,
+    reason: &str,
+    now_ms: i64,
+) -> Result<Failure, String> {
+    let prev: Option<(i64, i64, Option<String>, Option<String>)> = db
+        .query_row(
+            "SELECT size,mtime,title,error FROM source_files WHERE path=?1 AND agent=?2",
+            params![path, agent],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .ok();
+    let attempt = match &prev {
+        Some((p_size, p_mtime, _, Some(err))) if *p_size == size && *p_mtime == mtime => {
+            serde_json::from_str::<Failure>(err).map(|f| f.attempt + 1).unwrap_or(1)
+        }
+        _ => 1,
+    };
+    let failure = Failure {
+        reason: reason.to_string(),
+        attempt,
+        retry_at_ms: failure_retry_at(attempt, now_ms),
+    };
+    let title = prev.and_then(|(_, _, t, _)| t);
+    db.execute(
+        "INSERT OR REPLACE INTO source_files VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![
+            path,
+            agent,
+            size,
+            mtime,
+            title,
+            serde_json::to_string(&failure).map_err(|e| e.to_string())?,
+            now_ms
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(failure)
+}
+
+/// #110 负缓存门：本轮要不要跳过这个文件。`Some(f)` 表示同一个指纹已经连续失败
+/// `f.attempt` 次、`f.retry_at_ms` 之前不必再整文件重读一遍；指纹一变立刻 `None`。
+/// 读不到行、行里没有失败、JSON 不是本模块写的形状（例如人工改库或将来换格式），
+/// 一律按"不挡路"处理：这是缓存，不是权限。
+pub fn failure_gate(
+    db: &Connection,
+    path: &str,
+    agent: &str,
+    size: i64,
+    mtime: i64,
+    now_ms: i64,
+) -> Result<Option<Failure>, String> {
+    let row: Option<(i64, i64, Option<String>)> = db
+        .query_row(
+            "SELECT size,mtime,error FROM source_files WHERE path=?1 AND agent=?2",
+            params![path, agent],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let Some((p_size, p_mtime, Some(err))) = row else {
+        return Ok(None);
+    };
+    if p_size != size || p_mtime != mtime {
+        return Ok(None);
+    }
+    match serde_json::from_str::<Failure>(&err) {
+        Ok(f) if f.retry_at_ms > now_ms => Ok(Some(f)),
+        _ => Ok(None),
+    }
+}
+
 pub fn replace_file(
     db: &mut Connection,
     path: &str,

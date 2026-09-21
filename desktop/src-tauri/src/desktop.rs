@@ -93,9 +93,13 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
         "reveal" => {
             let path = args["path"].as_str().ok_or("缺少路径")?;
             let db = crate::db::open_read(&root)?;
-            db.query_row("SELECT 1 FROM source_files WHERE path=?1", [path], |_| {
-                Ok(())
-            })
+            // #110：`source_files` 一行从今往后也可能是"只失败过"的记账行（error 非
+            // NULL，没有任何事件被索引出来），那种文件不存在可打开的索引结果。
+            db.query_row(
+                "SELECT 1 FROM source_files WHERE path=?1 AND error IS NULL",
+                [path],
+                |_| Ok(()),
+            )
             .map_err(|_| "只允许打开已索引的本地文件".to_string())?;
             // #62: 存储键是 canonicalize 的 verbatim 形态（\\?\…），explorer.exe
             // 的命令行不接受它；只在这个对外端点上还原。

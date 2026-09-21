@@ -37,6 +37,12 @@ pub struct ScanStatus {
     pub reused: usize,
     pub events: usize,
     pub malformed_lines: usize,
+    /// #110：本轮"同一个指纹反复失败"的文件数（新失败的 + 正在退避跳过的）。
+    /// 与 `errors` 分开计，是因为退避期不再重复报错：`errors` 空、这一项非零，
+    /// 面板仍要能说出"有 N 个文件暂缓重试"。
+    pub failed_files: usize,
+    /// #110：上面这些文件里最早允许再试的时刻（毫秒）。`None` = 没有在退避的文件。
+    pub next_retry_at: Option<i64>,
     pub errors: Vec<String>,
     pub updated_at: i64,
     pub duration_ms: u128,
@@ -84,20 +90,49 @@ fn collect_file(
     let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
     // #63: only reuse when the cached observation is intact *and* carries its
     // source_health row; a missing row forces the reparse that writes it back.
+    // #110：负缓存只对指纹可信的源生效——sqlite 的主文件指纹代表不了 WAL，而它
+    // 的失败多半是一时的文件占用，退避只会让"锁放开之后"的恢复变慢。
     if !sqlite {
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Some(f) = db::failure_gate(db, &path_text, agent, size, mtime, now)? {
+            s.failed_files += 1;
+            s.next_retry_at =
+                Some(s.next_retry_at.map_or(f.retry_at_ms, |t| t.min(f.retry_at_ms)));
+            return Ok(());
+        }
         if let Some(malformed) = db::cache_hit(db, &path_text, agent, size, mtime)? {
             s.malformed_lines += malformed;
             s.reused += 1;
             return Ok(());
         }
     }
-    let parsed = if agent == "antigravity" {
+    let read = if agent == "antigravity" {
         collectors::read_antigravity(&path, project.unwrap_or(""))
     } else if sqlite {
         collectors::read_sqlite(agent, &path)
     } else {
         collectors::read_jsonl(agent, &path)
-    }?;
+    };
+    let parsed = match read {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            // #110：失败现在要落库（同一指纹 attempt 递增，到阈值后 failure_gate
+            // 挡掉重复的整文件重读）。记账本身出错时继续抛原始错误：否则用户看到的
+            // 是"记不上账"，而不是"这个文件读不了"。
+            if !sqlite {
+                let now = chrono::Utc::now().timestamp_millis();
+                if let Ok(f) = db::record_failure(db, &path_text, agent, size, mtime, &e, now) {
+                    s.failed_files += 1;
+                    if f.retry_at_ms > now {
+                        s.next_retry_at = Some(
+                            s.next_retry_at.map_or(f.retry_at_ms, |t| t.min(f.retry_at_ms)),
+                        );
+                    }
+                }
+            }
+            return Err(e);
+        }
+    };
     db::replace_file(db, &path_text, agent, size, mtime, &parsed)?;
     s.parsed += 1;
     s.events += parsed.events.len();
@@ -244,10 +279,17 @@ pub fn scan_cancellable(
                 }
             }
         }
+        // #110：以前只要 errors 非空就是 "error"，面板分不出"一个坏文件 + 其余正常"
+        // 和"这个来源这轮什么都没成功"，而退避期 errors 是空的，更会把坏来源显示成
+        // ready。现在按"这轮有没有任何文件成功"分档：
+        //   全部失败 -> error，有坏文件但其余就绪 -> degraded。
+        let succeeded = s.parsed + s.reused;
         s.state = if stop.load(Ordering::Relaxed) {
             "stopped"
-        } else if !s.errors.is_empty() {
+        } else if succeeded == 0 && (!s.errors.is_empty() || s.failed_files > 0) {
             "error"
+        } else if !s.errors.is_empty() || s.failed_files > 0 {
+            "degraded"
         } else if s.malformed_lines > 0 {
             "warning"
         } else if s.files == 0 {

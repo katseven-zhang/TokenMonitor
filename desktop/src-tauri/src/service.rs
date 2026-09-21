@@ -416,7 +416,11 @@ pub fn run(root: &Path) -> Result<(), String> {
                         &format!(
                             "扫描完成，{}个来源；{}个来源异常",
                             s.len(),
-                            s.iter().filter(|s| !s.errors.is_empty()).count()
+                            // #110：退避期不再重复报错（errors 是空的），只按 errors
+                            // 计的话一个永久坏掉的来源会被记成"正常"。
+                            s.iter()
+                                .filter(|s| !s.errors.is_empty() || s.failed_files > 0)
+                                .count()
                         ),
                     ),
                     Err(e) => log(&worker_root, &format!("扫描失败: {e}")),
