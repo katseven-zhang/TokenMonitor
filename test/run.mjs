@@ -1577,6 +1577,72 @@ console.log('\n[17] Codex rate_limits 规范化（#44：三窗口/0与缺失可�
     ok('#44 增量重扫幂等（游标恢复，inserted=0）', r2.inserted === 0 && events.length === 2, `inserted=${r2.inserted}`);
     rmSync(base, { recursive: true, force: true });
   }
+
+  /* --- #75 Codex 记账双端黄金数 ---
+   * 同一份 JSONL 与同一组期望数字也写在桌面端
+   * desktop/src-tauri/src/collectors.rs 的
+   * codex_baseline_reset_and_cache_write_match_node_golden_numbers，两端任一改动同时变红。
+   * 期望：events = [125, 70, 85, 52]（重复通知不产事件），只有累计值而无
+   * last_token_usage 的孤立首采样不产事件。 */
+  {
+    const P75 = [
+      '{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10}}}}',
+      '{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10}}}}',
+      '{"timestamp":"2026-09-20T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"cache_write_input_tokens":5,"output_tokens":40,"reasoning_output_tokens":15,"total_tokens":190},"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5}}}}',
+      '{"timestamp":"2026-09-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60,"cached_input_tokens":40,"output_tokens":25,"reasoning_output_tokens":8,"total_tokens":85},"last_token_usage":{"input_tokens":60,"cached_input_tokens":40,"output_tokens":25,"reasoning_output_tokens":8}}}}',
+      '{"timestamp":"2026-09-20T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"cache_creation_input_tokens":7,"output_tokens":30,"reasoning_output_tokens":10,"total_tokens":130},"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"cache_creation_input_tokens":2,"output_tokens":5,"reasoning_output_tokens":2}}}}',
+    ].join('\n') + '\n';
+    const base = mkdtempSync(join(tmpdir(), 'codex75 会话-'));
+    const file = join(base, 'rollout-2026-09-20T00-00-00-parity.jsonl');
+    writeFileSync(file, P75);
+    const ev75 = [];
+    const keys75 = new Set();
+    const store75 = {
+      saveQuota: () => {},
+      insertToolCall: () => 1,
+      insertEvent: (e) => {
+        if (keys75.has(e.dedup_key)) return 0;
+        keys75.add(e.dedup_key);
+        ev75.push(e);
+        return 1;
+      },
+    };
+    const r75 = await collectCodexFile(store75, { path: file, fileId: 'parity', offset: 0, state: null, version: 3 });
+    ok('#75 双端黄金数：四条事件 [125,70,85,52]（重复通知不产事件）',
+      ev75.map((e) => e.total_tokens).join(',') === '125,70,85,52',
+      JSON.stringify(ev75.map((e) => e.total_tokens)));
+    ok('#75 基线条目按 last_token_usage 拆分且读 cache_write_input_tokens（旧拼写）',
+      ev75[0].input_tokens === 20 && ev75[0].cached_input === 80 && ev75[0].cache_write === 5
+      && ev75[0].output_tokens === 20 && ev75[0].reasoning_tokens === 10, JSON.stringify(ev75[0]));
+    ok('#75 每条事件 total = 四列之和（CONTRIBUTING 落库公式）',
+      ev75.every((e) => e.total_tokens === e.input_tokens + e.cached_input + e.cache_write + e.output_tokens),
+      JSON.stringify(ev75.map((e) => [e.total_tokens, e.input_tokens + e.cached_input + e.cache_write + e.output_tokens])));
+    ok('#75 回落（压缩/resume）记本轮 85 而非累计值，且不重记父会话',
+      ev75[2].total_tokens === 85 && ev75[2].input_tokens === 20 && ev75[2].cached_input === 40,
+      JSON.stringify(ev75[2]));
+    ok('#75 差分同时读 cache_creation_input_tokens（新拼写）→ cache_write=7、cached 夹进输入差分',
+      ev75[3].cache_write === 7 && ev75[3].cached_input === 0 && ev75[3].total_tokens === 52,
+      JSON.stringify(ev75[3]));
+    ok('#75 基线/回落事件不占 seq 序号（既有差分事件 dedup_key 不位移）',
+      ev75[0].dedup_key === 'codex:parity:baseline:1789862401000'
+      && ev75[1].dedup_key === 'codex:parity:1' && ev75[3].dedup_key === 'codex:parity:2',
+      ev75.map((e) => e.dedup_key).join(','));
+    ok('#75 全量重扫幂等（同 key 命中 dedup）',
+      (await collectCodexFile(store75, { path: file, fileId: 'parity', offset: 0, state: null, version: 3 })).inserted === 0);
+    const solo = {
+      saveQuota: () => {}, insertToolCall: () => 1, events: [],
+      insertEvent(e) { this.events.push(e); return 1; },
+    };
+    const soloFile = join(base, 'rollout-2026-09-20T00-00-06-solo.jsonl');
+    writeFileSync(soloFile,
+      '{"timestamp":"2026-09-20T00:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":100,"reasoning_output_tokens":50}}}}\n');
+    await collectCodexFile(solo, { path: soloFile, fileId: 'solo', offset: 0, state: null, version: 3 });
+    ok('#75 只有累计值、无 last_token_usage 的孤立首采样不产事件（宁少不多）',
+      solo.events.length === 0, JSON.stringify(solo.events));
+    ok('#75 采集完仍持久化累计基线', r75.state.cum.i === 100 && r75.state.cum.w === 7,
+      JSON.stringify(r75.state.cum));
+    rmSync(base, { recursive: true, force: true });
+  }
 }
 
 /* ---------- [18] Codex 配额快照历史存储（#45） ---------- */

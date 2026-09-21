@@ -53,6 +53,7 @@ block3 tool_use   3594/47360/309   ← 唯一带真实输出的一行
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`：
 - `token_count.info.total_token_usage` 是**会话累计值**，按相邻事件差分取单次用量；差分 0 的重复通知自然跳过
 - **resume/fork 会话继承父线程累计基线**——若直接对"每文件终值"求和会把同一对话重复计数（实测差 9 倍），差分 + 首事件建基线天然正确
+- **首个采样与累计值回落（上下文压缩 / resume 换基线）不走差分**：只认 `info.last_token_usage`（本轮真实用量，真实 rollout 恒有该字段）；它缺失时两端都**不记事件**，绝不退回整段累计值（#75 统一：修前桌面端退回整段累计值 → resume 会话重复计入，Node 端则把回落那一轮整条丢掉 → 少计）。缓存写入 `cache_creation_input_tokens` / `cache_write_input_tokens` 两种拼写两端都认（取 max，同一 payload 只出一种），`cached` 一律夹进 `[0, input]`
 - 模型名版本漂移：新格式在 `thread_settings_applied.thread_settings.model`，旧格式在 `turn_context.payload.model`；续写文件两者皆无 → 按 `session_meta.parent_thread_id` 继承链回填（dedup 只防重插不更新旧行，需显式 UPDATE）
 - `rate_limits` 为账号级配额快照（used_percent/window/resets_at），只保留全局最新（按 ts，与扫描顺序无关）
 - 工具调用在 `response_item` 且 `payload.type=function_call`（name/call_id）

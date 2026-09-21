@@ -78,9 +78,10 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         vec![
             json!({"type":"session_meta","payload":{"id":"codex-session","cwd":"D:\\我的 项目"}}),
             json!({"type":"turn_context","payload":{"model":"m"}}),
-            json!({"timestamp":TS,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}),
+            // #75: 首个采样按 info.last_token_usage（本轮真实用量）记账。
+            json!({"timestamp":TS,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}),
             // Duplicate cumulative observation must not count as another request.
-            json!({"timestamp":TS+1000,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}),
+            json!({"timestamp":TS+1000,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}),
         ],
     );
     for agent in ["claude-code", "ccmr"] {

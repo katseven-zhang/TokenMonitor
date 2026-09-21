@@ -613,7 +613,11 @@ impl ReplayParseState {
                     .as_ref()
                     .is_some_and(|p| current.input_tokens < p.input_tokens || current.output_tokens < p.output_tokens)
             {
-                last_usage.or_else(|| Some(current.clone()))
+                // #75（与 collectors.rs 的 codex 分支同一条规则，两端一致）：首个采样与
+                // 累计值回落只认 info.last_token_usage。缺失时不退回整段累计值 ——
+                // resume/fork 会话的累计值包含父线程全部历史，记成本轮会把父会话
+                // 重复计入（docs/ARCHITECTURE.md Codex 段实测 9 倍）。
+                last_usage
             } else {
                 Some(subtract_raw_usage(current, self.previous_totals.as_ref()))
             }
@@ -2238,9 +2242,10 @@ mod tests {
     fn calculates_token_deltas_from_running_totals() {
         let raw = [
             turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            // #75：首采样取 last_token_usage（这里等于整段累计值 = 第一轮）
             event_msg(
                 "2026-06-01T00:00:02.000Z",
-                token_payload_without_last("turn-1", "gpt-5", 100, 20, 50, 150),
+                token_payload("turn-1", "gpt-5", 100, 20, 50, 150, 100, 20, 50, 150),
             ),
             event_msg(
                 "2026-06-01T00:00:03.000Z",
@@ -2262,7 +2267,8 @@ mod tests {
     fn replay_and_collector_agree_on_resets_corrections_and_stale_reported_totals() {
         let raw = [
             turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
-            event_msg("2026-06-01T00:00:02.000Z", token_payload_without_last("turn-1", "gpt-5", 100, 20, 50, 999)),
+            // 首采样带 last_token_usage（真实 rollout 恒有）：本轮 = 整段累计值
+            event_msg("2026-06-01T00:00:02.000Z", token_payload("turn-1", "gpt-5", 100, 20, 50, 999, 100, 20, 50, 999)),
             // Input drops while output grows: combined total still grows, but counters reset.
             event_msg("2026-06-01T00:00:03.000Z", token_payload("turn-1", "gpt-5", 80, 40, 200, 999, 30, 10, 20, 999)),
             event_msg("2026-06-01T00:00:04.000Z", token_payload_without_last("turn-1", "gpt-5", 90, 60, 210, 999)),
@@ -2281,6 +2287,28 @@ mod tests {
             assert_eq!(display.total_tokens,event.tokens.total());
         }
         assert_eq!(events.iter().map(|event|event.total_tokens).sum::<i64>(),220);
+    }
+
+    /// #75：既无 last_token_usage、又是首采样/回落时，两处 codex 记账（事件缓存与
+    /// 会话回放）都必须"宁少不多"——整段累计值可能是 resume/fork 继承的父线程基线，
+    /// 记成单次用量会重复计入（docs/ARCHITECTURE.md Codex 段实测 9 倍）。
+    #[test]
+    fn replay_and_collector_both_drop_a_cumulative_only_first_sample() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            event_msg("2026-06-01T00:00:02.000Z", token_payload_without_last("turn-1", "gpt-5", 900, 800, 100, 1000)),
+            // 回落且仍无 last_token_usage：不产事件，但累计基线照常推进
+            event_msg("2026-06-01T00:00:03.000Z", token_payload_without_last("turn-1", "gpt-5", 60, 40, 25, 85)),
+            event_msg("2026-06-01T00:00:04.000Z", token_payload_without_last("turn-1", "gpt-5", 160, 40, 45, 205)),
+        ].join("\n");
+        let collected = crate::collectors::parse_jsonl("codex", "/tmp/session.jsonl", &raw);
+        let replay = parse_session_detail(record("/tmp/session.jsonl"), raw);
+        let events: Vec<_> = replay.turns.iter().flat_map(|turn| &turn.token_events).collect();
+        // 只有第 4 行是稳态差分：Δinput 100（cached 未变）+ Δoutput 20
+        assert_eq!(collected.events.len(), 1, "{:?}", collected.events);
+        assert_eq!(events.len(), collected.events.len());
+        assert_eq!(collected.events[0].tokens.total(), 120);
+        assert_eq!(events[0].total_tokens, 120);
     }
 
     #[test]

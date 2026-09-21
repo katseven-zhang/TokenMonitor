@@ -40,7 +40,11 @@ fn openai(v: &Value) -> Tokens {
     Tokens {
         input: input - cached,
         cached,
-        cache_write: number(v, "cache_creation_input_tokens"),
+        // #75: 缓存写入在不同 codex 版本里写作 cache_creation_input_tokens 或
+        // cache_write_input_tokens。此前本函数只认前者、Node 端 codex.js 只认后者，
+        // 同一份日志两端恒有一边记 0。同一 payload 只会出一种，取 max = 有哪个读哪个。
+        cache_write: number(v, "cache_creation_input_tokens")
+            .max(number(v, "cache_write_input_tokens")),
         output: number(v, "output_tokens"),
         reasoning: number(v, "reasoning_output_tokens"),
     }
@@ -207,18 +211,18 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                             cur.input + cur.cached < prev.input + prev.cached
                                 || cur.output < prev.output
                         });
-                        tokens = Some(if reset || previous.is_none() {
-                            if info["last_token_usage"].is_object() {
-                                openai(&info["last_token_usage"])
-                            } else {
-                                cur.clone()
-                            }
+                        // #75 与 Node 端 codex.js 对齐：首个采样与累计值回落都不能用差分，
+                        // 也都不能把整段累计值当单次用量 —— resume/fork 会话继承了父线程的
+                        // 累计基线，记整段会把父会话重复计入（docs/ARCHITECTURE.md Codex 段
+                        // 实测 9 倍）。只认 info.last_token_usage（本轮真实用量）；它缺失时
+                        // 宁可不记（修前这里退回 cur.clone()）。
+                        tokens = if previous.is_none() || reset {
+                            info.get("last_token_usage")
+                                .filter(|v| v.is_object())
+                                .map(openai)
                         } else {
-                            previous
-                                .as_ref()
-                                .map(|prev| delta(&cur, prev))
-                                .unwrap_or_else(|| cur.clone())
-                        });
+                            previous.as_ref().map(|prev| delta(&cur, prev))
+                        };
                         key = format!(
                             "{session}:{ts}:{}:{}:{}",
                             cur.total(),
@@ -805,15 +809,50 @@ mod tests {
     fn codex_cumulative_duplicates_model_switch_and_archive_identity() {
         let s = r#"{"type":"session_meta","payload":{"id":"same","cwd":"D:\\repo"}}
 {"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"new-model"}}}
-{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}
-{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}
-{"timestamp":"2026-09-20T00:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"output_tokens":40,"reasoning_output_tokens":15}}}}"#;
+{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}
+{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}
+{"timestamp":"2026-09-20T00:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"output_tokens":40,"reasoning_output_tokens":15},"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5}}}}"#;
         let a = parse_jsonl("codex", "a.jsonl", s);
         let b = parse_jsonl("codex", "archive.jsonl", s);
         assert_eq!(a.events.len(), 2);
         assert_eq!(a.events[1].tokens.total(), 70);
         assert_eq!(a.events[1].model, "new-model");
         assert_eq!(a.events[0].id, b.events[0].id);
+    }
+    /// #75 双端黄金数。同一份 JSONL 与同样的期望也写在 Node 端
+    /// `test/run.mjs` 的 [17] 段（`#75` 块），两端任一改动都会同时变红。
+    /// events = [125, 70, 85, 52]（重复通知那条不产事件），缺 last_token_usage 的
+    /// 孤立首采样不产事件。
+    #[test]
+    fn codex_baseline_reset_and_cache_write_match_node_golden_numbers() {
+        const F: &str = r#"{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10}}}}
+{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"cache_write_input_tokens":5,"output_tokens":20,"reasoning_output_tokens":10}}}}
+{"timestamp":"2026-09-20T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":100,"cache_write_input_tokens":5,"output_tokens":40,"reasoning_output_tokens":15,"total_tokens":190},"last_token_usage":{"input_tokens":50,"cached_input_tokens":20,"output_tokens":20,"reasoning_output_tokens":5}}}}
+{"timestamp":"2026-09-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":60,"cached_input_tokens":40,"output_tokens":25,"reasoning_output_tokens":8,"total_tokens":85},"last_token_usage":{"input_tokens":60,"cached_input_tokens":40,"output_tokens":25,"reasoning_output_tokens":8}}}}
+{"timestamp":"2026-09-20T00:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"cache_creation_input_tokens":7,"output_tokens":30,"reasoning_output_tokens":10,"total_tokens":130},"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"cache_creation_input_tokens":2,"output_tokens":5,"reasoning_output_tokens":2}}}}"#;
+        let p = parse_jsonl("codex", "parity.jsonl", F);
+        let totals: Vec<i64> = p.events.iter().map(|e| e.tokens.total()).collect();
+        assert_eq!(totals, vec![125, 70, 85, 52], "{:?}", p.events);
+        // 首个采样 = 本轮 last_token_usage，含 cache_write_input_tokens（旧版字段名）
+        let first = &p.events[0].tokens;
+        assert_eq!(
+            (first.input, first.cached, first.cache_write, first.output, first.reasoning),
+            (20, 80, 5, 20, 10)
+        );
+        // 回落（压缩/resume）取本轮真实用量，不重记累计值：20+40+0+25
+        assert_eq!(p.events[2].tokens.total(), 85);
+        assert_eq!(p.events[2].tokens.input, 20);
+        assert_eq!(p.events[2].tokens.cached, 40);
+        // 稳态差分同时认两种 cache_write 拼写：40+0+7+5
+        assert_eq!(p.events[3].tokens.cache_write, 7);
+        assert_eq!(p.events[3].tokens.cached, 0);
+        // 只有累计值、没有 last_token_usage 的孤立首采样：宁可不记
+        let alone = parse_jsonl(
+            "codex",
+            "solo.jsonl",
+            r#"{"timestamp":"2026-09-20T00:00:06Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":400,"output_tokens":100,"reasoning_output_tokens":50}}}}"#,
+        );
+        assert!(alone.events.is_empty(), "{:?}", alone.events);
     }
     #[test]
     fn anthropic_reasoning_is_not_double_counted() {
