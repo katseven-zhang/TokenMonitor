@@ -58,6 +58,34 @@ fn first(values: &[String], fallback: &str) -> String {
         .cloned()
         .unwrap_or_else(|| fallback.into())
 }
+/// 与 Node 端 `path.win32.basename()` 同一条规则（#85）：`/` 与 `\` 都是分隔符，
+/// 先去掉尾部分隔符再取最后一段；没有分隔符时剥掉 Windows 设备前缀（`C:` → 空，
+/// `C:file` → `file`），其余原样。故意不用 `Path`：本仓库的日志里同时存在两种分隔符，
+/// 而采集端必须在任何宿主上都得到同一个答案（Node 端七个源就是为此用 win32 的）。
+fn win32_basename(value: &str) -> String {
+    let trimmed = value.trim_end_matches(['/', '\\']);
+    if let Some(i) = trimmed.rfind(['/', '\\']) {
+        return trimmed[i + 1..].to_string();
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return trimmed[2..].to_string();
+    }
+    trimmed.to_string()
+}
+/// 项目名 = 路径末段（`basename(x) || x`，与 Node 端七个源完全同式）。
+/// 根路径（`D:\`、`/`）取不到末段时原样返回，绝不退化成空。
+fn project_name(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let base = win32_basename(value);
+    if base.is_empty() {
+        value.to_string()
+    } else {
+        base
+    }
+}
 fn openai(v: &Value) -> Tokens {
     let input = number(v, "input_tokens");
     let cached = number(v, "cached_input_tokens")
@@ -96,6 +124,16 @@ fn tool(
     path: &str,
     line: usize,
 ) {
+    // #85：工具活动的主键是 (agent, `{session}:{id}`)。上游没写 id 时这里若原样用空串，
+    // 同一会话里所有无名调用就塌成同一个键、逐条互相顶掉（缓存是覆盖语义，不是并存），
+    // 工具榜因此只剩一条。Node 端从不产生空 id（各源分别回落到行号/块序号/记录 id），
+    // 这里再兜一层：任何调用方漏给空 id 都按行号定位，与 `collectors.rs` 里
+    // `key = "line:{index+1}"` 用的是同一个坐标。
+    let id = if id.is_empty() {
+        &format!("line:{line}")
+    } else {
+        id
+    };
     if !name.is_empty() {
         out.activities.push(Activity {
             id: format!("{session}:{id}"),
@@ -130,12 +168,18 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             .into();
     }
     if agent == "workbuddy" {
-        project = Path::new(path)
+        // #85：目录名是 `<前缀>-WorkBuddy-<项目>`，Node 端 projectFromDir 取的是标记之后的
+        // 那一段；此前这里直接用整个目录名，同一个项目在两端就成了两个名字。
+        let dir = Path::new(path)
             .parent()
             .and_then(Path::file_name)
             .unwrap_or_default()
             .to_string_lossy()
-            .into();
+            .into_owned();
+        project = match dir.find("-WorkBuddy-") {
+            Some(i) if i + "-WorkBuddy-".len() < dir.len() => dir[i + "-WorkBuddy-".len()..].to_string(),
+            _ => dir,
+        };
     }
     if agent == "grok" {
         project = Path::new(path)
@@ -143,9 +187,12 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             .and_then(Path::parent)
             .and_then(Path::file_name)
             .map(|p| {
-                percent_encoding::percent_decode_str(&p.to_string_lossy())
+                let decoded = percent_encoding::percent_decode_str(&p.to_string_lossy())
                     .decode_utf8_lossy()
-                    .into_owned()
+                    .into_owned();
+                // 目录名是 encodeURIComponent(绝对路径)，解出来还是整条路径：
+                // Node 端取 basename，此前这里留整条 → 同一个项目在两端是两个项目名。
+                project_name(&decoded)
             })
             .unwrap_or_default();
     }
@@ -165,17 +212,20 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
         };
         let kind = rec["type"].as_str().unwrap_or("");
         let p = &rec["payload"];
+        // #85：cwd 落进 project 前一律过 project_name()。日志里存的是绝对路径，
+        // Node 端七个源取的是末段（basename），此前这里存整条路径——同一份 rollout
+        // 日志在两个 UI 里就是两个项目，分组/钻取/按项目对账全都对不上。
         if kind == "session_meta" {
             session = first(&[string(p, "id"), string(p, "session_id")], &session);
-            project = first(&[string(p, "cwd")], &project);
+            project = first(&[project_name(&string(p, "cwd"))], &project);
         }
         if kind == "session" {
             session = first(&[string(&rec, "id")], &session);
-            project = first(&[string(&rec, "cwd")], &project);
+            project = first(&[project_name(&string(&rec, "cwd"))], &project);
         }
         if kind == "turn_context" {
             model = first(&[string(p, "model")], &model);
-            project = first(&[string(p, "cwd")], &project);
+            project = first(&[project_name(&string(p, "cwd"))], &project);
         }
         if p["type"] == "thread_settings_applied" {
             model = first(&[string(&p["thread_settings"], "model")], &model);
@@ -203,13 +253,36 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             .or_else(|| timestamp(&rec["time"]))
             .or_else(|| timestamp(&msg["timestamp"]))
         else {
+            // #85 (d)：**带用量**的记录读不到时间就是真实丢数，必须计入 malformed，
+            // 让来源健康停在 warning（此前静默 continue，面板上一切正常、只是少数据）。
+            // 结构性不带时间的行（codex 的 session_meta/turn_context、pi 与 dsh 的
+            // type=session）不是坏数据，不能因为"天生没有时间"就报坏。
+            // Node 端没有逐行 malformed 通道（src/scanner.js 只有文件级 parse_errors），
+            // 这一条差异是有意保留的，见 docs/ARCHITECTURE.md 的 #85 段。
+            let carries_usage = msg["usage"].is_object()
+                || p["type"] == "token_count"
+                || rec["params"]["update"]["usage"].is_object()
+                || rec["data"]["usage"].is_object()
+                || rec["data"]["chunk"]["usage"].is_object();
+            if carries_usage {
+                out.malformed_lines += 1;
+            }
             continue;
         };
         let mut tokens = None;
         let mut key = format!("line:{}", index + 1);
         match agent {
             "codex" => {
-                if p["type"] == "function_call" || p["type"] == "custom_tool_call" {
+                // #85：工具活动只认 `rec.type == "response_item"`，与 Node 端
+                // `collectCodexFile` 的记录级门槛同式。此前这里只看 payload.type，
+                // 于是 event_msg 里回放的同一批 function_call 也被再记一次，
+                // 工具榜在桌面端系统性高于 Node 端（同一条调用被数了两遍）。
+                // custom_tool_call 是新版 Codex 的 freeform 工具（apply_patch 一类），
+                // 是真实工具调用，两端这次一起记：Node 端此前只认 function_call，
+                // 少的那一边补上，而不是把桌面端砍掉。
+                if kind == "response_item"
+                    && (p["type"] == "function_call" || p["type"] == "custom_tool_call")
+                {
                     tool(
                         &mut out,
                         agent,
@@ -271,67 +344,92 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                     &[string(&rec, "sessionId"), string(&rec, "session_id")],
                     &session,
                 );
-                project = first(&[string(&rec, "cwd")], &project);
+                project = first(&[project_name(&string(&rec, "cwd"))], &project);
                 if kind != "assistant" {
                     continue;
                 }
-                model = first(&[string(msg, "model")], "unknown");
-                if model == "<synthetic>" {
+                // #85：Node 端的两道前置关卡是 `if (!usage || !msg?.id) return;`
+                // （collectors/claude.js:25）。缺 `message.id` 就编不出稳定去重键，
+                // Node 端连工具调用一起丢；此前桌面端用 `{session}:{ts}:{行号}` 造了一个
+                // 合成键入库——全量重扫时行号一变就变成重复计数，两端数字因此永远对不上。
+                // 两道关卡的位置也和 Node 一致：都在内容块扫描之前。
+                let u = &msg["usage"];
+                if !u.is_object() || string(msg, "id").is_empty() {
                     continue;
                 }
+                // #85：模型名为空时 Node 端整条丢弃（`if (!model || model === '<synthetic>') return;`，
+                // 见 collectors/claude.js），此前这里落到哨兵 unknown 仍然入库——同一份 transcript
+                // 桌面端多出一条用量。空 model 与 "<synthetic>" 是同一类记录：不是一次真实 API 调用。
+                // （与 #78 那条"两端各自只有一行"的约定不冲突：那条说的是有真实用量的行。）
+                let raw_model = string(msg, "model");
+                if raw_model.is_empty() || raw_model == "<synthetic>" {
+                    continue;
+                }
+                model = raw_model;
                 if let Some(blocks) = msg["content"].as_array() {
-                    for b in blocks {
+                    for (bi, b) in blocks.iter().enumerate() {
                         if b["type"] == "tool_use" {
+                            // #85：block.id 缺失时不能塌成同一个键（缓存主键 (agent,id)，
+                            // 一塌就把同一会话里所有无 id 的工具调用折成一条）。Node 端
+                            // 的回落是 `${msg.id}:${块序号}`，这里同一式（msg.id 已在上面
+                            // 把过关，非空）。
+                            let fallback = format!("{}:{}", string(msg, "id"), bi);
                             tool(
                                 &mut out,
                                 agent,
                                 &session,
                                 ts,
                                 &string(b, "name"),
-                                &string(b, "id"),
+                                &first(&[string(b, "id")], &fallback),
                                 path,
                                 index + 1,
                             );
                         }
                     }
                 }
-                let u = &msg["usage"];
-                if u.is_object() {
-                    tokens = Some(Tokens {
-                        input: number(u, "input_tokens"),
-                        cached: number(u, "cache_read_input_tokens"),
-                        cache_write: number(u, "cache_creation_input_tokens"),
-                        output: number(u, "output_tokens"),
-                        reasoning: number(&u["output_tokens_details"], "thinking_tokens"),
-                    });
-                    key = first(
-                        &[string(msg, "id")],
-                        &format!("{session}:{ts}:{}", index + 1),
-                    );
-                    key.push_str(&string(&rec, "requestId"));
-                }
+                // `u.is_object()` 与 `msg.id` 非空都已在上面把过关（与 Node 端同两道关卡），
+                // 这里只剩落库：键为 `message.id` + `requestId`，与
+                // `${tool}:${msg.id}:${rec.requestId ?? ''}` 同式。
+                tokens = Some(Tokens {
+                    input: number(u, "input_tokens"),
+                    cached: number(u, "cache_read_input_tokens"),
+                    cache_write: number(u, "cache_creation_input_tokens"),
+                    output: number(u, "output_tokens"),
+                    reasoning: number(&u["output_tokens_details"], "thinking_tokens"),
+                });
+                key = string(msg, "id");
+                key.push_str(&string(&rec, "requestId"));
             }
             "workbuddy" => {
                 session = first(&[string(&rec, "sessionId")], &session);
                 if kind == "function_call" {
-                    tool(
-                        &mut out,
-                        agent,
-                        &session,
-                        ts,
-                        &string(&rec, "name"),
-                        &string(&rec, "callId"),
-                        path,
-                        index + 1,
-                    );
+                    // #85：Node 端要求 `rec.name && rec.callId`，空 callId 不入库
+                    let call_id = string(&rec, "callId");
+                    if !call_id.is_empty() {
+                        tool(
+                            &mut out,
+                            agent,
+                            &session,
+                            ts,
+                            &string(&rec, "name"),
+                            &call_id,
+                            path,
+                            index + 1,
+                        );
+                    }
                 }
                 if msg["usage"].is_object() {
+                    // #85：与 claude 同一类修正——Node 端是 `if (!u || !rec.id || !ts) return;`
+                    // （collectors/workbuddy.js），编不出稳定去重键的行两端都不入库；
+                    // 桌面端此前用 `{session}:{ts}:{行号}` 造合成键，重扫一次就多计一次。
+                    // 工具调用不受影响（Node 端也在这道关卡之前就先处理了 function_call）。
+                    let id = string(&rec, "id");
+                    if id.is_empty() {
+                        continue;
+                    }
                     tokens = Some(openai(&msg["usage"]));
                     model = first(&[string(&rec["providerData"], "model")], "unknown");
-                    key = first(
-                        &[string(&rec, "id")],
-                        &format!("{session}:{ts}:{}", index + 1),
-                    );
+                    key = id;
                 }
             }
             "pi" => {
@@ -339,15 +437,17 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                     continue;
                 }
                 if let Some(blocks) = msg["content"].as_array() {
-                    for b in blocks {
+                    for (bi, b) in blocks.iter().enumerate() {
                         if b["type"] == "toolCall" {
+                            // #85：与 claude 同一条规则，id 缺失时按块序号定位
+                            // （Node：`${tool}:tc:${sessionId}:${block.id || i}`）
                             tool(
                                 &mut out,
                                 agent,
                                 &session,
                                 ts,
                                 &string(b, "name"),
-                                &string(b, "id"),
+                                &first(&[string(b, "id")], &bi.to_string()),
                                 path,
                                 index + 1,
                             );
@@ -356,6 +456,13 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                 }
                 let u = &msg["usage"];
                 if u.is_object() {
+                    // #85：Node 端 `const key = rec.id ?? msg.responseId; if (!key) return;`
+                    // （collectors/pi.js:68-69）——"编不出稳定去重键的事件，宁可少一条也不能
+                    // 多一条"。桌面端此前退回 `{ts}:{行号}`，同一份文件重扫一次就多点一行。
+                    let id = first(&[string(&rec, "id"), string(msg, "responseId")], "");
+                    if id.is_empty() {
+                        continue;
+                    }
                     tokens = Some(Tokens {
                         input: number(u, "input"),
                         cached: number(u, "cacheRead"),
@@ -364,13 +471,7 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                         reasoning: number(u, "reasoning"),
                     });
                     model = first(&[string(msg, "model")], "unknown");
-                    key = format!(
-                        "{session}:{}",
-                        first(
-                            &[string(&rec, "id"), string(msg, "responseId")],
-                            &format!("{ts}:{}", index + 1)
-                        )
-                    );
+                    key = format!("{session}:{id}");
                 }
             }
             "dsh" => {
@@ -417,16 +518,23 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                 let upd = &params["update"];
                 session = first(&[string(params, "sessionId")], &session);
                 if upd["sessionUpdate"] == "tool_call" {
-                    tool(
-                        &mut out,
-                        agent,
-                        &session,
-                        ts,
-                        &first(&[string(upd, "title"), string(upd, "kind")], "tool"),
-                        &string(upd, "toolCallId"),
-                        path,
-                        index + 1,
-                    );
+                    // #85：Node 端 `if (name && upd.toolCallId)` —— 没有 toolCallId 就没有
+                    // 任何稳定身份（updates.jsonl 是追加式的，位置会变），两端必须都不记；
+                    // 名字同样只认 title/kind，不再拿 "tool" 占位造出 Node 端没有的一行。
+                    let call_id = string(upd, "toolCallId");
+                    let name = first(&[string(upd, "title"), string(upd, "kind")], "");
+                    if !call_id.is_empty() && !name.is_empty() {
+                        tool(
+                            &mut out,
+                            agent,
+                            &session,
+                            ts,
+                            &name,
+                            &call_id,
+                            path,
+                            index + 1,
+                        );
+                    }
                 }
                 if upd["sessionUpdate"] != "turn_completed" {
                     continue;
@@ -542,7 +650,8 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                     session: r.get(1)?,
                     model: normalize_model(&model_id),
                     ts: r.get(3)?,
-                    project: r.get(9)?,
+                    // #85：session.directory 是绝对路径，Node 端 zcode.js 取末段
+                    project: project_name(&r.get::<_, String>(9)?),
                     tokens: Tokens {
                         input: input - cached,
                         cached,
@@ -628,7 +737,8 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                     id,
                     agent: agent.into(),
                     session,
-                    project,
+                    // #85：同 zcode，directory 取末段才是 Node 端记的那个项目
+                    project: project_name(&project),
                     model: normalize_model(&first(&[string(&v, "modelID")], "unknown")),
                     ts: timestamp(&v["time"]["created"]).unwrap_or(time),
                     tokens,
@@ -656,19 +766,31 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                 out.malformed_lines += 1;
                 continue;
             };
-            if let Ok(v) = serde_json::from_str::<Value>(&d) {
-                if v["type"] == "tool" {
-                    tool(
-                        &mut out,
-                        agent,
-                        &s,
-                        t,
-                        &string(&v, "tool"),
-                        &first(&[string(&v, "callID")], &id),
-                        &source,
-                        0,
-                    );
+            let Ok(v) = serde_json::from_str::<Value>(&d) else {
+                out.malformed_lines += 1;
+                continue;
+            };
+            if v["type"] == "tool" {
+                // #85：工具调用的时间优先取 `data.state.time.start`（这次工具真正开始的
+                // 时刻），行内没有才退回 part 行的 time_created。此前只用 time_created：
+                // 同一次工具调用在两个 UI 的时间轴上能差出整轮执行的时长（Node 端
+                // collectors/opencode.js 一直是 state.time.start 优先）。
+                let ts = timestamp(&v["state"]["time"]["start"]).unwrap_or(t);
+                if ts <= 0 {
+                    // 带工具名却读不到时间 = 真实丢这一条，计 malformed（Node 端无逐行通道）
+                    out.malformed_lines += 1;
+                    continue;
                 }
+                tool(
+                    &mut out,
+                    agent,
+                    &s,
+                    ts,
+                    &string(&v, "tool"),
+                    &first(&[string(&v, "callID")], &id),
+                    &source,
+                    0,
+                );
             }
         }
     } else {
@@ -789,22 +911,46 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
         let gen = nested(&f, 1);
         let u = nested(&gen, 4);
         let t = nested(&nested(&gen, 9), 4);
-        let ts = (num(&t, 1) * 1000 + num(&t, 2) / 1_000_000).max(*times.get(&idx).unwrap_or(&0));
+        // #85 ①时间：行内完成时间**优先**，缺失才回退同 idx 的 steps 时间
+        // （docs/sources/antigravity.md「collector 同时支持两代：行内时间戳优先，缺失时
+        // 回退 steps 对齐」）。此前取两者 max：steps 一行覆盖多次生成，它的时间可以晚于
+        // 本次生成的完成时间，取 max 会把事件推到错误的时间轴上，而 Node 端记的是行内值。
+        let inline = num(&t, 1) * 1000 + num(&t, 2) / 1_000_000;
+        let ts = if inline > 0 {
+            inline
+        } else {
+            *times.get(&idx).unwrap_or(&0)
+        };
         if ts <= 0 {
             out.malformed_lines += 1;
             continue;
         }
+        // #85 ②output 的三个分支与 Node 端 decodeGenerationRow 同式：
+        // f3 是"含 thinking 的总输出"主口径，**为 0 或缺席**都视为不可用（旧写法用
+        // contains_key，于是 f3=0 的行在这里被记成 0 输出，Node 端却回推出 f10+f9）；
+        // f3 不可用时按可见输出 f10 + thinking f9 回推，f10 也不在就只剩 f9。
+        let total_out = num(&u, 3);
+        let output = if total_out > 0 {
+            total_out
+        } else if u.contains_key(&10) {
+            num(&u, 10) + num(&u, 9)
+        } else {
+            num(&u, 9)
+        };
         let tokens = Tokens {
             input: num(&u, 2),
             cached: num(&u, 5),
             cache_write: num(&u, 4),
-            output: if u.contains_key(&3) {
-                num(&u, 3)
-            } else {
-                num(&u, 9) + num(&u, 10)
-            },
+            output,
             reasoning: num(&u, 9),
         };
+        // #85 ③零用量行：Node 端在 total 之前先有一道 `input===0 && output===0 &&
+        // cacheRead===0 → 丢`（collectors/antigravity.js 的"零用量行"）。只带
+        // cache 写入的一次生成不算请求，此前桌面端只有 total>0 一道关，这类行会在
+        // 桌面端多出一条记录、请求数也比 Node 多。
+        if tokens.input == 0 && tokens.output == 0 && tokens.cached == 0 {
+            continue;
+        }
         // 与 Node 端 antigravity.js 同式：`asText(lastOf(gen, 19)) || 'unknown'` 先兜空名，
         // 再 normalizeModel（#78）。字段缺失/空字节都落到哨兵 unknown 后才归一。
         let raw_model = match gen.get(&19) {
@@ -828,6 +974,36 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
     }
     Ok(out)
 }
+/// `conversation_summaries.workspace_uris` → 项目名（#85 ③）。
+///
+/// 与 Node 端 `collectors/antigravity.js::projectFromWorkspaceUris()` 同式：
+/// 扫到**第一个 `file://` 项**才用（此前直接取 `v[0]`，数组里先出现非 file 项时
+/// 桌面端会把 `untitled:...` 这类字符串当项目名）；percent 解码后取路径末段，
+/// Windows 的 `file:///D:/x` 先去掉 pathname 多出来的那个前导 `/`。
+/// 解不出可用 URI 时返回空串（Node 端是 null），坏 JSON/坏数组同样返回空。
+fn project_from_workspace_uris(raw: &str) -> String {
+    let Ok(Value::Array(list)) = serde_json::from_str::<Value>(raw) else {
+        return String::new();
+    };
+    for item in &list {
+        let Value::String(uri) = item else { continue };
+        let Some(rest) = uri.strip_prefix("file://") else { continue };
+        // file:///D:/x 与 file:///etc/x 的 pathname 分别是 /D:/x 与 /etc/x：
+        // 末段相同，这里只需把 Windows 多出来的那个前导斜杠去掉再取末段。
+        let path = match rest.strip_prefix('/') {
+            Some(p) if p.starts_with(|c: char| c.is_ascii_alphabetic()) && p.get(1..2) == Some(":") => {
+                p.to_string()
+            }
+            _ => rest.to_string(),
+        };
+        let decoded = percent_encoding::percent_decode_str(&path)
+            .decode_utf8_lossy()
+            .into_owned();
+        return project_name(&decoded);
+    }
+    String::new()
+}
+
 pub fn antigravity_projects(index: &Path) -> Result<BTreeMap<String, String>, String> {
     let db = readonly(index)?;
     let mut stmt = db
@@ -844,14 +1020,7 @@ pub fn antigravity_projects(index: &Path) -> Result<BTreeMap<String, String>, St
     let mut out = BTreeMap::new();
     for row in rows {
         let (id, s) = row.map_err(|e| e.to_string())?;
-        let v = serde_json::from_str::<Value>(&s).unwrap_or_default();
-        let uri = v[0].as_str().unwrap_or("");
-        out.insert(
-            id,
-            percent_encoding::percent_decode_str(uri.trim_start_matches("file:///"))
-                .decode_utf8_lossy()
-                .into_owned(),
-        );
+        out.insert(id, project_from_workspace_uris(&s));
     }
     Ok(out)
 }
@@ -1187,5 +1356,169 @@ mod tests {
             (number(&v, "a"), number(&v, "b"), number(&v, "c"), number(&v, "d"), number(&v, "e"), number(&v, "f")),
             (0, 0, 0, 0, 456, 12)
         );
+    }
+
+    /// #85 双端共享夹具：桌面端与 Node 端读同一份 JSONL，必须得到同一组
+    /// (ts, total, project) 与同一批工具调用。Node 端同一份记录写在
+    /// `test/run.mjs` 的 [28] 段。
+    /// 修前四处分叉：project 存整条绝对路径（Node 存末段）、claude 空模型仍入库成
+    /// `unknown`（Node 整条丢弃）、无 id 的 tool_use 全部塌成同一个键、
+    /// 秒级 timestamp 两端归一与否不同。
+    #[test]
+    fn project_model_and_tool_identity_match_node_on_one_fixture() {
+        const CLAUDE_85: &str = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"assistant","sessionId":"p85","requestId":"r1","cwd":"D:\\Work\\我的 项目","message":{"id":"m1","model":"glm-85","usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":30},"content":[{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Grep"}]}}
+{"timestamp":"2026-09-22T00:00:01Z","type":"assistant","sessionId":"p85","requestId":"r2","cwd":"D:\\Work\\我的 项目","message":{"id":"m2","model":"","usage":{"input_tokens":9,"output_tokens":9},"content":[{"type":"tool_use","name":"Bash","id":"t-2"}]}}
+{"timestamp":"2026-09-22T00:00:02Z","type":"assistant","sessionId":"p85","requestId":"r3","cwd":"D:\\Work\\我的 项目","message":{"id":"m3","model":"<synthetic>","usage":{"input_tokens":7,"output_tokens":7}}}"#;
+        let claude = parse_jsonl("claude-code", "p85.jsonl", CLAUDE_85);
+        assert_eq!(claude.events.len(), 1, "空 model 与 <synthetic> 都不是一次真实调用：{:?}", claude.events);
+        assert_eq!((claude.events[0].ts, claude.events[0].tokens.total()), (1_790_035_200_000, 155));
+        // project 是路径末段，不是整条 cwd
+        assert_eq!(claude.events[0].project, "我的 项目");
+        // 两个无 id 的 tool_use 必须各自成一行（此前共用空 id → 主键相撞，只剩一条）
+        assert_eq!(claude.activities.len(), 2, "{:?}", claude.activities);
+        assert_ne!(claude.activities[0].id, claude.activities[1].id);
+        assert_eq!(
+            claude.activities.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Read", "Grep"],
+            "被丢弃的那条记录里的工具调用也不得入库"
+        );
+
+        // Pi：project 只写在首行的 cwd 里，同样取末段
+        const PI_85: &str = r#"{"type":"session","version":3,"id":"p85pi","timestamp":"2026-09-22T00:00:00Z","cwd":"/work/我的 项目"}
+{"type":"message","id":"pi-1","timestamp":"2026-09-22T00:01:00Z","message":{"role":"assistant","model":"glm-85","usage":{"input":240,"cacheRead":1000,"cacheWrite":30,"output":170,"reasoning":40},"content":[{"type":"toolCall","name":"read"},{"type":"toolCall","name":"exec","id":"c-1"}]}}"#;
+        let pi = parse_jsonl("pi", "p85pi.jsonl", PI_85);
+        assert_eq!(pi.events.len(), 1, "{:?}", pi.events);
+        assert_eq!(pi.events[0].project, "我的 项目");
+        assert_eq!(pi.activities.len(), 2);
+        assert_ne!(pi.activities[0].id, pi.activities[1].id, "无 id 的 toolCall 按块序号定位");
+
+        // Codex：session_meta.cwd 取末段；无 call_id 的 function_call 也要各自成行
+        const CODEX_85: &str = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"session_meta","payload":{"id":"p85cx","cwd":"D:\\Work\\我的 项目"}}
+{"timestamp":"2026-09-22T00:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"glm-85"}}}
+{"timestamp":"2026-09-22T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}}}
+{"timestamp":"2026-09-22T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell"}}
+{"timestamp":"2026-09-22T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"shell"}}"#;
+        let codex = parse_jsonl("codex", "p85cx.jsonl", CODEX_85);
+        assert_eq!(codex.events.len(), 1);
+        assert_eq!(codex.events[0].project, "我的 项目");
+        assert_eq!(codex.activities.len(), 2, "{:?}", codex.activities);
+
+        // Grok：目录名是 URL 编码的整条路径，解出来还要取末段；
+        // 缺 toolCallId 或缺 title/kind 的工具调用两端都不记
+        const GROK_85: &str = r#"{"timestamp":1789900000,"params":{"sessionId":"p85gk","update":{"sessionUpdate":"turn_completed","prompt_id":"t1","usage":{"inputTokens":2000,"cachedReadTokens":1500,"cacheCreationTokens":100,"outputTokens":80}}}}
+{"timestamp":1789900060,"params":{"sessionId":"p85gk","update":{"sessionUpdate":"tool_call","title":"检索","kind":"search"}}}
+{"timestamp":1789900120,"params":{"sessionId":"p85gk","update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"检索"}}}
+{"timestamp":1789900180,"params":{"sessionId":"p85gk","update":{"sessionUpdate":"tool_call","toolCallId":"call-2"}}}"#;
+        // 真实布局：.../sessions/<encodeURIComponent(绝对路径)>/<会话uuid>/updates.jsonl。
+        // 编码结果写成字面量而不是现场调用编码器：这一串就是磁盘上真实存在的目录名
+        // （见 collectors/grok.js 顶部注释的实测形态），现场编码会把"编码器选哪张表"
+        // 这件事也变成被测行为的一部分，而我们要测的是解码。
+        // 它是 JS 的 encodeURIComponent(String.raw`D:\Work\我的 项目`)。
+        const ENCODED_85: &str =
+            "D%3A%5CWork%5C%E6%88%91%E7%9A%84%20%E9%A1%B9%E7%9B%AE";
+        let grok = parse_jsonl("grok", &format!("sessions/{ENCODED_85}/85gk/updates.jsonl"), GROK_85);
+        assert_eq!(grok.events.len(), 1);
+        assert_eq!(grok.events[0].tokens.total(), 2180);
+        assert_eq!(grok.events[0].project, "我的 项目", "解码之后还要取末段");
+        assert_eq!(grok.activities.len(), 1, "{:?}", grok.activities);
+        assert_eq!(grok.activities[0].name, "检索");
+        assert_eq!(grok.activities[0].id, "p85gk:call-1");
+
+        // dsh / WorkBuddy：秒级时间戳归一为毫秒（此前 Node 端直接用，事件落到 1970 年）
+        const DSH_85: &str = r#"{"type":"session","seq":1,"time":1789990000,"cwd":"/work/我的 项目"}
+{"type":"assistant/message","seq":2,"time":1789990060,"data":{"message":{"source":{"model":"glm-85"}},"usage":{"inputTokens":400,"cacheReadTokens":1000,"cacheWriteTokens":30,"outputTokens":50,"reasoningTokens":10}}}"#;
+        let dsh = parse_jsonl("dsh", "session.v3.jsonl.zstd", DSH_85);
+        assert_eq!(dsh.events.len(), 1, "{:?}", dsh.events);
+        assert_eq!(dsh.events[0].ts, 1_789_990_060_000, "秒级 time ×1000");
+        assert_eq!(dsh.events[0].project, "我的 项目");
+        assert_eq!(dsh.events[0].tokens.total(), 1480);
+
+        const WB_85: &str = r#"{"timestamp":1789990120,"id":"wb-85","sessionId":"p85wb","providerData":{"model":"glm-85","traceId":"tr-85"},"message":{"usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":50}}}"#;
+        let wb = parse_jsonl("workbuddy", r"D:\Work\.WorkBuddy\projects\x-WorkBuddy-我的 项目\p85wb.jsonl", WB_85);
+        assert_eq!(wb.events.len(), 1, "{:?}", wb.events);
+        assert_eq!(wb.events[0].ts, 1_789_990_120_000);
+        assert_eq!(wb.events[0].project, "我的 项目", "目录名取 -WorkBuddy- 之后那段");
+        assert_eq!(wb.events[0].tokens.total(), 550);
+    }
+
+    /// #85：工具身份与记录类型门槛，四项都是"两端同一份日志必须给出同一张榜"。
+    /// ① codex 的 function_call/custom_tool_call 只在 `type=response_item` 时算工具活动
+    ///    （Node `collectCodexFile` 同一条记录级门槛；event_msg 里的回放会数两遍）；
+    /// ② `custom_tool_call` 是真实工具调用，Node 端这次一并补上，两端都不少；
+    /// ③ 上游没给 id 的工具调用按行号定位，绝不塌成同一个键互相顶掉；
+    /// ④ 带用量却读不到时间的记录计入 malformed（结构性无时间的行不算坏数据）。
+    #[test]
+    fn tool_record_gate_and_line_identity_and_malformed_ts() {
+        const CODEX_85B: &str = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"session_meta","payload":{"id":"g85","cwd":"/work/p85"}}
+{"timestamp":"2026-09-22T00:00:01Z","type":"event_msg","payload":{"type":"function_call","name":"shell","call_id":"echoed"}}
+{"timestamp":"2026-09-22T00:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c-1"}}
+{"timestamp":"2026-09-22T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell"}}
+{"timestamp":"2026-09-22T00:00:04Z","type":"response_item","payload":{"type":"function_call","name":"read"}}"#;
+        let codex = parse_jsonl("codex", "g85.jsonl", CODEX_85B);
+        assert_eq!(
+            codex.activities.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["apply_patch", "shell", "read"],
+            "event_msg 里的回放不得计入工具活动，custom_tool_call 必须计入"
+        );
+        let ids = codex
+            .activities
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["g85:c-1", "g85:line:4", "g85:line:5"], "{ids:?}");
+
+        // 带 usage 却没有可用时间 → 真实丢数，计 malformed；session_meta 天生没有时间 → 不计
+        const BAD_TS: &str = r#"{"type":"session_meta","payload":{"id":"g86","cwd":"/work/p86"}}
+{"timestamp":"not-a-time","type":"assistant","sessionId":"g86","message":{"id":"m1","model":"glm-85","usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        let broken = parse_jsonl("claude-code", "g86.jsonl", BAD_TS);
+        assert!(broken.events.is_empty(), "{:?}", broken.events);
+        assert_eq!(broken.malformed_lines, 1, "只丢时间的那条用量必须被记成坏行");
+
+        const NO_MSG_ID: &str = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"assistant","sessionId":"g87","message":{"model":"glm-85","usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        // 缺 message.id：Node 端整条丢弃（`if (!usage || !msg?.id) return;`）。
+        // 此前桌面端造了个 `{session}:{ts}:{行号}` 的合成键入库——重扫时行号一动就重复计数，
+        // 桌面端的事件数与请求数因此恒高于 Node 端。
+        assert!(parse_jsonl("claude-code", "g87.jsonl", NO_MSG_ID).events.is_empty());
+        assert_eq!(parse_jsonl("claude-code", "g87.jsonl", NO_MSG_ID).malformed_lines, 0);
+
+        // 同一类缺陷的另外两个实例：Node 端对"编不出稳定去重键"的行一律不入库
+        // （pi 是 `rec.id ?? msg.responseId` 都缺就 return，workbuddy 是 `!rec.id` 就 return），
+        // 桌面端此前给它们造了 `{ts}:{行号}` 的合成键——全量重扫一次就多计一次。
+        const PI_NO_ID: &str = r#"{"timestamp":"2026-09-22T00:00:00Z","type":"message","sessionId":"p88","message":{"role":"assistant","model":"glm-85","usage":{"input":10,"output":5},"content":[{"type":"toolCall","name":"read"}]}}"#;
+        let pi = parse_jsonl("pi", "p88.jsonl", PI_NO_ID);
+        assert!(
+            pi.events.is_empty(),
+            "无 id / responseId 的 Pi 用量不得入库：{:?}",
+            pi.events
+        );
+        assert_eq!(pi.activities.len(), 1, "工具调用在 Node 端位于这道关卡之前");
+
+        const WB_NO_ID: &str = r#"{"timestamp":1789990120000,"sessionId":"p89","message":{"usage":{"input_tokens":10,"output_tokens":5}}}"#;
+        assert!(
+            parse_jsonl("workbuddy", "p89.jsonl", WB_NO_ID).events.is_empty(),
+            "无 rec.id 的 WorkBuddy 用量不得入库"
+        );
+    }
+
+    /// #85：win32 语义的路径末段规则，两端同式（Node 用 path.win32.basename）。
+    #[test]
+    fn win32_basename_matches_the_node_rule_it_replaces() {
+        for (input, want) in [
+            (r"D:\Work\我的 项目", "我的 项目"),
+            ("/work/proj/", "proj"),
+            ("D:/a/b/", "b"),
+            ("x", "x"),
+            ("项目", "项目"),
+            (r"\nas\share\proj", "proj"),
+            ("\\\\127.0.0.1\\c$\\a\\b", "b"),
+            // 取不到末段时原样返回（Node 端是 `basename(x) || x`），绝不退化成空
+            (r"D:\", r"D:\"),
+            ("C:", "C:"),
+            ("/", "/"),
+            ("", ""),
+        ] {
+            let got = project_name(input);
+            assert_eq!(got, want, "{input:?}");
+        }
     }
 }

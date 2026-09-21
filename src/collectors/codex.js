@@ -123,7 +123,8 @@ function parts(u) {
  *   等于丢掉压缩后那一轮的用量。
  * - 模型名（版本差异，两种都认）：新格式 thread_settings_applied.thread_settings.model；
  *   旧格式 turn_context.payload.model（2026-09 之前的 rollout）。
- * - 工具调用：response_item 且 payload.type=function_call（name/call_id）。
+ * - 工具调用：`response_item` 且 `payload.type` 为 `function_call` 或 `custom_tool_call`
+ *   （name/call_id）。后者是新版 Codex 的 freeform 工具，#85 起两端同记。
  * - rate_limits 为账号级配额快照：只保留全局最新一条（按 ts）。
  * - 增量恢复：state（累计值 + 当前模型 + 项目）持久化在 files.state_json。
  * - OpenAI 口径：input_tokens 已含 cached_input_tokens，入库拆为新输入/缓存命中两列，
@@ -139,7 +140,8 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
         !line.includes('"thread_settings_applied"') &&
         !line.includes('"session_meta"') &&
         !line.includes('"turn_context"') &&
-        !line.includes('"function_call"')) return;
+        !line.includes('"function_call"') &&
+        !line.includes('"custom_tool_call"')) return;
     let rec;
     try { rec = JSON.parse(line); } catch { return; }
     const payload = rec?.payload;
@@ -156,12 +158,28 @@ export async function collectCodexFile(store, { path, fileId, offset, state, ver
       if (payload.model) st.model = normalizeModel(payload.model); // 旧格式模型位
       return;
     }
-    if (rec.type === 'response_item' && payload.type === 'function_call') {
+    // #85：工具活动只认 `type === 'response_item'`（此前桌面端只看 payload.type，
+    // event_msg 里的回放被再数一遍，工具榜恒高于这边）。`custom_tool_call` 是新版
+    // Codex 的 freeform 工具调用（apply_patch 一类），同样是真实的一次工具使用，
+    // 桌面端一直在记、这边漏了 —— 补齐的那一边是这里，而不是把桌面端砍掉。
+    if (rec.type === 'response_item'
+        && (payload.type === 'function_call' || payload.type === 'custom_tool_call')) {
       if (payload.name && Number.isFinite(ts)) {
+        // #85：没有 call_id 时按"当前 seq + 该 seq 内的序号"定键。此前只用 seq，而 seq 只在
+        // token_count 事件上自增——两次 token_count 之间的第二个 function_call 与第一个共用
+        // dedup_key，被 INSERT OR IGNORE 静默丢掉（桌面端按行号定键，反而没这个问题）。
+        // 同一 seq 的**首条**仍沿用裸 `seq` 的原键：存量行一条不多一条不少，
+        // 只有此前被丢掉的那些才拿到新行。有 call_id 时键的形态完全不变。
+        let key = payload.call_id;
+        if (key === undefined || key === null || key === '') {
+          if (st.tseqFor !== st.seq) { st.tseqFor = st.seq; st.tseq = 0; }
+          st.tseq += 1;
+          key = st.tseq === 1 ? `${st.seq}` : `${st.seq}:${st.tseq}`;
+        }
         store.insertToolCall({
           ts, tool: 'codex', name: payload.name,
           session_id: fileId,
-          dedup_key: `codex:tc:${fileId}:${payload.call_id ?? `${st.seq}`}`,
+          dedup_key: `codex:tc:${fileId}:${key}`,
         });
       }
       return;

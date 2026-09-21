@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import * as fzstd from 'fzstd';
 import { normalizeModel } from '../models.js';
-import { tokenCount } from './tokens.js';
+import { tokenCount, epochMs } from './tokens.js';
 
 /**
  * dsh（DeepSeek Harness）采集器：~/.dsh/sessions 下 zstd 压缩的会话快照。
@@ -52,7 +52,10 @@ export async function collectDshFile(store, { path, fileId }) {
   let project = null;
 
   const record = (rec, u, dedupKey, recModel) => {
-    if (!u || !Number.isFinite(rec.time)) return;
+    // #85：`time` 的粒度不总是毫秒（桌面端 timestamp() 一直会归一，这里此前直接用），
+    // 秒级记录会落到 1970 年 → 同一份快照在两个 UI 里的当日/区间合计完全不同。
+    const ts = epochMs(rec.time);
+    if (!u || !ts) return;
     // #96：先转整数再相加——字符串形态的用量字段会让 total 变成拼接结果（tokens.js）
     const input = tokenCount(u.inputTokens);
     const cached = tokenCount(u.cacheReadTokens);
@@ -61,7 +64,7 @@ export async function collectDshFile(store, { path, fileId }) {
     const total = input + cached + cacheWrite + output;
     if (total <= 0) return;
     inserted += store.insertEvent({
-      ts: rec.time,
+      ts,
       tool: 'dsh',
       model: normalizeModel(recModel ?? model),
       session_id: fileId,

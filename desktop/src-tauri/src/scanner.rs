@@ -55,6 +55,21 @@ fn indexed_path(path: &Path) -> String {
         .display()
         .to_string()
 }
+/// 同一轮扫描内的去重键。
+///
+/// Windows 的路径大小写不敏感，`C:\Logs\a.jsonl` 与 `C:\LOGS\A.JSONL` 是同一个文件，
+/// 不归一就会把一份日志采两遍（raw_events 主键含 path，两份都留下）。
+/// POSIX 恰好相反：大小写敏感，`/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，
+/// 一律 `to_lowercase()` 会把后者当成重复直接跳过 —— 少一个文件、少一份用量，
+/// 且没有任何错误。故归一只在 Windows 上编译进去（#85 第十项）。
+#[cfg(windows)]
+fn dedup_key(path: String) -> String {
+    path.to_lowercase()
+}
+#[cfg(not(windows))]
+fn dedup_key(path: String) -> String {
+    path
+}
 fn collect_file(
     db: &mut Connection,
     agent: &str,
@@ -152,7 +167,7 @@ pub fn scan_cancellable(
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .to_string();
-                            let key = indexed_path(e.path()).to_lowercase();
+                            let key = dedup_key(indexed_path(e.path()));
                             if !seen.insert(key) {
                                 continue;
                             }
@@ -171,7 +186,7 @@ pub fn scan_cancellable(
                     }
                 }
             } else if matches!(agent, "zcode" | "opencode") {
-                if !seen.insert(indexed_path(path).to_lowercase()) {
+                if !seen.insert(dedup_key(indexed_path(path))) {
                     continue;
                 }
                 if let Err(e) = collect_file(&mut db, agent, path, None, &mut s) {
@@ -190,7 +205,7 @@ pub fn scan_cancellable(
                             {
                                 continue;
                             }
-                            if !seen.insert(indexed_path(e.path()).to_lowercase()) {
+                            if !seen.insert(dedup_key(indexed_path(e.path()))) {
                                 continue;
                             }
                             if let Err(err) = collect_file(&mut db, agent, e.path(), None, &mut s) {
@@ -221,4 +236,29 @@ pub fn scan_cancellable(
         results.push(s);
     }
     Ok(results)
+}
+
+/// #85 第十项：`seen` 的大小写归一只能建立在"文件系统本身不区分大小写"的前提上。
+/// POSIX 上 `/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，一律 lowercase 会把后者
+/// 当成重复静默跳过（少一份用量、零错误）；Windows 上它们是同一个文件，不归一就会采两遍。
+#[cfg(test)]
+mod tests {
+    use super::dedup_key;
+
+    #[test]
+    fn seen_dedup_key_folds_case_only_where_the_filesystem_is_case_insensitive() {
+        if cfg!(windows) {
+            assert_eq!(
+                dedup_key(r"C:\Logs\A.jsonl".into()),
+                dedup_key(r"C:\logs\a.jsonl".into()),
+                "Windows：同一文件的两种写法必须并成一个键"
+            );
+        } else {
+            assert_ne!(
+                dedup_key("/logs/A.jsonl".into()),
+                dedup_key("/logs/a.jsonl".into()),
+                "POSIX：大小写不同的两个文件名不能被并成一个键"
+            );
+        }
+    }
 }

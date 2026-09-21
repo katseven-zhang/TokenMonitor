@@ -2489,6 +2489,212 @@ console.log('\n[27] #96 采集器数值化与平台卫生（字符串用量不�
   }
 }
 
+/* ---------- [28] #85 桌面端 ↔ Node 采集口径 ---------- */
+console.log('\n[28] #85 双端采集口径（project 取末段 / 工具身份与记录门槛 / 秒级时间戳归一 / WorkBuddy cache_write）');
+/* 桌面端对偶：desktop/src-tauri/src/collectors.rs 的 project_model_and_tool_identity_...
+ * 与 tool_record_gate_and_line_identity_and_malformed_ts 两个测试、
+ * desktop/src-tauri/tests/sources.rs 的 antigravity_decoder_branches_and_project_match_node
+ * 与 opencode_tool_part_timestamp_prefers_state_time_start。
+ * 这里刻意用 JS 对象 + JSON.stringify 造记录：反斜杠与中文在源里只出现一次，
+ * 双端读到的字节完全同一份。 */
+{
+  const { epochMs } = await import(pathToFileURL(join(ROOT, 'src/collectors/tokens.js')).href);
+  const { collectClaudeFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/claude.js')).href);
+  const { collectCodexFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/codex.js')).href);
+  const { collectGrokFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/grok.js')).href);
+  const { collectWorkbuddyFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/workbuddy.js')).href);
+  const { collectDshFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/dsh.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+
+  /* ---- 共享规则本身：秒/毫秒只有一个边界（#85 c） ---- */
+  for (const [raw, want] of [
+    [1789990000, 1789990000000],                 // 秒级 → ×1000（此前 WorkBuddy 直接用，落到 1970）
+    [1789990000000, 1789990000000],              // 毫秒直通
+    [1e11, 1e11],                                // 边界值按毫秒，与 collectors.rs::timestamp() 同一常数
+    ['2026-09-22T00:00:00Z', 1790035200000],     // ISO 字符串（grok 此前 Number() → 整行丢）
+    ['1789990000', 1789990000000],               // 数字形态的字符串
+    [null, 0], [0, 0], [-1, 0], ['bad', 0], [undefined, 0], [NaN, 0],
+  ]) ok(`#85 epochMs(${JSON.stringify(raw)}) → ${want}`, epochMs(raw) === want, String(epochMs(raw)));
+
+  const base = mkdtempSync(join(tmpdir(), 'parity85-'));
+  const store = new Store(join(base, 't85.db'));
+  const write = (name, lines) => {
+    const p = join(base, name);
+    writeFileSync(p, lines.map((o) => JSON.stringify(o)).join('\n') + '\n');
+    return p;
+  };
+  const rows = (tool) => store.db.prepare(
+    'SELECT ts, input_tokens i, cached_input c, cache_write w, output_tokens o,'
+    + ' reasoning_tokens r, total_tokens t, project p FROM events WHERE tool = ? ORDER BY ts').all(tool);
+  const tools = (tool) => store.db.prepare(
+    'SELECT name, ts, dedup_key k FROM tool_calls WHERE tool = ? ORDER BY ts').all(tool);
+
+  /* ---- claude：与桌面端同一份三行夹具，只有一行是真实调用 ---- */
+  {
+    const f = write('parity85-claude.jsonl', [
+      { timestamp: '2026-09-22T00:00:00Z', type: 'assistant', sessionId: 'p85', requestId: 'r1',
+        cwd: 'D:\\Work\\我的 项目',
+        message: { id: 'm1', model: 'glm-85', usage: { input_tokens: 100, cache_read_input_tokens: 20,
+          cache_creation_input_tokens: 5, output_tokens: 30 },
+        content: [{ type: 'tool_use', name: 'Read' }, { type: 'tool_use', name: 'Grep' }] } },
+      { timestamp: '2026-09-22T00:00:01Z', type: 'assistant', sessionId: 'p85', requestId: 'r2',
+        cwd: 'D:\\Work\\我的 项目',
+        message: { id: 'm2', model: '', usage: { input_tokens: 9, output_tokens: 9 },
+          content: [{ type: 'tool_use', name: 'Bash', id: 't-2' }] } },
+      { timestamp: '2026-09-22T00:00:02Z', type: 'assistant', sessionId: 'p85', requestId: 'r3',
+        cwd: 'D:\\Work\\我的 项目',
+        message: { id: 'm3', model: '<synthetic>', usage: { input_tokens: 7, output_tokens: 7 } } },
+    ]);
+    await collectClaudeFile(store, { tool: 'claude-code', path: f, fileId: 'p85', offset: 0 });
+    const c = rows('claude-code');
+    ok('#85 claude 空 model 与 <synthetic> 都不是一次真实调用（1 事件 / 155 token）',
+      c.length === 1 && c[0].t === 155 && c[0].ts === 1790035200000, JSON.stringify(c));
+    ok('#85 claude project 是 cwd 末段而不是整条路径',
+      c[0]?.p === '我的 项目', JSON.stringify(c[0]));
+    const tc = tools('claude-code');
+    ok('#85 claude 两个无 id 的 tool_use 各自成行（共用空键时只剩一条）',
+      tc.length === 2 && tc.map((x) => x.name).join(',') === 'Read,Grep', JSON.stringify(tc));
+    ok('#85 claude 被丢弃那条记录里的工具调用也不入库',
+      !tc.some((x) => x.name === 'Bash'), JSON.stringify(tc));
+  }
+
+  /* ---- codex：记录级门槛 + custom_tool_call + 无 call_id 的键不再互相顶掉 ---- */
+  {
+    const f = write('rollout-parity85.jsonl', [
+      { timestamp: '2026-09-22T00:00:00Z', type: 'session_meta',
+        payload: { id: 'p85cx', cwd: 'D:\\Work\\我的 项目' } },
+      { timestamp: '2026-09-22T00:00:01Z', type: 'event_msg',
+        payload: { type: 'function_call', name: '回放', call_id: 'echoed' } },
+      { timestamp: '2026-09-22T00:00:02Z', type: 'response_item',
+        payload: { type: 'custom_tool_call', name: 'apply_patch', call_id: 'c-1' } },
+      { timestamp: '2026-09-22T00:00:03Z', type: 'response_item',
+        payload: { type: 'function_call', name: 'shell' } },
+      { timestamp: '2026-09-22T00:00:04Z', type: 'response_item',
+        payload: { type: 'function_call', name: 'read' } },
+      { timestamp: '2026-09-22T00:00:05Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        total_token_usage: { input_tokens: 100, cached_input_tokens: 80, output_tokens: 20 },
+        last_token_usage: { input_tokens: 100, cached_input_tokens: 80, output_tokens: 20 } } } },
+      { timestamp: '2026-09-22T00:00:06Z', type: 'event_msg', payload: { type: 'token_count', info: {
+        total_token_usage: { input_tokens: 200, cached_input_tokens: 90, output_tokens: 40 },
+        last_token_usage: { input_tokens: 100, cached_input_tokens: 10, output_tokens: 20 } } } },
+    ]);
+    await collectCodexFile(store, { path: f, fileId: 'cx85', offset: 0, state: null, version: 5 });
+    const tt = tools('codex');
+    ok('#85 codex 工具活动只认 response_item，且 custom_tool_call 计入',
+      tt.map((x) => x.name).join(',') === 'apply_patch,shell,read', JSON.stringify(tt));
+    ok('#85 codex 同一 seq 内的两条无 call_id 调用不再共用一个去重键',
+      new Set(tt.map((x) => x.k)).size === tt.length, JSON.stringify(tt.map((x) => x.k)));
+    ok('#85 codex 有 call_id 时键的形态不变（存量行不位移）',
+      tt[0].k === 'codex:tc:cx85:c-1', tt[0].k);
+    const cx = rows('codex');
+    ok('#85 codex project 取 cwd 末段（首个采样 + 一次差分 = 2 事件）',
+      cx.length === 2 && cx.every((x) => x.p === '我的 项目'), JSON.stringify(cx));
+  }
+
+  /* ---- grok：秒/毫秒/ISO 归一到同一条时间轴；无名或无 id 的工具调用不入库 ---- */
+  {
+    const dir = join(base, 'sessions', encodeURIComponent('D:\\work\\项目-85'), 'p85grok');
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, 'updates.jsonl');
+    writeFileSync(f, [
+      { timestamp: 1789900000, params: { sessionId: 'p85grok', update: { sessionUpdate: 'turn_completed',
+        prompt_id: 't1', usage: { inputTokens: 2000, cachedReadTokens: 1500, outputTokens: 80 } } } },
+      { timestamp: 1789900060000, params: { sessionId: 'p85grok', update: { sessionUpdate: 'turn_completed',
+        prompt_id: 't2', usage: { inputTokens: 100, outputTokens: 10 } } } },
+      { timestamp: '2026-09-22T00:00:00Z', params: { sessionId: 'p85grok', update: { sessionUpdate: 'turn_completed',
+        prompt_id: 't3', usage: { inputTokens: 50, outputTokens: 5 } } } },
+      { timestamp: 1789900120, params: { sessionId: 'p85grok', update: { sessionUpdate: 'tool_call',
+        title: '检索', kind: 'search' } } },
+      { timestamp: 1789900180, params: { sessionId: 'p85grok', update: { sessionUpdate: 'tool_call',
+        toolCallId: 'call-1', title: '检索' } } },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    await collectGrokFile(store, { tool: 'grok', path: f, fileId: 'p85grok', offset: 0 });
+    const g = rows('grok');
+    ok('#85 grok 秒级/毫秒级/ISO 三种 timestamp 落在同一条毫秒轴',
+      g.length === 3 && g[0].ts === 1789900000000 && g[1].ts === 1789900060000
+      && g[2].ts === 1790035200000, JSON.stringify(g.map((x) => x.ts)));
+    ok('#85 grok 解码后的整条路径仍要取末段才是项目名',
+      g.every((x) => x.p === '项目-85'), JSON.stringify(g.map((x) => x.p)));
+    ok('#85 grok 缺 toolCallId 的工具调用两端都不记',
+      tools('grok').length === 1 && tools('grok')[0].k === 'grok:tc:call-1',
+      JSON.stringify(tools('grok')));
+  }
+
+  /* ---- WorkBuddy：cache_write / reasoning 真的被读出来，秒级 timestamp 归一 ---- */
+  {
+    const dir = join(base, 'wb', 'p1-WorkBuddy-项目-85');
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, 'p85wb.jsonl');
+    writeFileSync(f, [
+      { timestamp: 1789990120, id: 'wb-85a', sessionId: 'p85wb',
+        providerData: { model: 'glm-85', traceId: 'tr-85' },
+        message: { usage: { input_tokens: 500, cached_input_tokens: 300,
+          cache_write_input_tokens: 20, output_tokens: 50, reasoning_output_tokens: 12 } } },
+      { timestamp: 1789990180000, id: 'wb-85b', sessionId: 'p85wb',
+        providerData: { model: 'glm-85' },
+        message: { usage: { input_tokens: 100, cache_read_input_tokens: 40, output_tokens: 10 } } },
+      // 无 rec.id：编不出稳定去重键，两端都不入库（桌面端此前用 {ts}:{行号} 合成键）
+      { timestamp: 1789990240000, sessionId: 'p85wb',
+        message: { usage: { input_tokens: 10, output_tokens: 5 } } },
+    ].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    await collectWorkbuddyFile(store, { tool: 'workbuddy', path: f, fileId: 'p85wb', offset: 0 });
+    const w = rows('workbuddy');
+    ok('#85 workbuddy cache_write/reasoning 不再是写死的 0',
+      w.length === 2 && w[0].w === 20 && w[0].r === 12, JSON.stringify(w));
+    ok('#85 workbuddy input 含缓存：500 拆成 200+300，total = 500+20+50 = 570',
+      w[0]?.i === 200 && w[0]?.c === 300 && w[0]?.t === 570, JSON.stringify(w[0]));
+    ok('#85 workbuddy 秒级 timestamp 归一为毫秒（此前落到 1970-01-21）',
+      w[0]?.ts === 1789990120000 && w[1]?.ts === 1789990180000,
+      JSON.stringify(w.map((x) => x.ts)));
+    ok('#85 workbuddy 项目名取 -WorkBuddy- 之后那段',
+      w.every((x) => x.p === '项目-85'), JSON.stringify(w.map((x) => x.p)));
+  }
+
+  /* ---- dsh：秒级 time 归一（zstd 夹具，与 [3]/[27] 同样在无 zstd 时跳过） ---- */
+  {
+    const zlib = require('node:zlib');
+    if (typeof zlib.zstdCompressSync === 'function') {
+      const dir = join(base, 'dsh', '--work-项目-85--', 'p85dsh');
+      mkdirSync(dir, { recursive: true });
+      const lines = [
+        { type: 'session', seq: 1, time: 1789990000, cwd: '/work/项目-85' },
+        { type: 'assistant/message', seq: 2, time: 1789990060, data: {
+          message: { source: { model: 'glm-85' } },
+          usage: { inputTokens: 400, cacheReadTokens: 1000, cacheWriteTokens: 30,
+            outputTokens: 50, reasoningTokens: 10 } } },
+      ];
+      const p = join(dir, 'session.v3.jsonl.zstd');
+      writeFileSync(p, Buffer.concat(lines.map((o) => zlib.zstdCompressSync(Buffer.from(JSON.stringify(o) + '\n')))));
+      await collectDshFile(store, { path: p, fileId: 'p85dsh' });
+      const d = rows('dsh');
+      ok('#85 dsh 秒级 time 归一为毫秒、project 取 cwd 末段',
+        d.length === 1 && d[0].ts === 1789990060000 && d[0].p === '项目-85', JSON.stringify(d));
+      ok('#85 dsh 合计 400+1000+30+50 = 1480 不因归一改变',
+        d[0]?.t === 1480, JSON.stringify(d[0]));
+    } else {
+      console.log('  – dsh #85 断言跳过（本机 Node 无 zstdCompressSync，与 [3]/[27] 同一处理）');
+    }
+  }
+
+  /* ---- antigravity：workspace_uris 只认第一个 file:// 项，percent 解码后取末段 ---- */
+  {
+    const { decodeGenerationRow } = await import(pathToFileURL(join(ROOT, 'src/collectors/antigravity.js')).href);
+    const varint = (n) => { const out = []; while (n >= 128) { out.push((n & 127) | 128); n >>= 7; } out.push(n); return out; };
+    const num = (f, n) => Buffer.from([...varint(f << 3), ...varint(n)]);
+    const blob = (f, b) => Buffer.from([...varint((f << 3) | 2), ...varint(b.length), ...b]);
+    // f3 = 0：主口径不可用，按可见 f10 + thinking f9 回推（此前桌面端 contains_key 记 0）
+    const usage = Buffer.concat([num(2, 100), num(3, 0), num(4, 30), num(5, 200), num(9, 15), num(10, 58)]);
+    const time = blob(4, Buffer.concat([num(1, 1800000010), num(2, 500000000)]));
+    const gen = blob(1, Buffer.concat([blob(4, usage), blob(9, time), blob(19, Buffer.from('Gemini-85'))]));
+    const d = decodeGenerationRow(gen);
+    ok('#85 antigravity f3=0 与 f3 缺席同样回退 f10+f9 = 73', d.output === 73, `output=${d.output}`);
+    ok('#85 antigravity 行内完成时间 1.9.4.1/2 → 毫秒', d.ts === 1800000010500, String(d.ts));
+  }
+
+  store.close();
+  rmSync(base, { recursive: true, force: true });
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

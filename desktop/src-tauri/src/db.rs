@@ -81,7 +81,13 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     //    多行，且价格表（全小写键）再也匹配不上，只能靠手工往 aliases 补大小写变体。
     // 7: #96 用量字段是数字形态的字符串时按整数读出（此前字符串一律记 0，这条用量消失），
     //    grok 的 `modelUsage:{}` 不再丢掉整轮，Pi 首行 BOM 不再丢掉 project。
-    const COLLECTOR_REVISION: &str = "7";
+    // 8: #85 与 Node 端对齐采集语义——project 一律取路径末段（此前存整条绝对路径，同一
+    //    项目在两个 UI 里是两个名字）、codex 工具活动只认 `type=response_item`（event_msg
+    //    里的回放此前被数两遍）、claude/pi/workbuddy 缺稳定去重键的行不再用合成键入库、
+    //    无 id 的工具调用按行号定位（此前同会话的无名调用互相顶掉只剩一条）、opencode 的
+    //    工具时间优先 `state.time.start`、antigravity 的行内时间/output 回退分支与
+    //    workspace_uris 取法同 Node。
+    const COLLECTOR_REVISION: &str = "8";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",
