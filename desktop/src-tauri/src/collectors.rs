@@ -97,7 +97,11 @@ fn project_name(value: &str) -> String {
 ///     序列已断，调用方按"回落"处理（改读本条的 last_token_usage），不跨写法做差分。
 /// 写法：0 都没写 / 1 只写 creation / 2 只写 write / 3 两种都写且相等 / 4 两种都写但不等。
 /// 与 Node 端 `collectors/codex.js::cacheWriteOf()` 同一条规则。
-fn cache_write_of(v: &Value) -> (i64, u8) {
+///
+/// #75 第 3 项：会话回放（`session_replay.rs::normalize_raw_usage`）**也调用这一个实现**。
+/// 规则一旦复制就有三份，而这次分歧的成因正是三份里的一份（openai() 读 creation、
+/// codex.js 读 write、replay 两个都不读）；跨 crate 边界也只留这一处可调用。
+pub(crate) fn cache_write_of(v: &Value) -> (i64, u8) {
     let a = v.get("cache_creation_input_tokens");
     let b = v.get("cache_write_input_tokens");
     match (a, b) {

@@ -26,6 +26,12 @@ const UNGROUPED_TURN_ID: &str = "Ungrouped";
 struct RawUsage {
     input_tokens: i64,
     cached_input_tokens: i64,
+    /// #75 第 3 项：缓存写入（`cache_creation_input_tokens` / `cache_write_input_tokens`
+    /// 两个写法同一个量）。回放此前两个字段都不读，同一份 rollout 在本面板里的单次总量
+    /// 恒比事件缓存/legacy 少一个 cache_write —— 取舍见 `collectors.rs::cache_write_of`。
+    cache_write_tokens: i64,
+    /// 上一条的写法标记（0..=4），累计序列断了的判据；与 collectors.rs 的 `previous_ws` 同式。
+    cache_write_spelling: u8,
     output_tokens: i64,
     reasoning_output_tokens: i64,
     total_tokens: i64,
@@ -599,20 +605,32 @@ impl ReplayParseState {
         let last_usage = normalize_raw_usage(info.get("last_token_usage"));
         let total_usage = normalize_raw_usage(info.get("total_token_usage"));
         let raw = if let Some(current) = total_usage.as_ref() {
+            // 重复通知：与 collectors.rs 的 `previous == cur && cur_ws == previous_ws` 同式
+            // （那边比的是拆列后的 Tokens 五字段 + 写法，这边比的是同一批量的原始口径）。
             if self.previous_totals.as_ref().is_some_and(|p| {
                 p.input_tokens == current.input_tokens
                     && p.cached_input_tokens == current.cached_input_tokens
+                    && p.cache_write_tokens == current.cache_write_tokens
+                    && p.cache_write_spelling == current.cache_write_spelling
                     && p.output_tokens == current.output_tokens
                     && p.reasoning_output_tokens == current.reasoning_output_tokens
             }) {
                 return;
             }
-            if self.previous_totals.is_none()
-                || self
-                    .previous_totals
-                    .as_ref()
-                    .is_some_and(|p| current.input_tokens < p.input_tokens || current.output_tokens < p.output_tokens)
-            {
+            let reset = self.previous_totals.as_ref().is_some_and(|p| {
+                current.input_tokens < p.input_tokens || current.output_tokens < p.output_tokens
+            });
+            // #75 情形 2（collectors.rs 的 spelling_changed 同一条、同一收窄）：相邻两条各自
+            // 写了某种具体写法而写法不同 → 累计序列来自两个版本的写入方，跨写法差分必然为负、
+            // 会被 .max(0) 静默清零，与回落同路：改读本条 last_token_usage。写法 0（没写缓存）
+            // 与 4（两种都写但不等、已拒读）在这条序列上就是 0，字段第一次出现按普通差分读。
+            let concrete = |spelling: u8| (1..=3).contains(&spelling);
+            let spelling_changed = self.previous_totals.as_ref().is_some_and(|p| {
+                concrete(current.cache_write_spelling)
+                    && concrete(p.cache_write_spelling)
+                    && current.cache_write_spelling != p.cache_write_spelling
+            });
+            if self.previous_totals.is_none() || reset || spelling_changed {
                 // #75（与 collectors.rs 的 codex 分支同一条规则，两端一致）：首个采样与
                 // 累计值回落只认 info.last_token_usage。缺失时不退回整段累计值 ——
                 // resume/fork 会话的累计值包含父线程全部历史，记成本轮会把父会话
@@ -1695,16 +1713,24 @@ fn normalize_raw_usage(value: Option<&Value>) -> Option<RawUsage> {
     let input = number_field(value, "input_tokens").unwrap_or(0).max(0);
     let cached = number_field(value, "cached_input_tokens")
         .unwrap_or(0).max(number_field(value, "cache_read_input_tokens").unwrap_or(0)).clamp(0,input);
+    // #75 第 3 项：cache_write 只在 collectors.rs 里有一份实现，这里调用它而不是再抄一遍
+    // 字段名（本函数此前两个写法都不读，见 docs/ARCHITECTURE.md Codex 段的三读者对照）。
+    let (cache_write, cache_write_spelling) = crate::collectors::cache_write_of(value);
     let output = number_field(value, "output_tokens").unwrap_or(0).max(0);
     let reasoning = number_field(value, "reasoning_output_tokens").unwrap_or(0).max(0);
 
     Some(RawUsage {
         input_tokens: input,
         cached_input_tokens: cached,
+        cache_write_tokens: cache_write,
+        cache_write_spelling,
         output_tokens: output,
         reasoning_output_tokens: reasoning,
         // Same accounting as the event cache: reasoning is already in output.
-        total_tokens: input + output,
+        // 本结构的 input 是上游原值（OpenAI 口径已含缓存命中），所以四项之和就是
+        // 事件缓存那一条 `total = input + cache_write + output`（collectors.rs 拆成
+        // 新输入/缓存命中两列后再相加，同一个数）。
+        total_tokens: input + cache_write + output,
     })
 }
 
@@ -1713,24 +1739,25 @@ fn number_field(value: &Value, field: &str) -> Option<i64> {
 }
 
 fn subtract_raw_usage(current: &RawUsage, previous: Option<&RawUsage>) -> RawUsage {
+    let previous = previous.cloned().unwrap_or_default();
+    let input_tokens = (current.input_tokens - previous.input_tokens).max(0);
+    let cache_write_tokens = (current.cache_write_tokens - previous.cache_write_tokens).max(0);
+    let output_tokens = (current.output_tokens - previous.output_tokens).max(0);
     RawUsage {
-        input_tokens: (current.input_tokens
-            - previous.map(|value| value.input_tokens).unwrap_or(0))
-        .max(0),
-        cached_input_tokens: (current.cached_input_tokens
-            - previous.map(|value| value.cached_input_tokens).unwrap_or(0))
-        .max(0),
-        output_tokens: (current.output_tokens
-            - previous.map(|value| value.output_tokens).unwrap_or(0))
-        .max(0),
+        input_tokens,
+        cached_input_tokens: (current.cached_input_tokens - previous.cached_input_tokens).max(0),
+        // 与 collectors.rs 的 delta() 同一条：跨写法差分必然为负，这里截 0 只是兜底，
+        // 真正的处理是调用方把"写法换了"当成累计序列断了、改读本条 last_token_usage。
+        cache_write_tokens,
+        cache_write_spelling: current.cache_write_spelling,
+        output_tokens,
         reasoning_output_tokens: (current.reasoning_output_tokens
-            - previous
-                .map(|value| value.reasoning_output_tokens)
-                .unwrap_or(0))
-        .max(0),
-        total_tokens: (current.total_tokens
-            - previous.map(|value| value.total_tokens).unwrap_or(0))
-        .max(0),
+            - previous.reasoning_output_tokens)
+            .max(0),
+        // total 只能由差分后的三列相加得到，不能"把上游 total 也差一次"：某一项被截 0
+        // 时（如 cache_write 因写法冲突回落）独立差出来的 total 会小于各列之和，
+        // 而事件缓存那一条 `Tokens::total()` 恒等于列和 —— 两个读者又分家。
+        total_tokens: input_tokens + cache_write_tokens + output_tokens,
     }
 }
 
@@ -1740,10 +1767,14 @@ fn convert_to_delta(raw: &RawUsage) -> ModelUsage {
         cached_input_tokens: raw.cached_input_tokens.min(raw.input_tokens),
         output_tokens: raw.output_tokens,
         reasoning_output_tokens: raw.reasoning_output_tokens,
+        // #75 第 3 项：缓存写入并入总量。本面板没有 cacheWrite 这一列（`ModelUsage` 同时
+        // 是日报表 `models` 的键值结构，加字段要连动前端与日报），所以 cache_write 只以
+        // total 的形式参与——这与事件缓存/legacy 那条 `total = input + cache_write + output`
+        // 是同一个数，`raw.total_tokens` 在两个构造点上都已按这三列相加得出。
         total_tokens: if raw.total_tokens > 0 {
             raw.total_tokens
         } else {
-            raw.input_tokens + raw.output_tokens
+            raw.input_tokens + raw.cache_write_tokens + raw.output_tokens
         },
         is_fallback: None,
     }
@@ -2309,6 +2340,100 @@ mod tests {
         assert_eq!(events.len(), collected.events.len());
         assert_eq!(collected.events[0].tokens.total(), 120);
         assert_eq!(events[0].total_tokens, 120);
+    }
+
+    /// #75 第 3 项：`cache_creation_input_tokens` / `cache_write_input_tokens` 两种写法
+    /// 只在 `collectors.rs::cache_write_of` 里判一次，第三个读者（会话回放）调用的是同一
+    /// 个实现，不是第三份抄本。修前本面板的 normalize_raw_usage 两个字段都不读：同一条
+    /// rollout 在这里的单次总量恒比事件缓存/legacy 少一个 cache_write（下面四条里三条
+    /// 不等），第四条（升级换了字段名）连"能不能跨写法差分"都判反了。
+    /// 黄金数与事件缓存一侧的 `codex_cache_write_spellings_conflict_and_switch`
+    /// （tests/sources.rs）对照同一批写法。
+    #[test]
+    fn replay_and_collector_agree_on_every_cache_write_spelling() {
+        let usage = |input: i64,
+                     cached: i64,
+                     output: i64,
+                     creation: Option<i64>,
+                     write: Option<i64>|
+         -> Value {
+            let mut map = serde_json::Map::new();
+            map.insert("input_tokens".into(), input.into());
+            map.insert("cached_input_tokens".into(), cached.into());
+            map.insert("output_tokens".into(), output.into());
+            map.insert("reasoning_output_tokens".into(), 0.into());
+            if let Some(v) = creation {
+                map.insert("cache_creation_input_tokens".into(), v.into());
+            }
+            if let Some(v) = write {
+                map.insert("cache_write_input_tokens".into(), v.into());
+            }
+            Value::Object(map)
+        };
+        let count = |total: Value, last: Value| {
+            serde_json::json!({"type":"token_count","turn_id":"turn-1","info":{"model":"gpt-5","total_token_usage":total,"last_token_usage":last}})
+        };
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            // 1) 只写 cache_write_input_tokens（新写法），首个采样取本轮量 → 880000
+            event_msg(
+                "2026-06-01T00:00:02.000Z",
+                count(
+                    usage(800_000, 600_000, 50_000, None, Some(30_000)),
+                    usage(800_000, 600_000, 50_000, None, Some(30_000)),
+                ),
+            ),
+            // 2) 同写法稳态差分 → Δ800000+10000+30000 = 440000
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                count(
+                    usage(1_200_000, 900_000, 80_000, None, Some(40_000)),
+                    usage(400_000, 300_000, 30_000, None, Some(10_000)),
+                ),
+            ),
+            // 3) 换成 cache_creation_input_tokens：累计序列来自另一个版本 → 按回落处理，
+            //    只认本轮量 200000+20000+20000 = 240000（跨写法差分会被 .max(0) 清零）
+            event_msg(
+                "2026-06-01T00:00:04.000Z",
+                count(
+                    usage(1_400_000, 1_000_000, 100_000, Some(60_000), None),
+                    usage(200_000, 100_000, 20_000, Some(20_000), None),
+                ),
+            ),
+            // 4) 两种写法同时出现且数值不等 → 拒读记 0，本轮只剩 Δinput 200000 + Δout 30000
+            event_msg(
+                "2026-06-01T00:00:05.000Z",
+                count(
+                    usage(1_600_000, 1_100_000, 130_000, Some(80_000), Some(90_000)),
+                    usage(200_000, 100_000, 30_000, Some(80_000), Some(90_000)),
+                ),
+            ),
+        ]
+        .join("\n");
+
+        let collected = crate::collectors::parse_jsonl("codex", "/tmp/session.jsonl", &raw);
+        let replay = parse_session_detail(record("/tmp/session.jsonl"), raw);
+        let events: Vec<_> = replay
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.token_events)
+            .collect();
+        assert_eq!(events.len(), collected.events.len(), "{:?}", collected.events);
+        assert_eq!(events.len(), 4);
+        for (display, event) in events.iter().zip(&collected.events) {
+            assert_eq!(display.input_tokens, event.tokens.input + event.tokens.cached);
+            assert_eq!(display.cached_input_tokens, event.tokens.cached);
+            assert_eq!(display.output_tokens, event.tokens.output);
+            assert_eq!(
+                display.total_tokens,
+                event.tokens.total(),
+                "同一轮在回放与事件缓存里必须是同一个总量（cache_write 两边同读一份规则）"
+            );
+        }
+        assert_eq!(
+            events.iter().map(|event| event.total_tokens).collect::<Vec<_>>(),
+            vec![880_000, 440_000, 240_000, 230_000]
+        );
     }
 
     #[test]
