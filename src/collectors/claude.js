@@ -11,6 +11,11 @@ import { tokenCount } from './tokens.js';
  * 同一 message.id + requestId 可能因流式分片/会话复制重复出现，全局去重。
  * model="<synthetic>" 是本地合成消息（无真实用量），跳过。
  * project 来自 rec.cwd：Windows 路径必须用 path.win32.basename，禁止 split('/')。
+ *
+ * #96：工具调用的会话回退链与事件行同一条（`rec.sessionId || rec.session_id || fileId`）。
+ * 这一处**不**升 SOURCES.version：`tool_calls.dedup_key` 里不含 session_id，全量重扫只会
+ * 以 INSERT OR IGNORE 命中同一行，一行归属也改不回来——升版只换来一次全量重扫的成本。
+ * 已入库的行保持原归属，修正只作用于之后写入的行。
  */
 export async function collectClaudeFile(store, { tool, path, fileId, offset }) {
   let inserted = 0;
@@ -62,7 +67,11 @@ export async function collectClaudeFile(store, { tool, path, fileId, offset }) {
           ts,
           tool,
           name: block.name,
-          session_id: rec.sessionId || fileId,
+          // #96：回退链必须与上面事件行（`rec.sessionId || rec.session_id || fileId`）
+          // 一模一样。此前少一级 `rec.session_id`：只写 snake_case 的网关/派生客户端
+          // 会把工具活动挂到 fileId（文件名）上，而用量挂在真正的 session_id 上——
+          // 同一次调用的工具与 token 因此在"按会话钻取"时分属两个会话。
+          session_id: rec.sessionId || rec.session_id || fileId,
           dedup_key: `${tool}:tc:${block.id || `${msg.id}:${i}`}`,
         });
       }

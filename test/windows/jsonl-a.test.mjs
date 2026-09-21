@@ -134,6 +134,50 @@ console.log('\n[claude] Windows cwd + CRLF + 半行 + 工具调用黄金数字')
   rmSync(tmp, { recursive: true, force: true });
 }
 
+console.log('\n[#96-6] 只写 session_id 的网关：工具行与事件行必须落在同一个会话');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'jsonl-a-sessionid-'));
+  const file = join(tmp, '.claude-gateway', 'projects', '-work-gw', 'gw-file-name.jsonl');
+  mkdirSync(dirname(file), { recursive: true });
+  // 派生网关只写 snake_case 的 session_id，且它和文件名（fileId）不是一回事。
+  // fileId 故意取一个和会话无关的值：修前工具行的回退链少一级，会掉到 fileId 上。
+  const rec = JSON.stringify({
+    timestamp: ISO(20000), type: 'assistant', requestId: 'rgw', session_id: 'gw-sess-42',
+    cwd: 'Q:\\work\\gwproj',
+    message: {
+      id: 'mgw', model: 'claude-opus-5',
+      usage: { input_tokens: 30, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 7 },
+      content: [
+        { type: 'text', text: 'hi' },
+        { type: 'tool_use', id: 'tu-a', name: 'Bash', input: {} },
+        { type: 'tool_use', id: 'tu-b', name: 'Read', input: {} },
+      ],
+    },
+  });
+  writeFileSync(file, crlf([rec]), 'utf8');
+  const store = makeStore();
+  await collectClaudeFile(store, { tool: 'ccmr', path: file, fileId: 'gw-file-name', offset: 0 });
+  const ev = eventsOf(store, 'ccmr');
+  const tc = toolsOf(store, 'ccmr');
+  ok('事件行用上了 session_id（不是 fileId）',
+    ev.length === 1 && ev[0].session_id === 'gw-sess-42', JSON.stringify(ev.map((e) => e.session_id)));
+  ok('两条 tool_use 都入库', tc.length === 2, JSON.stringify(tc.map((t) => t.name)));
+  ok('工具行也用上了 session_id（修前这里是 fileId）',
+    tc.every((t) => t.session_id === 'gw-sess-42'), JSON.stringify(tc.map((t) => t.session_id)));
+  // 用户可见的后果：按会话钻取时用量与工具活动要能join 上同一行。
+  const joined = store.db.prepare(`
+    SELECT e.session_id AS sid, e.total_tokens AS tok, COUNT(t.rowid) AS ntools
+    FROM events e LEFT JOIN tool_calls t ON t.session_id = e.session_id
+    WHERE e.tool = 'ccmr' GROUP BY e.session_id`).all();
+  ok('按会话钻取：一次调用的 token 与 2 次工具落在同一会话',
+    joined.length === 1 && joined[0].sid === 'gw-sess-42' && joined[0].tok === 37 && joined[0].ntools === 2,
+    JSON.stringify(joined));
+  ok('fileId 不再冒充会话（工具行上没有 gw-file-name）',
+    !tc.some((t) => t.session_id === 'gw-file-name'), JSON.stringify(tc.map((t) => t.session_id)));
+  closeStore(store);
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 console.log('\n[ccmr] 多 block 终结块输出 + 模型别名');
 {
   const tmp = mkdtempSync(join(tmpdir(), 'jsonl-a-ccmr-'));
