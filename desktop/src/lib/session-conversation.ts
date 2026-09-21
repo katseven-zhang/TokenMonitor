@@ -40,7 +40,23 @@ function timelineEntries(items: ReplayItem[]): TimelineEntry[] {
   for (const item of items) {
     if (item.kind === "tokenUsage") {
       const previousEntry = entries.findLast((entry) => isVisibleTimelineItem(entry.item));
-      if (previousEntry) {
+      const attached = previousEntry?.tokenUsage;
+      if (attached && attached.model === item.model) {
+        // Adjacent usage events (parallel tools, legacy fallback tails) fold into one
+        // badge instead of overwriting each other, so no request's volume or raw
+        // provenance disappears from the timeline.
+        previousEntry!.tokenUsage = {
+          ...attached,
+          inputTokens: attached.inputTokens + item.inputTokens,
+          cachedInputTokens: attached.cachedInputTokens + item.cachedInputTokens,
+          outputTokens: attached.outputTokens + item.outputTokens,
+          reasoningOutputTokens: attached.reasoningOutputTokens + item.reasoningOutputTokens,
+          totalTokens: attached.totalTokens + item.totalTokens,
+          rawJsonlLineNumbers: [...(attached.rawJsonlLineNumbers ?? []), ...(item.rawJsonlLineNumbers ?? [])],
+        };
+        continue;
+      }
+      if (previousEntry && !attached) {
         previousEntry.tokenUsage = item;
         continue;
       }
@@ -418,6 +434,7 @@ function parseNestedActivities(value: string | null, output: string | null): Nes
   const content = parseToolContentBlocks(output);
   const execResults = execResultsFromContent(content);
   let execIndex = 0;
+  let alignmentLost = false;
   let imageIndex = 0;
   const activities: NestedActivity[] = [];
   for (const call of nestedToolCalls(value)) {
@@ -425,9 +442,21 @@ function parseNestedActivities(value: string | null, output: string | null): Nes
     if (name === "exec_command") {
       const parsed = parseNestedToolCall(value.slice(callIndex), name);
       const command = typeof parsed?.cmd === "string" ? parsed.cmd : typeof parsed?.command === "string" ? parsed.command : null;
-      if (!command) continue;
+      if (!command) {
+        // Positional pairing is only trustworthy while every call is understood.
+        // Once one is not, we cannot know whether it consumed a result, so stop
+        // attributing outputs instead of shifting later commands onto the wrong
+        // result.
+        alignmentLost = true;
+        continue;
+      }
       const workdir = typeof parsed?.workdir === "string" ? parsed.workdir : typeof parsed?.cwd === "string" ? parsed.cwd : null;
-      activities.push({ kind: "command", command, workdir, output: execResults[execIndex++] ?? null });
+      activities.push({
+        kind: "command",
+        command,
+        workdir,
+        output: alignmentLost ? null : execResults[execIndex++] ?? null,
+      });
     } else if (name === "apply_patch") {
       const patch = parseStringArgument(value, argumentStart) ?? resolveStringVariable(value, argumentStart);
       if (patch) activities.push({ kind: "patch", patch });

@@ -8,8 +8,8 @@ function replayTurn(items: ReplayItem[]): SessionReplayDetail["turns"][number] {
 function command(cmd: string, overrides: Partial<Extract<ReplayItem, { kind: "toolCall" }>> = {}): ReplayItem {
   return { kind: "toolCall", callId: cmd, name: "exec_command", arguments: JSON.stringify({ cmd }), output: JSON.stringify({ exit_code: 0, output: "result" }), stderr: null, startedAt: null, completedAt: "2026-09-09", durationMs: 100, status: "completed", isError: false, ...overrides };
 }
-function usage(totalTokens: number): ReplayItem {
-  return { kind: "tokenUsage", timestamp: null, model: "gpt-5", inputTokens: totalTokens - 10, cachedInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 0, totalTokens };
+function usage(totalTokens: number, model = "gpt-5"): ReplayItem {
+  return { kind: "tokenUsage", timestamp: null, model, inputTokens: totalTokens - 10, cachedInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 0, totalTokens };
 }
 
 describe("conversation projection", () => {
@@ -102,6 +102,59 @@ describe("conversation projection", () => {
       { kind: "image", path: "/tmp/result.png", imageUrl: "data:image/png;base64,AA==" },
       { kind: "command", command: "git status --short", workdir: null, output: { stdout: "M src/a.ts", stderr: null, exitCode: 0, wallTimeSeconds: 0.1, sessionId: null } },
     ]);
+  });
+
+  it("stops attributing nested exec outputs once a call cannot be paired", () => {
+    const argumentsJson = [
+      'text(await tools.exec_command({workdir:"/x"}));',
+      'text(await tools.exec_command({cmd:"pnpm test"}));',
+      'text(await tools.exec_command({cmd:"git status --short"}));',
+    ].join(" ");
+    const nested = (output: string) => {
+      const block = buildConversation(replayTurn([command("", { name: "exec", arguments: argumentsJson, output })]))[0];
+      if (block.kind !== "item" || block.entry.item.kind !== "toolCall") throw new Error("Expected tool activity");
+      return block.entry.activity?.nestedActivities ?? [];
+    };
+    const results = (texts: string[]) => JSON.stringify(texts.map((text) => ({ type: "input_text", text })));
+
+    // Before the fix the second and third commands inherited the first result and
+    // its successor, so every command displayed another command's output.
+    expect(nested(results([
+      JSON.stringify({ exit_code: 1, output: "first call noise" }),
+      JSON.stringify({ exit_code: 0, output: "tests passed" }),
+      JSON.stringify({ exit_code: 0, output: "M src/a.ts" }),
+    ]))).toEqual([
+      { kind: "command", command: "pnpm test", workdir: null, output: null },
+      { kind: "command", command: "git status --short", workdir: null, output: null },
+    ]);
+    expect(nested(results([
+      JSON.stringify({ exit_code: 0, output: "M src/a.ts" }),
+      JSON.stringify({ exit_code: 0, output: "tests passed" }),
+    ]))).toEqual([
+      { kind: "command", command: "pnpm test", workdir: null, output: null },
+      { kind: "command", command: "git status --short", workdir: null, output: null },
+    ]);
+  });
+
+  it("folds adjacent usage events of the same model instead of dropping one", () => {
+    const blocks = buildConversation(replayTurn([command("cat a"), usage(100), usage(130)]));
+    expect(blocks).toHaveLength(1);
+    if (blocks[0].kind !== "exploration") throw new Error("Expected exploration");
+    expect(blocks[0].entries).toHaveLength(1);
+    expect(blocks[0].entries[0].tokenUsage?.totalTokens).toBe(230);
+    expect(blocks[0].entries[0].tokenUsage?.inputTokens).toBe(210);
+    expect(blocks[0].entries[0].tokenUsage?.outputTokens).toBe(20);
+  });
+
+  it("keeps adjacent usage events of different models as separate visible entries", () => {
+    const blocks = buildConversation(replayTurn([
+      command("cat a"), usage(100, "gpt-5"), usage(30, "claude-sonnet-4.5"),
+    ]));
+    const volumes = blocks.flatMap((block) => (block.kind === "exploration"
+      ? block.entries.map((entry) => entry.tokenUsage?.totalTokens ?? null)
+      : [block.entry.tokenUsage?.totalTokens ?? (block.entry.item.kind === "tokenUsage" ? block.entry.item.totalTokens : null)]));
+
+    expect(volumes).toEqual([100, 30]);
   });
 
   it("recognizes literal RTK read, search and list commands", () => {
