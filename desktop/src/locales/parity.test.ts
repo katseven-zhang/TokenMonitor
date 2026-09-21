@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import i18n from "../i18n";
 import en from "./en.json";
 import ja from "./ja.json";
 import zh from "./zh.json";
@@ -34,14 +35,17 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-// `t("a.b")`, `t('a.b')` and the `t(cond ? "a.b" : "a.c", …)` form all resolve a
-// literal key, so a missing translation only shows up at runtime in one language.
+// `t("a.b")`, `t('a.b')`, `t(`a.b`)` and the `t(cond ? "a.b" : "a.c", …)` form all resolve a
+// literal key, so a missing translation only shows up at runtime in one language. A template
+// literal that interpolates (`t(`a.${x}`)`) is deliberately not matched: it is dynamic, and
+// the keys it can produce are listed in DYNAMIC_KEYS instead.
 function referencedKeys(): Set<string> {
   const keys = new Set<string>();
   for (const file of sourceFiles(SRC_ROOT)) {
     const text = readFileSync(file, "utf8");
     for (const match of text.matchAll(/\bt\(\s*"([a-zA-Z0-9_.]+)"/g)) keys.add(match[1]);
     for (const match of text.matchAll(/\bt\(\s*'([a-zA-Z0-9_.]+)'/g)) keys.add(match[1]);
+    for (const match of text.matchAll(/\bt\(\s*`([a-zA-Z0-9_.]+)`/g)) keys.add(match[1]);
     for (const match of text.matchAll(/\?\s*"([a-zA-Z0-9_.]+)"\s*:\s*"([a-zA-Z0-9_.]+)"/g)) {
       for (const candidate of [match[1], match[2]]) {
         if (NAMESPACES.includes(candidate.split(".")[0])) keys.add(candidate);
@@ -64,9 +68,10 @@ function stripComments(text: string): string {
 
 const SRC_PREFIX = path.dirname(SRC_ROOT);
 
-// Task #103 owns the last two files that still bake Chinese into a lib module; the guard
-// turns red for them as soon as that exemption is dropped.
-const UNLOCALISED_MODULES = ["lib/quota-observations.ts", "lib/currency.tsx"];
+// The task #72 conversion and task #103's observations pass left nothing for this list to
+// excuse: every CJK literal in `desktop/src` now lives in a locale table. A new module that
+// bakes copy into code shows up in the scan below instead of needing an entry here.
+const UNLOCALISED_MODULES: string[] = [];
 
 function relative(file: string): string {
   return path.relative(SRC_PREFIX, file).replaceAll("\\", "/");
@@ -96,6 +101,12 @@ const DYNAMIC_KEYS = [
   "settings.lang_zh",
   "settings.lang_en",
   "settings.lang_ja",
+  // Task #103 moved the quota window names into locale keys that `lib/quota-observations.ts`
+  // returns as data (`quotaWindowLabel`) and the panel resolves through its own `t`, so no
+  // `t("…")` literal exists to scan. They are listed here instead.
+  "quota.window_five_hours",
+  "quota.window_seven_days",
+  "quota.window_minutes",
   ...Object.keys(tables.en).filter((key) => key.startsWith("sessions.detail.tool_argument_labels.")),
 ];
 
@@ -178,5 +189,30 @@ describe("locale tables", () => {
       .filter((file) => /[぀-ヿ一-鿿]/.test(stripComments(readFileSync(file, "utf8"))))
       .map(relative);
     expect(offenders).toEqual([]);
+  });
+
+  it("interpolates with {{double braces}} in every table", () => {
+    // A lone `{minutes}` is text i18next never fills in, and it has shipped here before.
+    // Stripping the correct form first means a value cannot fail for containing both.
+    const keys = [...new Set((["en", "zh", "ja"] as const).flatMap((locale) => Object.keys(tables[locale])))];
+    const offenders = keys.flatMap((key) =>
+      (["en", "zh", "ja"] as const)
+        // Whatever is left after the correct `{{name}}` form is removed has to be a brace
+        // i18next will never interpolate, spaces included.
+        .filter((locale) => /\{[^{}]*\}/.test((tables[locale][key] ?? "").replace(/\{\{[^}]*\}\}/g, "")))
+        .map((locale) => `${key} (${locale}): ${tables[locale][key]}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("fails a missing key at runtime instead of quietly storing one", () => {
+    // `saveMissing` would write an untranslated key back into the live table, which makes a
+    // gap indistinguishable from copy and hides exactly the drift the scan above catches.
+    // Built dynamically so the literal-key scan cannot see it: this key must stay absent.
+    const absent = ["parity", "no-such-key", "here"].join(".");
+    expect(i18n.options.saveMissing).toBeFalsy();
+    expect(i18n.exists(absent)).toBe(false);
+    expect(i18n.t(absent)).toBe(absent);
+    expect(i18n.exists("quota.window_five_hours")).toBe(true);
   });
 });

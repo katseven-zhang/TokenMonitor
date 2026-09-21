@@ -1,6 +1,6 @@
 import { CurrencyContext,currencyFromJson } from './lib/currency';
 import { CurrencySettings } from './components/currency-settings';
-import { useCallback,useEffect,useLayoutEffect,useState } from 'react';
+import { useCallback,useEffect,useLayoutEffect,useMemo,useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { debounce,SEARCH_DEBOUNCE_MS } from './lib/debounce';
 import { NOTICE_TTL_MS,dismissError,emptyErrorSlots,serverErrorSlot,visibleError,type ErrorSlot,type ErrorSlots } from './lib/banner';
@@ -38,7 +38,10 @@ export default function App(){
  const timeOrNull=(x:number|null)=>formatTimeOrNull(x,language);
  const tabs:[Tab,string][]=[['overview',t('tabs.overview')],['sessions',t('tabs.sessions')],['models',t('tabs.models')],['projects',t('tabs.projects')],['days',t('tabs.days')],['months',t('tabs.months')],['requests',t('tabs.requests')],['tools',t('tabs.tools')]];
  const [boot,setBoot]=useState<Bootstrap|null>(null),[q,setQ]=useState<Query>(initialQuery),[response,setData]=useState<Dashboard|null>(null),[tab,setTab]=useState<Tab>('overview');
- const currency=currencyFromJson(boot?.prices),money=currency.money;
+ // `money()` carries the unpriced label in its closure, so it is rebuilt when the price
+ // document or the interface language changes. `t` is stable within a language.
+ const currency=useMemo(()=>currencyFromJson(boot?.prices,t),[boot?.prices,t,i18n.language]);
+ const money=currency.money;
  const data=response&&sameQuery(response.query,q)?response:null;
  // Status rows are raw table content, so they are read once here and every reader below
  // uses the degraded shape instead of indexing fields that may not exist.

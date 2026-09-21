@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Dashboard } from '../lib/api';
-import { quotaHistoryRows, quotaWindows } from '../lib/quota-observations';
+import { quotaHistoryRows, quotaWindowName, quotaWindows } from '../lib/quota-observations';
 import { sharedQuotaClock, type QuotaClock } from '../lib/quota-clock';
 import { formatCount, formatTimestamp } from '../lib/localized-format';
 import { QuotaWindowCountdown } from './quota-countdown';
@@ -27,7 +27,7 @@ export function QuotaPanel({data, clock = sharedQuotaClock()}:{data:QuotaPanelDa
     <div className="panel-heading"><h2>{t('quota.title')}</h2><span>{latest?t('quota.observed_at',{value:formatTimestamp(latest.ts,language)}):t('quota.none_yet')}</span></div>
     <p className="table-note">{t('quota.disclaimer')}</p>
     <div className="quota-grid">{windows.map(window=><div key={window.key} className="quota-card">
-      <h3>{window.label}</h3><strong>{percent(window.remaining)}<span> {t('quota.remaining_label')}</span></strong>
+      <h3>{quotaWindowName(window,t)}</h3><strong>{percent(window.remaining)}<span> {t('quota.remaining_label')}</span></strong>
       <div className="bar-track"><i style={{width:`${window.remaining??0}%`}}/></div>
       <small><QuotaWindowCountdown reset={window.reset} language={language} clock={clock}/></small>
     </div>)}</div>

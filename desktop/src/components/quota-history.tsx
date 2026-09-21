@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import type { QuotaHistoryRow } from '../lib/quota-observations';
+import { quotaWindowName, type QuotaHistoryRow } from '../lib/quota-observations';
 import { formatTimestamp } from '../lib/localized-format';
 
 /**
@@ -17,7 +17,7 @@ export function QuotaHistoryTable({ rows, language }:{rows:QuotaHistoryRow[];lan
       <th>{t('quota.col_remaining')}</th><th>{t('quota.col_reset')}</th><th>{t('quota.col_session')}</th>
     </tr></thead>
     <tbody>{rows.map((row,index)=><tr key={`${row.ts}:${row.session}:${row.key}:${index}`}>
-      <td>{formatTimestamp(row.ts, language)}</td><td>{row.label}</td>
+      <td>{formatTimestamp(row.ts, language)}</td><td>{quotaWindowName(row,t)}</td>
       <td className="number">{percent(row.used)}</td><td className="number">{percent(row.remaining)}</td>
       <td>{row.reset === null ? t('quota.unrecorded') : formatTimestamp(row.reset, language)}</td>
       <td className="long-cell">{row.session}</td>
