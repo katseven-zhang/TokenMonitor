@@ -1,5 +1,13 @@
 # 固定 Rust 工具链（#41）：本地与 CI 同版本，避免「本地过 CI 红」的工具链漂移。
-# 升级需显式改这里并同步跑 windows/gui 与 windows/tray 两个 crate 的零 warning 构建门。
+# 生效范围是仓库里唯一的一份 rust-toolchain.toml（rustup 从工作目录向上找最近的一份，
+# 三个 crate 之上都没有更近的），所以它同时钉住三个 crate：
+#   windows/gui、windows/tray、desktop/src-tauri（#90：这一条原先只写了前两个）。
+# 升级需显式改这里，并同步跑三条线的零 warning 构建门——windows.yml 的
+# `cargo build --release`（gui/tray，RUSTFLAGS=-Dwarnings）与 desktop.yml 的
+# `cargo test` / 桌面打包（src-tauri，同样 -Dwarnings）。
+# channel 与各 crate 的 rust-version 是两件事，不要混为一谈：下限按"代码与依赖真的
+# 要求多少"各自声明（gui/tray 1.70；src-tauri 1.89，它用到 File::try_lock），钉的
+# 版本只要 ≥ 三者最大值就不冲突；抬高 channel 不等于抬高任何一条线的下限。
 [toolchain]
 channel = "1.98.0"
 profile = "minimal"
