@@ -48,6 +48,9 @@ export async function collectPiFile(store, { tool, path, fileId, offset, state, 
 
     const ts = Date.parse(rec.timestamp) || Number(msg.timestamp) || 0;
     if (!ts) return;
+    // 事件与工具调用共用这一个消息键：id 缺失时退回 responseId；两者都没有就不入库——
+    // 编不出稳定去重键的事件，一旦触发全量重扫就会变成重复计数，宁可少一条也不能多一条。
+    const key = rec.id ?? msg.responseId;
 
     // 工具调用与用量互不依赖：一条 assistant 消息可能只带其中之一
     if (Array.isArray(msg.content)) {
@@ -56,16 +59,18 @@ export async function collectPiFile(store, { tool, path, fileId, offset, state, 
         if (block?.type !== 'toolCall' || !block.name) continue;
         store.insertToolCall({
           ts, tool, name: block.name, session_id: sessionId,
-          dedup_key: `${tool}:tc:${sessionId}:${block.id || i}`,
+          // #86 第 5 项：无 id 的块原来只按"消息内块下标"定键（`block.id || i`），而
+          // tool_calls.dedup_key 是 UNIQUE —— 同一会话里两条消息各自的第 0 个无 id 块
+          // 就共用一个键，后一条被 INSERT OR IGNORE 静默吞掉，工具榜少计。掺入消息键
+          // 后不再互撞；**有 id 的块键形一字不变**，存量行不位移（消息键也没有时退回
+          // 采样时刻，仍是稳定坐标）。
+          dedup_key: `${tool}:tc:${sessionId}:${block.id || `${key ?? ts}:${i}`}`,
         });
       }
     }
 
     const u = msg.usage;
     if (!u) return;
-    // id 缺失时退回 responseId；两者都没有就不入库——编不出稳定去重键的事件，
-    // 一旦触发全量重扫就会变成重复计数，宁可少一条也不能多一条。
-    const key = rec.id ?? msg.responseId;
     if (!key) return;
 
     // #96：字符串形态的用量字段必须先转整数再相加，否则 total 是拼接出来的天文数字
