@@ -2310,6 +2310,16 @@ console.log('\n[27] CI workflow 卫生（#102）：超时 / 最小权限 / SHA �
       const t = /timeout-minutes:\s*(\d+)/.exec(j.body);
       ok(`#102 ${n}/${j.name} 有 timeout-minutes`, !!t && Number(t[1]) > 0 && Number(t[1]) <= 90, t ? t[1] : '缺失');
       allJobs.push({ file: n, ...j });
+      /* #102：缓存命中要求的是"cargo 真的在这里工作"。rust-cache 把 workspaces 按
+       * 空白切分，所以带空格的路径会被切成两个不存在的根；而即使 workspaces 本身
+       * 写对了，同一个 job 里把仓库 checkout 到含空格目录（`path: 'Token Monitor'`）
+       * 也会让相对路径解析到别处去。两条一起守，缺陷才不会再以另一种形式回来。 */
+      if (/^ +workspaces:/m.test(j.body)) {
+        const bases = [...j.body.matchAll(/^ +(?:path|working-directory):\s*([^#\n]+?)\s*(?:#.*)?$/gm)]
+          .map((m) => m[1].replace(/^['"]|['"]$/g, ''));
+        ok(`#102 ${n}/${j.name} 用缓存，故其 checkout path/working-directory 不得含空白`,
+          bases.every((b) => !/\s/.test(b)), bases.join(' | ') || '（默认路径）');
+      }
     }
     // action 一律按 SHA 固定。正则必须吃下所有 `uses:` 写法：第三方 action 在
     // `- name: ...` 下面另起一行（`        uses: Swatinem/rust-cache@…`），早期版本
@@ -2347,6 +2357,96 @@ console.log('\n[27] CI workflow 卫生（#102）：超时 / 最小权限 / SHA �
   ok('#102 SHA 固定守卫至少扫到一个非 actions/ 的第三方 action',
     thirdParty.size >= 1, [...thirdParty].join(',') || '一个都没扫到（正则又瞎了）');
 
+  /* ---- #102：触发器路径过滤（docs-only 变更不再点燃昂贵的构建） ----
+   * 没有 paths 时，改一行 README 会跑满 windows.yml 的原生矩阵与 desktop.yml 那条
+   * 45 分钟的 Rust 构建；而清单写窄了又会变成"改了却没门在跑"——同样是静默失败。
+   * 所以这里不是"有 paths 就行"，而是逐个 workflow 核对三件事：
+   *  1) 本文件自己必须在清单里（改 CI 仍然要测 CI）；
+   *  2) 该 workflow 真正编译/执行的目录逐个点名（清单漏一项＝那条线永不被测）；
+   *  3) 纯文档模式不得出现在昂贵 job 的白名单里（否则过滤等于没做）。
+   * test.yml 走的是反向清单（paths-ignore）：它的守卫会读文档与 workflow 文本，
+   * 所以除图片之类的不计其数，宁可多跑也不漏跑；它的 push 故意不加过滤，
+   * main 上的每次合并都要有全平台一次真验证。
+   */
+  const PATH_FILTERS = {
+    'windows.yml': {
+      mode: 'paths', bothTriggers: true, min: 9,
+      self: '.github/workflows/windows.yml',
+      must: ['windows/**', 'src/**', 'bin/**', 'web/**', 'test/**', 'scripts/**',
+        'package.json', 'package-lock.json', 'rust-toolchain.toml'],
+      forbid: [/\.md$/, /^docs\//],
+      why: 'Node 冒烟 + npm test + gui/tray 两个原生 crate',
+    },
+    'desktop.yml': {
+      mode: 'paths', bothTriggers: true, min: 4,
+      self: '.github/workflows/desktop.yml',
+      must: ['desktop/**', 'LICENSE', 'rust-toolchain.toml'],
+      forbid: [/\.md$/, /^docs\//, /^src\//],
+      why: 'desktop/** 整棵构建树；LICENSE 会被复制进包且 verify-package.ps1 比对它的哈希',
+    },
+    'test.yml': {
+      // test.yml 走反向清单：它的守卫（[26]/[27]/[28]）会读文档与 workflow 文本，
+      // 所以能安全忽略的只有二进制资产。这里明令禁止把源码或 workflow 放进忽略表。
+      mode: 'paths-ignore', bothTriggers: false, min: 1,
+      self: '.github/workflows/test.yml',
+      must: [],
+      forbid: [/\.js$/, /\.mjs$/, /^src\//, /^\.github\/workflows\//],
+      why: 'npm test 的守卫会读文档与 workflow 文本，只有二进制资产才可以被忽略',
+    },
+  };
+  for (const n of wfNames) {
+    const spec = PATH_FILTERS[n];
+    ok(`#102 ${n} 在触发器清单里（没有清单＝规则没落地）`, !!spec, n);
+    if (!spec) continue;
+    const text = readFileSync(join(WF_DIR, n), 'utf8');
+    const trig = ciPathFilters(text);
+    ok(`#102 ${n} 解析出了 pull_request 触发器（解析器没瞎）`, !!trig.pull_request,
+      Object.keys(trig).join(','));
+    const pr = (trig.pull_request || {})[spec.mode] || [];
+    ok(`#102 ${n} 的 pull_request 带 ${spec.mode} 清单`, pr.length >= spec.min,
+      `${pr.length} 条：${pr.join(' ') || '（空——docs-only 仍会触发这个 workflow）'}`);
+    // 白名单要"含本文件"，反向清单要"不含本文件"——两种模式的方向相反，判错方向
+    // 就等于把"改 CI 仍要测 CI"这条规则反过来用（把它忽略掉）。
+    if (spec.mode === 'paths') {
+      ok(`#102 ${n} 的白名单含本文件（改 CI 仍要测 CI）`, pr.includes(spec.self), spec.self);
+    } else {
+      ok(`#102 ${n} 没有把本文件放进忽略清单（改 CI 仍要测 CI）`, !pr.includes(spec.self), spec.self);
+    }
+    for (const p of spec.must) ok(`#102 ${n} 的清单覆盖它真正构建的 ${p}`, pr.includes(p), spec.why);
+    for (const re of spec.forbid) {
+      const hit = pr.filter((p) => re.test(p));
+      ok(`#102 ${n} 的 ${spec.mode} 里没有 ${re}（否则该过滤等于没做）`, hit.length === 0, hit.join(' '));
+    }
+    if (spec.bothTriggers) {
+      const push = (trig.push || {})[spec.mode] || [];
+      ok(`#102 ${n} 的 push 也带同一份清单（合并到 main 不该比 PR 少测）`,
+        push.length === pr.length && push.every((p, i) => p === pr[i]),
+        `push=${push.join(' ')} PR=${pr.join(' ')}`);
+    } else {
+      ok(`#102 ${n} 的 push 故意不过滤（main 每次合并都要全平台跑一次）`,
+        !(((trig.push || {})['paths'] || []).length + ((trig.push || {})['paths-ignore'] || []).length),
+        JSON.stringify(trig.push || {}));
+    }
+  }
+
+  /* ---- #102：零告警门要盖住每一条编译线，不能只有 windows.yml 有 ----
+   * 判的是"跑 cargo 的那个步骤自己带 RUSTFLAGS=-Dwarnings"，不是文件里出现过这串字：
+   * 挂在别的步骤上等于没挂（env 是按步骤生效的）。 */
+  const BUILD_STEPS = [
+    { file: 'windows.yml', re: /cargo build --release --manifest-path windows\/gui/ },
+    { file: 'windows.yml', re: /cargo build --release --manifest-path windows\/tray/ },
+    { file: 'desktop.yml', re: /cargo test --offline --locked --tests/ },
+    { file: 'desktop.yml', re: /desktop\/scripts\/build-windows\.ps1/ },
+  ];
+  for (const { file, re } of BUILD_STEPS) {
+    const step = ciStepWithRun(readFileSync(join(WF_DIR, file), 'utf8'), re);
+    ok(`#102 ${file} 找到了 ${re.source.slice(0, 40)}… 那一步（步骤级判定不能靠全文匹配）`, !!step, re.source);
+    if (step) {
+      ok(`#102 ${file} 的该步骤带 RUSTFLAGS=-Dwarnings（桌面与原生同一条标准）`,
+        /RUSTFLAGS:[ \t]*['"]?-Dwarnings/.test(step.body), step.body.split(/\r?\n/)[0]);
+    }
+  }
+
   /* ---- 负例自检：证明上面每一条都会红 ---- */
   {
     const dirty = [
@@ -2374,6 +2474,26 @@ console.log('\n[27] CI workflow 卫生（#102）：超时 / 最小权限 / SHA �
       indented.length === 1 && indented[0].ref === 'o/r@v4' && indented[0].comment === '', JSON.stringify(indented));
     ok('#102 自检·SHA 固定 + 版本注释的写法判绿',
       /^[0-9a-f]{40}$/.test('11d5960a326750d5838078e36cf38b85af677262') && /^v?\d/.test('v4.4.0'));
+    /* 新增三条规则的负例：不解析真文本就宣布"守卫会红"是空话，这里全部走真函数 */
+    const noFilter = ciPathFilters("on:\n  push:\n    branches: [main]\n  pull_request:\njobs:\n  a:\n    runs-on: x\n");
+    ok('#102 自检·pull_request 没有 paths 清单时判红',
+      !noFilter.pull_request || !(noFilter.pull_request.paths || []).length, JSON.stringify(noFilter));
+    const drifted = ciPathFilters("on:\n  pull_request:\n    paths:\n      - '.github/workflows/desktop.yml'\n      - 'desktop/**'\n  push:\n    paths:\n      - 'desktop/**'\njobs:\n  a:\n    runs-on: x\n");
+    ok('#102 自检·push 与 pull_request 两份清单走岔时判红',
+      JSON.stringify(drifted.push.paths) !== JSON.stringify(drifted.pull_request.paths),
+      JSON.stringify(drifted));
+    const docsTrigger = ciPathFilters("on:\n  pull_request:\n    paths:\n      - '.github/workflows/a.yml'\n      - 'docs/**'\n      - '**/*.md'\n      - 'x/**'\n      - 'y/**'\n");
+    ok('#102 自检·白名单里出现 docs 模式时判红（docs-only 仍会触发＝过滤没做）',
+      docsTrigger.pull_request.paths.some((p) => /\.md$|^docs\//.test(p)), JSON.stringify(docsTrigger));
+    const ignoreCode = ciPathFilters("on:\n  pull_request:\n    paths-ignore:\n      - '**/*.png'\n      - 'src/**/*.js'\n");
+    ok('#102 自检·paths-ignore 里忽略了源码时判红',
+      ignoreCode.pull_request['paths-ignore'].some((p) => /\.js$|^src\//.test(p)), JSON.stringify(ignoreCode));
+    const gateElsewhere = ciStepWithRun('jobs:\n  a:\n    steps:\n      - name: unrelated\n        env:\n          RUSTFLAGS: \'-Dwarnings\'\n        run: echo hi\n      - name: build\n        run: cargo build --release\n', /cargo build --release/);
+    ok('#102 自检·-Dwarnings 挂在别的步骤上判红（步骤级判定不被全文匹配糊过去）',
+      !!gateElsewhere && !/RUSTFLAGS/.test(gateElsewhere.body), gateElsewhere && gateElsewhere.body);
+    const spacedCheckout = parseCiJobs('jobs:\n  a:\n    steps:\n      - uses: actions/checkout\n        with:\n          path: \'Token Monitor\'\n      - uses: rust-cache\n        with:\n          workspaces: windows/gui\n');
+    ok('#102 自检·用缓存的 job 把仓库 checkout 到含空格目录时判红',
+      spacedCheckout[0].body.match(/^ +path:\s*([^#\n]+?)\s*(?:#.*)?$/m)[1].includes(' '), spacedCheckout[0].body);
   }
 }
 
@@ -2432,12 +2552,15 @@ console.log('\n[28] 仓库卫生（#74）：文档不含本机路径 / 桌面打
   ok('#74 登记的示例路径确实只登记了"示例"（含真实用户目录的一律不收）',
     DOC_PATH_EXAMPLES.every((e) => !/[A-Za-z]:[\\/](Users|home)[\\/]|\/Users\/|\/home\//i.test(e.needle)));
 
-  /* ---- 桌面打包指纹的输入表 ---- */
+  /* ---- 桌面打包指纹的输入表 ----
+   * #102：这张表所在的变量原名 `$inputs`，与 PowerShell 的自动变量 `$input` 只差一个
+   * 字母（另一条打包脚本已经开着 Set-StrictMode），已改名 `$fingerprintInputs`；
+   * 这里的正则跟着一起改，否则"只有一处定义"会因为匹配不到而变成 0===1 的假红。 */
   const BUILD_PS1 = 'desktop/scripts/build-windows.ps1';
   const ps1 = readFileSync(join(ROOT, BUILD_PS1), 'utf8');
-  const tableLines = ps1.match(/^\$inputs = @\([^)]*\)/gm) || [];
+  const tableLines = ps1.match(/^\$fingerprintInputs = @\([^)]*\)/gm) || [];
   ok('#74 打包指纹输入表存在且只有一处定义', tableLines.length === 1, String(tableLines.length));
-  const inputs = (tableLines[0] || '').replace(/^\$inputs = @\(/, '').replace(/\)$/, '')
+  const inputs = (tableLines[0] || '').replace(/^\$fingerprintInputs = @\(/, '').replace(/\)$/, '')
     .split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
   ok('#74 输入表解析出了条目（不是空转的正则）', inputs.length >= 10, inputs.join(','));
   // 每一项都会改变前端/原生产物或它们的依赖闭包；tsconfig.json 是 #74 报出的漏项
@@ -2452,8 +2575,8 @@ console.log('\n[28] 仓库卫生（#74）：文档不含本机路径 / 桌面打
     ok(`#74 打包指纹的 ${p} 指向真实文件/目录`, existsSync(join(ROOT, 'desktop', ...p.split('\\'))), p);
   }
   ok('#74 打包前与打包后各比一次指纹（缺一次就守不住"构建期被改"）',
-    (ps1.match(/Get-PackageFingerprint \(\$inputs \+ 'dist'\)/g) || []).length >= 2
-    && (ps1.match(/Get-PackageFingerprint \$inputs/g) || []).length >= 2);
+    (ps1.match(/Get-PackageFingerprint \(\$fingerprintInputs \+ 'dist'\)/g) || []).length >= 2
+    && (ps1.match(/Get-PackageFingerprint \$fingerprintInputs/g) || []).length >= 2);
 
   /* ---- 负例自检：证明这一节的门会红 ---- */
   {
@@ -2466,6 +2589,134 @@ console.log('\n[28] 仓库卫生（#74）：文档不含本机路径 / 桌面打
       !MACHINE_PATH.test('Note: see http://127.0.0.1:8787 for details'));
     ok('#74 自检·文档守卫真的读过文档（读了 0 行就会在这里红）',
       docs.files.length > 0 && readFileSync(join(ROOT, docs.files[0]), 'utf8').split(/\r?\n/).length > 3);
+  }
+}
+
+/* ---------- [29] 打包脚本与 crate 清单守卫（#102） ---------- */
+console.log('\n[29] 打包脚本与 crate（#102）：版本单一来源 / 输出目录先清后建 / MSRV 声明 / 无自动变量名地雷');
+{
+  /*
+   * [27] 守的是 workflow 文本，这一节守的是 workflow 调用的那两支 PowerShell 脚本
+   * 与三个 Cargo.toml——#102 的另外几条缺陷全长在这里，而且都属于"错了也只是 quietly
+   * wrong"：manifest 写死版本、输出目录不清洗（上一轮的残留被报成白名单不符）、
+   * 三个 crate 都不写 rust-version。每条都配负例自检。
+   */
+  const BUILD = 'desktop/scripts/build-windows.ps1';
+  const VERIFY = 'desktop/scripts/verify-package.ps1';
+  const build = readFileSync(join(ROOT, BUILD), 'utf8');
+  const verify = readFileSync(join(ROOT, VERIFY), 'utf8');
+  const tauriConf = JSON.parse(readFileSync(join(ROOT, 'desktop', 'src-tauri', 'tauri.conf.json'), 'utf8'));
+
+  /* ---- 1. 版本只有一个真相来源：src-tauri/tauri.conf.json ---- */
+  ok('#102 tauri.conf.json 自己声明了 version（否则下面的"读它"是空转）',
+    /^\d+\.\d+\.\d+/.test(String(tauriConf.version)), String(tauriConf.version));
+  ok('#102 打包脚本从 tauri.conf.json 取路径而不是另抄一份版本号',
+    /tauriConfigPath\s*=\s*Join-Path[^\n]*src-tauri\\tauri\.conf\.json/.test(build), '没读到配置路径');
+  ok('#102 打包脚本把读出来的版本写进 manifest',
+    /\$appVersion\s*=\s*\[string\]\$tauriConfig\.version/.test(build)
+      && /version=\$appVersion/.test(build), 'manifest 里没有 $appVersion');
+  // 硬编码字面量必须彻底消失（`version='2.0.0'` 这类一旦存在，读到的真版本就没人用了）
+  const literals = build.split(/\r?\n/).filter((l) => /version\s*=\s*['"]\d/.test(l) && !/^\s*#/.test(l));
+  ok('#102 打包脚本里没有写死的版本号字面量', literals.length === 0, literals.join(' | '));
+  ok('#102 取不到版本时构建失败（宁可没有产物，也不要一个编造的版本）',
+    /IsNullOrWhiteSpace\(\$appVersion\)/.test(build));
+  /* 交叉断言：verify-package.ps1 必须拿包内 manifest 反查同一个配置文件。
+   * 判定看的是"比较与 throw 在同一条语句上"——把 throw 换成 Write-Warning 是这类门
+   * 最常见的死法（比较还在、输出还在、故障不再让 CI 红），只看文件里有没有 throw 是守不住的。 */
+  ok('#102 verify-package.ps1 读 src-tauri/tauri.conf.json 做版本交叉断言',
+    /desktop\/src-tauri\/tauri\.conf\.json/.test(verify) && /\$declaredVersion\s*=\s*\[string\]\$tauriConf\.version/.test(verify));
+  ok('#102 verify-package.ps1 版本漂移时同一条语句就 throw（不是只打一行日志）',
+    /if \(\[string\]\$manifest\.version -ne \$declaredVersion\) \{ throw/.test(verify));
+
+  /* ---- 2. $outputRoot 先清后建，且清理范围只有这一个目录 ---- */
+  const cleanAt = build.search(/Remove-Item\s+-LiteralPath\s+\$outputRoot/);
+  const createAt = build.search(/New-Item\s+-ItemType Directory\s+-Path\s+\$outputRoot/);
+  ok('#102 打包脚本会清理输出目录（残留文件会被 verify 报成白名单不符）', cleanAt >= 0);
+  ok('#102 清理发生在创建之前（顺序反了就是删完又建、建完不再删）',
+    cleanAt >= 0 && createAt >= 0 && cleanAt < createAt, `clean=${cleanAt} create=${createAt}`);
+  ok('#102 清理前有绝对路径核对（路径被改写时宁可不删）',
+    /Resolve-Path[\s\S]{0,120}-ine\s+\$outputRoot/.test(build));
+  // 清理范围不得放宽：dist\ 根、dist\windows-x64（旧发布线）都碰不得
+  const broad = build.split(/\r?\n/).filter((l) =>
+    /Remove-Item/.test(l) && !/\$outputRoot/.test(l) && !/^\s*#/.test(l));
+  ok('#102 除 $outputRoot 外没有任何更宽的 Remove-Item', broad.length === 0, broad.join(' | '));
+
+  /* ---- 3. MSRV：三个 crate 都要写，且写的值来自代码而不是工具链钉版 ---- */
+  const TOOLCHAIN_PIN = (readFileSync(join(ROOT, 'rust-toolchain.toml'), 'utf8')
+    .match(/channel\s*=\s*["']?(\d+\.\d+)/) || [])[1];
+  // 稳定标记取自本机 rust-src 的真实元数据（不是猜的）：用了这些 API 就要 >= 这个版本
+  const API_FLOOR = [
+    { api: /\.try_lock\(/, name: 'File::try_lock（FileLock）', since: '1.89' },
+    { api: /\.is_none_or\(/, name: 'Option::is_none_or', since: '1.82' },
+    { api: /std::sync::OnceLock/, name: 'std::sync::OnceLock', since: '1.70' },
+  ];
+  const CRATES = { 'desktop/src-tauri': 'desktop/src-tauri/src', 'windows/gui': 'windows/gui/src', 'windows/tray': 'windows/tray/src' };
+  const listSrc = (dir) => { try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
+  ok('#102 rust-toolchain.toml 的 channel 解析出来了（自检基准存在）', /^\d+\.\d+/.test(String(TOOLCHAIN_PIN)), String(TOOLCHAIN_PIN));
+  for (const [dir, srcDir] of Object.entries(CRATES)) {
+    const manifest = readFileSync(join(ROOT, dir, 'Cargo.toml'), 'utf8');
+    const m = /^rust-version\s*=\s*["'](\d+\.\d+)/m.exec(manifest);
+    ok(`#102 ${dir}/Cargo.toml 声明了 rust-version`, !!m, m ? m[1] : '缺失');
+    if (!m) continue;
+    ok(`#102 ${dir} 的 rust-version 不是照抄工具链钉版`, m[1] !== TOOLCHAIN_PIN,
+      `声明 ${m[1]} / 钉版 ${TOOLCHAIN_PIN}`);
+    const abs = join(ROOT, srcDir);
+    const sources = listSrc(abs).filter((e) => e.isFile() && e.name.endsWith('.rs'))
+      .map((e) => readFileSync(join(abs, e.name), 'utf8')).join('\n');
+    ok(`#102 ${srcDir} 真的读到了 Rust 源码（否则下面的 API 下限判定是空转）`, sources.length > 500, `${sources.length} 字节`);
+    for (const { api, name, since } of API_FLOOR) {
+      if (!api.test(sources)) continue;
+      ok(`#102 ${dir} 用到 ${name} → rust-version ≥ ${since}`,
+        atLeast(m[1], since), `声明 ${m[1]} < ${since}`);
+    }
+  }
+
+  /* ---- 4. 指纹输入表的变量名不再撞 PowerShell 自动变量 ---- */
+  ok('#102 打包脚本不再使用与自动变量 $input 只差一个字母的 $inputs',
+    !/^\$inputs\s*=/m.test(build) && !/\(\$inputs \+/m.test(build) && !/Get-PackageFingerprint \$inputs\b/m.test(build));
+  ok('#102 改名后的输入表被每一处指纹调用真正引用（改名不会留下悬空引用）',
+    (build.match(/Get-PackageFingerprint \$fingerprintInputs/g) || []).length >= 2
+      && (build.match(/Get-PackageFingerprint \(\$fingerprintInputs \+ 'dist'\)/g) || []).length >= 2);
+
+  /* ---- 负例自检：证明这一节的门会红 ----
+   * 每段假文本都故意"只差一处"，判定式与上面的真判定式一模一样（同一套正则），
+   * 这样正则被改坏时这里也会跟着失效，不会出现"门瞎了但自检仍然绿"。 */
+  {
+    const noClean = build.replace(/Remove-Item -LiteralPath \$outputRoot -Recurse -Force/, 'Write-Host "skip clean"');
+    ok('#102 自检·输出目录不清理时判红', !/Remove-Item\s+-LiteralPath\s+\$outputRoot/.test(noClean));
+    const cleanAfterCreate = build.replace(/if \(Test-Path -LiteralPath \$outputRoot\) \{[\s\S]*?\n    \}\n/, '');
+    ok('#102 自检·清理顺序在创建之后时判红',
+      cleanAfterCreate.search(/Remove-Item\s+-LiteralPath\s+\$outputRoot/)
+        >= cleanAfterCreate.search(/New-Item\s+-ItemType Directory\s+-Path\s+\$outputRoot/)
+        || !/Remove-Item\s+-LiteralPath\s+\$outputRoot/.test(cleanAfterCreate));
+    const broadClean = build.replace(/Remove-Item -LiteralPath \$outputRoot/, "Remove-Item -LiteralPath (Join-Path $repositoryRoot 'dist')");
+    ok('#102 自检·清理放宽到 dist 根时判红',
+      broadClean.split(/\r?\n/).some((l) => /Remove-Item/.test(l) && !/\$outputRoot/.test(l) && !/^\s*#/.test(l)));
+    const fixedVersion = build.replace(/version=\$appVersion/, "version='2.0.0'");
+    ok('#102 自检·manifest 里出现写死的版本号时判红',
+      fixedVersion.split(/\r?\n/).some((l) => /version\s*=\s*['"]\d/.test(l) && !/^\s*#/.test(l)));
+    const noVersionGuard = build.replace(/if \(\[string\]::IsNullOrWhiteSpace\(\$appVersion\)\)[^\n]*/, '');
+    ok('#102 自检·取不到版本却继续构建时判红', !/IsNullOrWhiteSpace\(\$appVersion\)/.test(noVersionGuard));
+    // 把同一条语句里的 throw 换成 Write-Warning：比较还在、文本还在，但故障不再让 CI 红
+    const warnInstead = verify.replace(/if \(\[string\]\$manifest\.version -ne \$declaredVersion\) \{ throw/,
+      'if ([string]$manifest.version -ne $declaredVersion) { Write-Warning');
+    ok('#102 自检·版本漂移只 Write-Warning 时判红',
+      !/if \(\[string\]\$manifest\.version -ne \$declaredVersion\) \{ throw/.test(warnInstead));
+    // 注意 \r：verify-package.ps1 在工作区里是 CRLF，`}` 后面跟的是 \r\n。
+    // 这里如果只写 \n，replace 就是空操作，自检会"以为删掉了其实没删"，
+    // 于是门与自检同时失真——正是本文件反复在防的那种绿。
+    const noCompare = verify.replace(/if \(\[string\]\$manifest\.version -ne \$declaredVersion\) \{[^\n]*\}[ \t]*\r?\n/, '');
+    ok('#102 自检·verify 端整条比较被删掉时判红',
+      noCompare !== verify && !/if \(\[string\]\$manifest\.version -ne \$declaredVersion\) \{ throw/.test(noCompare));
+    const noMsrv = '[package]\nname = "x"\nedition = "2021"\n';
+    ok('#102 自检·crate 不声明 rust-version 时判红', !/^rust-version\s*=\s*["']\d+\.\d+/m.test(noMsrv));
+    ok('#102 自检·照抄工具链钉版判红，且 1.70 的声明守不住需要 1.89 的 try_lock',
+      '1.70' === '1.70' && !atLeast('1.70', '1.89') && atLeast('1.89', '1.89') && atLeast('1.90', '1.89'));
+    const oldVarName = build.replace(/\$fingerprintInputs = @/, '$inputs = @');
+    ok('#102 自检·变量名退回 $inputs 时判红', /^\$inputs\s*=/m.test(oldVarName));
+    const dangling = build.replace(/Get-PackageFingerprint \$fingerprintInputs/g, 'Get-PackageFingerprint $other');
+    ok('#102 自检·改名后仍有调用指向旧名（悬空引用）时判红',
+      (dangling.match(/Get-PackageFingerprint \$fingerprintInputs/g) || []).length < 2);
   }
 }
 
@@ -2485,6 +2736,58 @@ function read(p) { return readFileSync(p, 'utf8'); }
 function ciUsesRefs(text) {
   const re = /^[ \t]*(?:-[ \t]+)?uses:[ \t]*([^\s#]+)(?:[ \t]+#[ \t]*(\S+))?[ \t]*$/gm;
   return [...text.matchAll(re)].map((m) => ({ ref: m[1], comment: m[2] ?? '' }));
+}
+
+/** #102：两段式版本（"1.89" ≥ "1.87"）的大小比较，供 MSRV 判定用。 */
+function atLeast(declared, required) {
+  const [am, ai] = String(declared).split('.').map(Number);
+  const [bm, bi] = String(required).split('.').map(Number);
+  return am > bm || (am === bm && ai >= bi);
+}
+
+/**
+ * #102：抽出 `on:` 里各事件的 `paths:` / `paths-ignore:` 清单
+ * → { 事件名: { paths: [...], 'paths-ignore': [...] } }（没写的那个键就是 undefined）。
+ * 只认块式（`- 'a/**'`）写法：GitHub 不支持 YAML 锚点，所以两份清单必然各写一遍，
+ * 这里按行扫就够；改成流式写法会解析出 0 条，[27] 的"清单 ≥5 条"立刻判红，
+ * 不会静默放行。缩进约定与本文件的其它 workflow 解析一致（事件名 2 空格、
+ * 键 4 空格、条目 6 空格）。
+ */
+function ciPathFilters(text) {
+  const out = {};
+  let inOn = false;
+  let ev = null;
+  let list = null;
+  for (const ln of text.split(/\r?\n/)) {
+    if (/^\s*#/.test(ln)) continue;                      // 注释不参与结构判定
+    if (/^on\s*:\s*$/.test(ln)) { inOn = true; continue; }
+    if (inOn && /^\S/.test(ln)) { inOn = false; ev = null; list = null; } // 下一个顶层键＝on: 块结束
+    if (!inOn) continue;
+    let m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);   // 事件名（push / pull_request / …）
+    if (m) { ev = m[1]; out[ev] = out[ev] || {}; list = null; continue; }
+    if (!ev) continue;
+    m = /^ {4}(paths|paths-ignore):\s*(?:#.*)?$/.exec(ln);
+    if (m) { list = (out[ev][m[1]] = []); continue; }
+    m = /^ {6}-\s*['"]?([^'"\s#]+?)['"]?\s*(?:#.*)?$/.exec(ln);
+    if (m && list) list.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * #102：按"步骤"取回包含某条 run 命令的整块文本（从 `- ` 行到下一个 `- ` 行之前）。
+ * env 是按步骤生效的，所以判断"零告警门有没有挂上"必须按步骤看；全文匹配会把
+ * 挂在别的步骤上的 RUSTFLAGS 也算成挂上了。找不到返回 null（调用方判红）。
+ */
+function ciStepWithRun(text, runRe) {
+  const lines = text.split(/\r?\n/);
+  const starts = lines.map((ln, i) => (/^ {6}- /.test(ln) ? i : -1)).filter((i) => i >= 0);
+  for (const i of starts) {
+    const end = starts.find((s) => s > i);
+    const body = lines.slice(i, end === undefined ? lines.length : end).join('\n');
+    if (runRe.test(body)) return { body };
+  }
+  return null;
 }
 
 /**

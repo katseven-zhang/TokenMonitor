@@ -1,9 +1,40 @@
 name: windows-source
 
 on:
+  # #102：路径过滤。此前没有 paths，改一行 README 也要跑完整个 Windows 原生矩阵
+  # （两个 Node job + gui/tray 两次从零 cargo 编译）。下面列的是本文件真的会
+  # 编译或执行的东西：windows/** 两个 crate（含各自的 Cargo.lock）、Node 侧
+  # src/bin/web、被 npm test 与 verify-windows-source.ps1 读到的 test/scripts/
+  # package*.json、以及被 gui/tray 套件自己断言的 rust-toolchain.toml。
+  # 文档改动不会失去门：test.yml 的矩阵里就有 windows-latest 的 npm test，
+  # 而读文档与读 workflow 文本的守卫（[26]/[27]/[28]）都跑在那里面。
   push:
     branches: [main]
+    paths:
+      - '.github/workflows/windows.yml'
+      - 'windows/**'
+      - 'src/**'
+      - 'bin/**'
+      - 'web/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'rust-toolchain.toml'
   pull_request:
+    # 与上面 push 的清单保持一致（GitHub 不支持 YAML 锚点，所以这里只能照抄一份；
+    # test/run.mjs 的 [27] 段会逐个 workflow 比对两个清单是否已经走岔）。
+    paths:
+      - '.github/workflows/windows.yml'
+      - 'windows/**'
+      - 'src/**'
+      - 'bin/**'
+      - 'web/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'rust-toolchain.toml'
   # #102：允许手动重跑（只验证，不发布），改完门就能单独点一次看红绿
   workflow_dispatch:
 
@@ -81,10 +112,17 @@ jobs:
 
   # 原生 job 不再用含空格的 checkout 目录：这不是放松要求（空格/中文路径由
   # windows-smoke 这两个 job 负责演练，gui/tray 的套件自己还会把 exe 复制到
-  # 含空格+中文的临时目录里跑），而是 #102 的缺陷本体——rust-cache 的
-  # `workspaces: 'Token Monitor/windows/gui'` 里带空格，缓存 key 永远命不中，
-  # 每次 native job 都从零编译依赖。test/run.mjs 的 [27] 段守住"缓存路径不含空格
-  # 且目录真实存在"。
+  # 含空格+中文的临时目录里跑），而是 #102 的缺陷本体——引号在这里不是装饰：
+  # rust-cache 的 `workspaces` 输入是按**空白切分**成多个 workspace 根的（它期望
+  # 的就是 `a b/c` 这种空格分隔列表），所以曾经那行
+  # `workspaces: 'Token Monitor/windows/gui'` 会被切成
+  # ["Token", "Monitor/windows/gui"] 两个都不存在的路径；YAML 层的引号在切分之前
+  # 就已经被吃掉，起不到"这是一个含空格的路径"的作用。结果是缓存 key 永远命不中，
+  # 每次 native job 都从零编译依赖——只是变慢，不会红，所以再也没人去修。
+  # 现在这两个 job 用默认 checkout 路径（无空格），workspaces 写真实存在的
+  # windows/gui 与 windows/tray。test/run.mjs 的 [27] 段守住三件事：workspaces
+  # 不含空白、它指向真实目录、且使用它的那个 job 的 checkout `path:` /
+  # working-directory 也不含空白（否则同样的错会以另一种形式回来）。
   windows-gui:
     name: rust gui build + behavior (#41)
     runs-on: windows-latest

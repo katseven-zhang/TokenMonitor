@@ -1,9 +1,25 @@
 name: test
 
 on:
+  # #102：test.yml 故意只忽略二进制资产，而不是像 windows.yml / desktop.yml 那样用
+  # 白名单。原因：npm test 的 [26]/[27]/[28] 三段守卫会直接读文档与 workflow 文本，
+  # "docs-only 不必跑 npm test"在这里不成立——文档改错了就是会让门红，必须跑。
+  # 真正与测试无关的只有图片/图标这类资产。push（合并到 main）不过滤：main 的每次
+  # 合并都要拿到一次全平台真验证。
   push:
     branches: [main]
   pull_request:
+    paths-ignore:
+      - '**/*.png'
+      - '**/*.jpg'
+      - '**/*.jpeg'
+      - '**/*.gif'
+      - '**/*.webp'
+      - '**/*.ico'
+      - '**/*.icns'
+      - '**/*.svg'
+      - '**/*.zip'
+      - '**/*.tgz'
   # #102：可手动重跑（只验证，不发布）
   workflow_dispatch:
 

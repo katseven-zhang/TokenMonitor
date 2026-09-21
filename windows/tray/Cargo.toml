@@ -2,6 +2,11 @@
 name = "TokenMonitorTray"
 version = "1.4.3"
 edition = "2021"
+# #102：MSRV 声明，理由与 windows/gui 完全一致（本 crate 用到的最新标准库 API 也是
+# std::sync::OnceLock，src/main.rs 的 WSA_STARTED，since = "1.70.0"；依赖闭包里最高的
+# rust-version 声明是 windows-sys 0.59 的 1.60）。两个 crate 各写一份而不是共享，
+# 是因为它们本来就是两条独立的构建线（各自的 Cargo.lock / build.ps1 / publish 目录）。
+rust-version = "1.70"
 description = "TokenMonitor 系统托盘：图标状态/打开面板/启动或重启后台/退出（原生 Win32，目标机零依赖）"
 
 [[bin]]

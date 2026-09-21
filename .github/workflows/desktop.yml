@@ -1,9 +1,28 @@
 name: desktop
 
 on:
+  # #102：这个 job 是整个仓库里最贵的一条（45 分钟：npm ci + cargo fetch + 前端构建
+  # + Rust 编译 + 打包 + 生命周期冒烟），但它只消费下面这些输入：
+  #   desktop/**            前端与 src-tauri crate（含 Cargo.lock、scripts/*.ps1、config/）
+  #   LICENSE               build-windows.ps1 把它复制进包，verify-package.ps1 比对哈希
+  #   rust-toolchain.toml   固定的 Rust 工具链
+  #   .github/workflows/desktop.yml  本文件
+  # 所以文档、Node 侧 src/、windows/ 两个 crate 的改动不再触发它（那些分别由
+  # test.yml 与 windows.yml 覆盖）。清单在 push 与 pull_request 下各写一遍是
+  # GitHub 不支持 YAML 锚点，[27] 段会盯着两份是否走岔。
   push:
     branches: [main, 'codex/**']
+    paths:
+      - '.github/workflows/desktop.yml'
+      - 'desktop/**'
+      - 'LICENSE'
+      - 'rust-toolchain.toml'
   pull_request:
+    paths:
+      - '.github/workflows/desktop.yml'
+      - 'desktop/**'
+      - 'LICENSE'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
     inputs:
       gate_probe:
@@ -53,10 +72,22 @@ jobs:
       - name: Desktop frontend build
         run: npm run build --prefix desktop
       - name: Desktop Rust tests
+        # #102：windows.yml 早就用 RUSTFLAGS=-Dwarnings 把 gui/tray 的告警当错误，
+        # 同一个仓库不该有两套标准——桌面 crate 是三者中代码量最大的一个，却没有人
+        # 盯着它的告警。cargo 对非 workspace 依赖统一加 --cap-lints allow，所以这
+        # 条只作用于本仓库的 crate，不会被上游依赖的告警误伤。
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: cargo test --offline --locked --tests --manifest-path desktop/src-tauri/Cargo.toml
       - name: 100k and 1m indexed paging regression
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: cargo test --offline --locked --manifest-path desktop/src-tauri/Cargo.toml --test query_scale -- --ignored --nocapture
       - name: Build and package embedded desktop
+        # 真正的 --release 产物在这里编译，零告警门必须盖住它（release 才会跑
+        # 死代码/未使用变量的完整分析，dev profile 的构建不等于这条门）
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: pwsh -File desktop/scripts/build-windows.ps1
       - name: Verify package and licenses
         run: pwsh -File desktop/scripts/verify-package.ps1
