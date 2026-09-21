@@ -326,6 +326,8 @@ export type SessionReplayDetail = {
     toolCallCount: number;
     patchCount: number;
     errorCount: number;
+    malformedLines: number;
+    unrecognizedEventCount: number;
   };
   turns: Array<{
     turnId: string;

@@ -617,6 +617,7 @@
       "show_full_text": "显示全文",
       "hide_full_text": "收起全文",
       "show_item_raw_jsonl": "查看原始 JSONL",
+      "partial_replay": "本次回放不完整：{malformed} 行无法解析，{unknown} 类事件未被识别。",
       "hide_item_raw_jsonl": "收起原始 JSONL",
       "raw_preview": "原始 JSONL 预览",
       "raw_metadata": "{{size}} · {{lines}} 行",

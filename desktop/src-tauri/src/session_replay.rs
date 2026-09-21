@@ -53,11 +53,16 @@ struct ReplayParseState {
     process_exit_codes: BTreeMap<String, Vec<i64>>,
     active_exec_call_id: Option<String>,
     token_target_tool: Option<(String, String)>,
+    malformed_lines: usize,
+    unrecognized_events: BTreeSet<String>,
 }
 
 pub fn fetch_session_detail(db: &Connection, path: &str) -> Result<SessionReplayDetail, String> {
-    let record = query_session_rollup_record(db, path)?
-        .ok_or_else(|| "Session file is not indexed".to_string())?;
+    let record = query_session_rollup_record(db, path)?.ok_or_else(|| {
+        // Stable code first so the UI can translate it; the Chinese text keeps the
+        // message readable everywhere else it is shown raw.
+        "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
+    })?;
     let raw_jsonl = fs::read_to_string(&record.path).map_err(|error| error.to_string())?;
     let agents = build_agent_hierarchy(db, path)?;
     Ok(parse_session_detail_with_agents(record, raw_jsonl, agents))
@@ -86,6 +91,7 @@ fn parse_session_detail_with_agents(
             continue;
         }
         let Ok(entry) = serde_json::from_str::<Value>(trimmed) else {
+            state.malformed_lines += 1;
             continue;
         };
         state.ingest(&entry, line_index + 1);
@@ -113,6 +119,8 @@ fn parse_session_detail_with_agents(
         })
         .sum();
     summary.tool_call_count = turns.iter().map(|turn| turn.tool_calls.len()).sum();
+    summary.malformed_lines = state.malformed_lines;
+    summary.unrecognized_event_count = state.unrecognized_events.len();
     summary.patch_count = turns.iter().map(|turn| turn.patch_results.len()).sum();
     summary.error_count = turns.iter().map(|turn| turn.errors.len()).sum::<usize>()
         + turns
@@ -541,7 +549,15 @@ impl ReplayParseState {
                         raw_jsonl_line_numbers: vec![line_number],
                     })
             }
-            _ => {}
+            _ => {
+                // Nothing recognizes this payload. It is counted rather than pushed
+                // into `turn.items`, because a timeline entry would attribute an
+                // internal event to a conversation turn; the summary surfaces it so a
+                // partial replay can never look complete.
+                if !event_type.is_empty() {
+                    self.unrecognized_events.insert(event_type.to_string());
+                }
+            }
         }
     }
 
@@ -671,11 +687,14 @@ impl ReplayParseState {
                     usage,
                     raw_jsonl_line_numbers: vec![line_number],
                 };
-                if matches!(turn.items.get(tool_index + 1), Some(SessionReplayItem::TokenUsage { .. })) {
-                    turn.items[tool_index + 1] = token_item;
-                } else {
-                    turn.items.insert(tool_index + 1, token_item);
+                let mut insert_at = tool_index + 1;
+                while matches!(
+                    turn.items.get(insert_at),
+                    Some(SessionReplayItem::TokenUsage { .. })
+                ) {
+                    insert_at += 1;
                 }
+                turn.items.insert(insert_at, token_item);
                 return;
             }
         }
@@ -1084,8 +1103,21 @@ fn is_system_message(event_type: &str, event: &Value) -> bool {
         )
 }
 
+/// Whitelist of reasoning/summary event types. The previous
+/// `contains("reasoning") || contains("summary")` also swallowed unrelated types
+/// such as `session_summary`, so a summary payload could silently masquerade as
+/// model reasoning.
 fn is_reasoning_message(event_type: &str) -> bool {
-    event_type.contains("reasoning") || event_type.contains("summary")
+    matches!(
+        event_type,
+        "reasoning"
+            | "reasoning_summary"
+            | "reasoning_summary_part"
+            | "agent_reasoning"
+            | "reasoning_output"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+    )
 }
 
 fn is_tool_call(event_type: &str) -> bool {
@@ -1252,15 +1284,30 @@ fn extract_tool_output(value: &Value) -> Option<String> {
         .or_else(|| string_field(value, "stdout"))
         .or_else(|| string_field(value, "stderr"))
         .or_else(|| string_field(value, "result"))
-        .or_else(|| value.get("results").map(value_to_pretty_string))
+        .or_else(|| {
+            value
+                .get("results")
+                .filter(|value| !value.is_null())
+                .map(value_to_pretty_string)
+        })
         .or_else(|| string_field(value, "saved_path"))
-        .or_else(|| value.get("output").map(value_to_pretty_string))
+        .or_else(|| {
+            value
+                .get("output")
+                .filter(|value| !value.is_null())
+                .map(value_to_pretty_string)
+        })
 }
 
 fn extract_error_text(value: &Value) -> Option<String> {
     string_field(value, "error")
         .or_else(|| string_field(value, "message"))
-        .or_else(|| value.get("error").map(value_to_compact_string))
+        .or_else(|| {
+            value
+                .get("error")
+                .filter(|value| !value.is_null())
+                .map(value_to_compact_string)
+        })
 }
 
 fn value_to_compact_string(value: &Value) -> String {
@@ -2238,7 +2285,7 @@ mod tests {
         let temp_dir = tempfile_dir();
         let db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
         let error = fetch_session_detail(&db, "/tmp/not-indexed.jsonl").unwrap_err();
-        assert_eq!(error, "Session file is not indexed");
+        assert!(error.starts_with("E_SESSION_NOT_INDEXED"));
     }
 
     #[test]
@@ -2397,6 +2444,40 @@ mod tests {
     }
 
     #[test]
+    fn surfaces_malformed_lines_null_output_and_unknown_event_types_instead_of_hiding_them() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            "{oops".to_string(),
+            response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": null,
+                    "error": null
+                }),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                serde_json::json!({"type":"session_summary","turn_id":"turn-1","summary":"weekly recap"}),
+            ),
+        ]
+        .join("\n");
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+
+        assert_eq!(detail.summary.malformed_lines, 1);
+        // `output: null` must stay absent rather than render the literal "null",
+        // and `error: null` must not invent an error entry.
+        assert_eq!(detail.turns[0].tool_calls[0].output, None);
+        assert!(detail.turns[0].errors.is_empty());
+        // A summary payload is no longer swallowed as reasoning; it is surfaced as
+        // an event this parser does not know.
+        assert!(detail.turns[0].reasoning_summaries.is_empty());
+        assert_eq!(detail.summary.unrecognized_event_count, 1);
+    }
+
+    #[test]
     fn merges_process_continuations_by_session_id_without_summing_poll_durations() {
         let raw = [
             turn_context("2026-08-19T13:30:58.000Z", "turn-1", "gpt-5", "/repo/app"),
@@ -2501,7 +2582,16 @@ mod tests {
         let turn = &detail.turns[0];
 
         assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.items.len(), 3);
+        // Two usage events following the same call both stay on the timeline; they
+        // used to overwrite each other so one request's volume disappeared.
+        assert_eq!(turn.items.len(), 4);
+        assert_eq!(
+            turn.items
+                .iter()
+                .filter(|item| matches!(item, SessionReplayItem::TokenUsage { .. }))
+                .count(),
+            2
+        );
         assert_eq!(detail.summary.tool_call_count, 1);
         assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("call-exec"));
         assert_eq!(turn.tool_calls[0].status.as_deref(), Some("completed"));
@@ -2531,14 +2621,16 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("SESSION_ID="));
-        assert!(matches!(
-            turn.items.get(1),
-            Some(SessionReplayItem::TokenUsage { usage, .. }) if usage.total_tokens == 56_500
-        ));
-        assert!(matches!(
-            turn.items.get(2),
-            Some(SessionReplayItem::Message { text, .. }) if text == "Still waiting."
-        ));
+        // Indexed by content, not position: both usage events now keep their own
+        // slot instead of the later one replacing the earlier.
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            SessionReplayItem::TokenUsage { usage, .. } if usage.total_tokens == 56_500
+        )));
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            SessionReplayItem::Message { text, .. } if text == "Still waiting."
+        )));
     }
 
     #[test]

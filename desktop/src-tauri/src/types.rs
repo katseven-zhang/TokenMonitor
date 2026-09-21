@@ -438,6 +438,11 @@ pub struct SessionReplaySummary {
     pub tool_call_count: usize,
     pub patch_count: usize,
     pub error_count: usize,
+    /// JSONL lines that could not be parsed, so a partial replay is never
+    /// presented as a complete one.
+    pub malformed_lines: usize,
+    /// Distinct payload types the parser has no rule for.
+    pub unrecognized_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -1361,6 +1361,18 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
             {metric(t("sessions.detail.errors"), formatNumber(detail?.summary.errorCount ?? 0), <AlertTriangle className="h-3.5 w-3.5" />, "red")}
           </div>}
+          {detail && detail.summary.malformedLines + detail.summary.unrecognizedEventCount > 0 ? (
+            <div
+              className="mt-1.5 flex items-center gap-1.5 rounded border border-amber-300/60 bg-amber-50/80 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+              role="alert"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("sessions.detail.partial_replay", {
+                malformed: detail.summary.malformedLines,
+                unknown: detail.summary.unrecognizedEventCount,
+              })}</span>
+            </div>
+          ) : null}
           {detail && showDetails ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5 text-[11px] text-muted-foreground">
               {threadName ? (

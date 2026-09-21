@@ -609,6 +609,7 @@
       "show_full_text": "Show full text",
       "hide_full_text": "Hide full text",
       "show_item_raw_jsonl": "View raw JSONL",
+      "partial_replay": "This replay is incomplete: {malformed} unparsable line(s) and {unknown} unrecognized event type(s).",
       "hide_item_raw_jsonl": "Hide raw JSONL",
       "raw_preview": "Raw JSONL preview",
       "raw_metadata": "{{size}} · {{lines}} lines",
