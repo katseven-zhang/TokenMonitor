@@ -159,6 +159,26 @@ function Move-DataBack {
     Move-Item -LiteralPath $dataKeep -Destination (Join-Path $installDir 'data')
   }
 }
+# #122: the preserved folder can hold data rescued out of a tree that was about to be
+# deleted recursively. An upgrade hard-killed after the old install had been renamed
+# to TokenMonitor.old and before the data moved back leaves TokenMonitor.old\data as
+# the ONLY copy of the user's database, and the next install sees no TokenMonitor at
+# all, so it takes the first-install branch. Move that rescued copy into the install
+# we just verified - the app never reads <InstallRoot>TokenMonitor-data, so leaving
+# it there would be loss in every practical sense. Refuse to merge or overwrite when
+# the new install already has a data folder of its own.
+function Restore-RescuedData {
+  if (-not (Test-Path -LiteralPath $dataKeep)) { return }
+  $target = Join-Path $installDir 'data'
+  if (Test-Path -LiteralPath $target) {
+    Info "warning: $target already exists - rescued data kept at $dataKeep; stop the backend and move it there by hand"
+    Log "rescued data NOT restored, target occupied: $dataKeep -> $target"
+    return
+  }
+  Move-Item -LiteralPath $dataKeep -Destination $target
+  Info "user data restored into the verified install: $target"
+  Log "rescued data restored: $dataKeep -> $target"
+}
 # The single guarantee the installer README makes: 数据永不进入删除范围. Any tree
 # about to be recursively deleted is first searched for a data\ folder and that
 # folder is moved out to the preserved location. If the preserved location is
@@ -248,8 +268,16 @@ function Assert-InstallTreeIdle {
 try {
   Assert-BackendStopped  # :41
   Assert-InstallTreeIdle # :101 no launcher/tray/node still running out of the trees we are about to delete
-  if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-  if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+  # #122: these two were the only recursive deletes left that bypassed
+  # Remove-InstallTree, so the "move user data out of the delete scope first" rule
+  # silently did not apply to them. An upgrade killed after the old install was
+  # renamed to TokenMonitor.old and before the data moved back leaves the user's
+  # database inside that orphan backup; the next run deleted it with no message.
+  # Going through the same helper rescues data\ into the preserved folder first and
+  # fails loudly when that folder is already occupied. Both calls are no-ops when the
+  # path is absent, which is the ordinary case.
+  Remove-InstallTree -Path $staging
+  Remove-InstallTree -Path $backup
 
   # --- stage + validate the candidate in final layout --------------------------
   Info "staging candidate -> $staging"
@@ -291,9 +319,13 @@ try {
     # A verified upgrade is never voided by the rollback copy's cleanup: by now
     # the new install works and the data is back in place, so a locked .old tree
     # (a still-running launcher holds its exe) is reported, not fatal.
+    # #122: this delete goes through the same data guard as every other one instead
+    # of asserting in a message string that the tree holds no user data - if the
+    # crash window did leave data inside it, the guard moves that out first (and
+    # refuses to delete when the preserved folder is already occupied).
     if (Test-Path -LiteralPath $backup) {
-      try { Remove-Item -LiteralPath $backup -Recurse -Force; $backupActive = $false }
-      catch { Info "warning: rollback copy left at $backup (verified upgrade kept); it holds no user data and can be deleted later" }
+      try { Remove-InstallTree -Path $backup; $backupActive = $false }
+      catch { Info "warning: rollback copy left at $backup (verified upgrade kept); nothing was deleted around it - remove it once no process runs from it" }
     }
   } else {
     Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
@@ -307,6 +339,7 @@ try {
   }
 
   # --- portable data directory (created on install; app keeps everything here) ---
+  Restore-RescuedData   # #122: data rescued out of an orphan backup goes back in here
   New-Item -ItemType Directory -Path (Join-Path $dataDir 'logs') -Force | Out-Null
   Info "data dir ready: $dataDir (database/logs/settings; preserved on uninstall)"
 

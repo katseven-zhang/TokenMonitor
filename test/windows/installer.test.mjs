@@ -11,7 +11,7 @@
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/installer.test.mjs
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,7 +86,19 @@ function makeCandidate(root, version) {
   const cand = join(root, 'cand-' + version);
   mkdirSync(join(cand, 'runtime', 'bin'), { recursive: true });
   writeFileSync(join(cand, 'TokenMonitor.exe'), 'fake-gui-exe-stand-in');
-  cpSync(process.execPath, join(cand, 'runtime', 'node.exe'));
+  // #122 实测：cpSync 复制 node.exe 这种 PE 文件时本机安全软件会偶发插一脚，抛出
+  // errno=0 / "The operation completed successfully." 的 unlink 竞态（就是上面 copyTree
+  // 注释里那一类环境噪声），一次失败就把整个套件打断。逐文件覆盖 + 有界重试。
+  const nodeExe = join(cand, 'runtime', 'node.exe');
+  for (let attempt = 0; ; attempt++) {
+    try {
+      copyFileSync(process.execPath, nodeExe);
+      break;
+    } catch (e) {
+      if (attempt >= 4) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250 * (attempt + 1));
+    }
+  }
   copyFileSync(join(repo, 'bin', 'tokenmonitor.js'), join(cand, 'runtime', 'bin', 'tokenmonitor.js'));
   copyTree(join(repo, 'src'), join(cand, 'runtime', 'src'));
   copyTree(join(repo, 'web'), join(cand, 'runtime', 'web'));
@@ -671,6 +683,71 @@ try {
       ok(!/Copy-Item -Path \(Join-Path \$Root '\*'\) -Destination \$Work -Recurse/.test(verifySrc),
         '#14 verify-windows-source.ps1 不再用整目录 Copy-Item -Recurse -Exclude', verifySrc.slice(0, 200));
     }
+  }
+
+  /* ---------- [11] #122：升级中途被硬杀的遗留备份，里面的 data 不能被静默删掉 ---------- */
+  console.log('[11] #122 崩溃窗口：遗留 TokenMonitor.old\\data 里的用户数据（预清理必须走同一个删除守卫）');
+  {
+    const p11 = join(base, 'root11', 'Programs');
+    const install11 = join(p11, 'TokenMonitor');
+    const old11 = join(p11, 'TokenMonitor.old');
+    const keep11 = join(p11, 'TokenMonitor-data');
+    const args11 = ['-InstallRoot', p11,
+      '-StartMenuRoot', join(base, 'root11', '菜单'), '-DesktopRoot', join(base, 'root11', '桌面')];
+    const scene11 = (r) => 'r.out tail: ' + String(r.out).slice(-700) + '\np11: ' + safeReaddir(p11).join(', ');
+
+    const rBase = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '11.0.0-test'), ...args11]);
+    ok(rBase.code === 0, '11 基线安装 exit 0', scene11(rBase));
+    mkdirSync(join(install11, 'data'), { recursive: true });
+    writeFileSync(join(install11, 'data', 'wallet.json'), '{"balance":7}');
+
+    // 崩溃现场不用杀进程，直接把文件系统摆成那一刻的样子：升级已经
+    // Rename-Item(installDir -> TokenMonitor.old)，还没走到 Move-DataBack 就被硬杀。
+    // 此时 TokenMonitor 不存在，用户数据库的唯一副本在 TokenMonitor.old\data 里，
+    // 而 #105 的过渡目录防护（只看 dataKeep）根本覆盖不到这种形态。
+    renameSync(install11, old11);
+    const rW = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '11.1.0-test'), ...args11]);
+    ok(rW.code === 0, '11 遗留 .old（内含 data）存在时安装新版本 exit 0', scene11(rW));
+    ok(existsSync(join(install11, 'data', 'wallet.json'))
+      && readFileSync(join(install11, 'data', 'wallet.json'), 'utf8') === '{"balance":7}',
+      '11 用户数据回到新安装的 data\\（修前：预清理把 .old 连同 data 一起 Remove-Item -Recurse 抹掉）', scene11(rW));
+    ok(!existsSync(old11), '11 遗留备份让位（data 先搬走，之后才删树）', scene11(rW));
+    ok(!existsSync(keep11), '11 过渡目录不残留（抢救的数据已归位，不是停在 TokenMonitor-data）', scene11(rW));
+    ok(installedVersion(install11) === '11.1.0-test', '11 新装在位并通过 --version 验证');
+
+    // 验收项 (1) 的另一半：过渡目录已被占用时，两份数据谁也不能被删——宁可不装。
+    const p12 = join(base, 'root12', 'Programs');
+    const old12 = join(p12, 'TokenMonitor.old');
+    const keep12 = join(p12, 'TokenMonitor-data');
+    const args12 = ['-InstallRoot', p12,
+      '-StartMenuRoot', join(base, 'root12', '菜单'), '-DesktopRoot', join(base, 'root12', '桌面')];
+    const scene12 = (r) => 'r.out tail: ' + String(r.out).slice(-700) + '\np12: ' + safeReaddir(p12).join(', ');
+    mkdirSync(join(old12, 'data'), { recursive: true });
+    writeFileSync(join(old12, 'data', 'wallet.json'), '{"balance":8}');
+    mkdirSync(keep12, { recursive: true });
+    writeFileSync(join(keep12, 'wallet.json'), '{"balance":9}');
+    const rBoth = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '12.0.0-test'), ...args12]);
+    ok(rBoth.code !== 0 && /both .* and .* exist/.test(rBoth.out),
+      '12 遗留 .old 与过渡目录同时在位 → 非零退出并要求人工处理', scene12(rBoth));
+    ok(existsSync(join(old12, 'data', 'wallet.json'))
+      && readFileSync(join(old12, 'data', 'wallet.json'), 'utf8') === '{"balance":8}'
+      && existsSync(join(keep12, 'wallet.json'))
+      && readFileSync(join(keep12, 'wallet.json'), 'utf8') === '{"balance":9}',
+      '12 两份数据都完好，没有任何一份进入删除范围', scene12(rBoth));
+    ok(!existsSync(join(p12, 'TokenMonitor')) && !existsSync(join(p12, 'TokenMonitor.new')),
+      '12 拒绝得干净：既没装出新的也没留下暂存', scene12(rBoth));
+
+    // 结构性反向门（【接】，只防回退不证明行为）：全脚本只能剩 Remove-InstallTree 里
+    // 那一条递归删除；新加一条绕过守卫的 Remove-Item $staging/$backup 立刻红。
+    const psSrc = readFileSync(INSTALL_PS1, 'utf8');
+    const codeLines = psSrc.split(/\r?\n/).filter((l) => !/^\s*#/.test(l));
+    const rawDeletes = codeLines.filter((l) => /Remove-Item\b.*-Recurse/.test(l)).map((l) => l.trim());
+    ok(rawDeletes.length === 1 && /Remove-Item -LiteralPath \$full -Recurse/.test(rawDeletes[0]),
+      '#122 接线门：预清理/回滚副本不再自带 Remove-Item -Recurse，全脚本只剩守卫内部那一条',
+      rawDeletes.join(' ;; '));
+    ok((codeLines.join('\n').match(/Restore-RescuedData/g) || []).length === 2,
+      '#122 接线门：抢救回来的数据真的被归位（函数只定义不调用等于没修）',
+      'occurrences=' + (codeLines.join('\n').match(/Restore-RescuedData/g) || []).length);
   }
 } finally {
   rmSync(base, { recursive: true, force: true });
