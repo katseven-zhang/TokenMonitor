@@ -999,6 +999,95 @@ mod tests_config_error_log {
         assert_eq!(config_error_tick(&state, e), Some(1));
     }
 
+    /// #114 端到端：服务**跑起来之后**把 settings.json 写坏（用户正在编辑文件的真实
+    /// 形态），等够 3 个刷新轮次，`service.log` 里因这个错误新增的行必须 ≤2。
+    /// 修前是「每轮一行」，而且这个数会随等待时长线性增长；去重后它恒为 1，
+    /// 所以断言不受机器快慢影响（跑得慢只会更少，不会更多）。
+    #[test]
+    fn a_broken_settings_file_does_not_flood_the_service_log() {
+        let root =
+            std::env::temp_dir().join(format!("tokenmonitor-logspam-{}", uuid::Uuid::new_v4()));
+        config::initialize(&root).unwrap();
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        config::save_json(
+            &root.join("settings.json"),
+            &config::Settings {
+                port,
+                roots: Default::default(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let worker_root = root.clone();
+        let worker = thread::spawn(move || run(&worker_root));
+        let mut ready = false;
+        for _ in 0..100 {
+            if rpc(&root, "status", json!({})).is_ok() {
+                ready = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready, "服务没起来，后面的行数计数毫无意义");
+
+        let log_path = root.join("service.log");
+        let count = || -> usize {
+            fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| l.contains("配置读取失败"))
+                .count()
+        };
+        let baseline = count();
+        fs::write(&root.join("settings.json"), b"{ not json at all").unwrap();
+        // 4.5s ≈ 3~4 个失败轮次（每轮 sleep 1s + 200ms 循环余量）
+        thread::sleep(Duration::from_millis(4500));
+        let after = count();
+        assert!(
+            after - baseline >= 1,
+            "坏文件至少要报一次，否则去重把提示也吞了"
+        );
+        assert!(
+            after - baseline <= 2,
+            "3~4 轮里最多两句（修前是每轮一行，会到这里已经 {expected} 行）：实际新增 {}",
+            after - baseline,
+            expected = "3-4"
+        );
+        // 恢复：写回可读的配置，worker 必须重新回到正常节奏并报一句恢复
+        config::save_json(
+            &root.join("settings.json"),
+            &config::Settings {
+                port,
+                roots: Default::default(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let recovered = std::time::Instant::now();
+        while recovered.elapsed() < Duration::from_secs(6) {
+            if fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .contains("已恢复可读")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        assert!(
+            fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .contains("已恢复可读"),
+            "恢复本身也要看得见（且不能刷屏）"
+        );
+        stop(&root).unwrap();
+        worker.join().unwrap().unwrap();
+        fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn repeat_interval_is_about_a_minute_of_ticks() {
         // 循环每轮 sleep 1s，所以 60 轮 ≈ 一分钟一次重复提醒：
