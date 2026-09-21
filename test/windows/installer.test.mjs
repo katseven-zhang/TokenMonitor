@@ -516,6 +516,143 @@ try {
       ok(/exe missing, building/.test(rH.out) && /exe stale \(newest source/.test(rH.out),
         '#101 演练同时覆盖 missing 与 stale 两种报告文案', rH.out.slice(-400));
     }
+
+    // (i) 打包面白名单的真函数演练：从 build-windows.ps1 的 AST 里抽出
+    // New-RelativePathSet / Get-PackagedFileSets / Copy-TrackedSourceTree 本尊，在
+    // %TEMP% 里真 git init + git add 一个假仓库跑：git 跟踪的文件进包、未跟踪残留
+    // 点名并使构建失败、.gitignore 排除项只是不打包（不报错）、索引里有而工作树里
+    // 没有的文件同样拒绝。全程不碰真实仓库，也不跑 cargo/npm。
+    {
+      const reh = join(base, 'whitelist-rehearsal.ps1');
+      // 生成的沙箱脚本一律 ASCII：Windows PowerShell 5.1 按系统 ANSI 代码页读取无
+      // BOM 的 .ps1，中文说明可能把紧跟其后的单引号吞掉（实测报"字符串未终止"）。
+      writeFileSync(reh, [
+        'param([string]$ScriptPath, [string]$Sandbox)',
+        '$ErrorActionPreference = \'Stop\'',
+        'function Fail([string]$m) { throw $m }',
+        '$toks = $null; $perr = $null',
+        '$ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$toks, [ref]$perr)',
+        'if ($perr.Count -gt 0) { throw \'build-windows.ps1 does not parse\' }',
+        '$names = @(\'New-RelativePathSet\',\'Get-PackagedFileSets\',\'Copy-TrackedSourceTree\')',
+        '$fns = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $a.Name }, $true))',
+        'if ($fns.Count -ne 3) { throw (\'whitelist functions not found: \' + $fns.Count) }',
+        'Invoke-Expression ((@($fns) | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine)',
+        '$repoFull = $Sandbox',
+        '$PACKAGED_DIRS = @(\'bin\',\'src\',\'web\')',
+        '$runtime = Join-Path $Sandbox \'out\'',
+        'New-Item -ItemType Directory -Path (Join-Path $Sandbox \'web\\lib\'),(Join-Path $Sandbox \'src\'),(Join-Path $Sandbox \'bin\'),$runtime -Force | Out-Null',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'web\\app.js\') -Value \'app\'',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'web\\lib\\theme.js\') -Value \'theme\'',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'src\\server.js\') -Value \'server\'',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'bin\\tokenmonitor.js\') -Value \'cli\'',
+        '$ErrorActionPreference = \'SilentlyContinue\'',
+        '& git init --quiet $Sandbox | Out-Null',
+        '$init = $LASTEXITCODE',
+        '& git -C $Sandbox add -- web/app.js web/lib/theme.js src/server.js bin/tokenmonitor.js | Out-Null',
+        '$add = $LASTEXITCODE',
+        '$ErrorActionPreference = \'Stop\'',
+        'if ($init -ne 0 -or $add -ne 0) { throw (\'sandbox git setup failed init=\' + $init + \' add=\' + $add) }',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'.gitignore\') -Value \'web/local.bak\'',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'web\\local.bak\') -Value \'ignored junk\'',
+        'Set-Content -LiteralPath (Join-Path $Sandbox \'web\\scratch.js\') -Value \'untracked leftover\'',
+        '$sets = Get-PackagedFileSets',
+        'if ($null -eq $sets) { throw \'Get-PackagedFileSets must not be null inside a real git checkout\' }',
+        'Write-Output (\'TRACKED=\' + $sets.tracked.Count)',
+        'Write-Output (\'UNTRACKED=\' + $sets.untracked.Count)',
+        'Copy-TrackedSourceTree \'bin\' $runtime $sets',
+        'Copy-TrackedSourceTree \'src\' $runtime $sets',
+        '$thrown = \'\'',
+        'try { Copy-TrackedSourceTree \'web\' $runtime $sets } catch { $thrown = $_.Exception.Message }',
+        'Write-Output (\'WEB_THREW=\' + ($thrown -ne \'\'))',
+        'Write-Output (\'WEB_NAMED=\' + ($thrown -like \'*web/scratch.js*\'))',
+        'Write-Output (\'WEB_IGNORATES_IGNORED=\' + (-not ($thrown -like \'*local.bak*\')))',
+        'Write-Output (\'APP=\' + (Test-Path -LiteralPath (Join-Path $runtime \'web\\app.js\')))',
+        'Write-Output (\'THEME=\' + (Test-Path -LiteralPath (Join-Path $runtime \'web\\lib\\theme.js\')))',
+        'Write-Output (\'BINOK=\' + (Test-Path -LiteralPath (Join-Path $runtime \'bin\\tokenmonitor.js\')))',
+        'Write-Output (\'SRCOK=\' + (Test-Path -LiteralPath (Join-Path $runtime \'src\\server.js\')))',
+        'Write-Output (\'SCRATCH_SHIPPED=\' + (Test-Path -LiteralPath (Join-Path $runtime \'web\\scratch.js\')))',
+        'Write-Output (\'IGNORED_SHIPPED=\' + (Test-Path -LiteralPath (Join-Path $runtime \'web\\local.bak\')))',
+        'Remove-Item -LiteralPath (Join-Path $Sandbox \'bin\\tokenmonitor.js\') -Force',
+        '$thrown2 = \'\'',
+        'try { Copy-TrackedSourceTree \'bin\' $runtime $sets } catch { $thrown2 = $_.Exception.Message }',
+        'Write-Output (\'ABSENT_NAMED=\' + ($thrown2 -like \'*bin/tokenmonitor.js*\'))',
+        '$repoFull = $env:SYSTEMROOT',
+        '$sets3 = Get-PackagedFileSets',
+        'Write-Output (\'NO_GIT_IS_NULL=\' + ($null -eq $sets3))',
+      ].join('\r\n'));
+      const rI = runPs(reh, ['-ScriptPath', join(repo, 'scripts', 'build-windows.ps1'), '-Sandbox', join(base, 'whitelist-sandbox')]);
+      ok(/TRACKED=4/.test(rI.out) && /UNTRACKED=1/.test(rI.out),
+        '#101 git 索引给出跟踪集、git status 口径给出未跟踪集（.gitignore 排除项两头都不在）', rI.out.slice(-500));
+      ok(rI.code === 0 && /WEB_THREW=True/.test(rI.out) && /WEB_NAMED=True/.test(rI.out),
+        '#101 未跟踪残留使构建失败且点名那个文件', rI.out.slice(-600));
+      ok(/WEB_IGNORATES_IGNORED=True/.test(rI.out),
+        '#101 被 .gitignore 排除的本地文件只不打包，不误报为违规', rI.out.slice(-400));
+      ok(/APP=True/.test(rI.out) && /THEME=True/.test(rI.out) && /BINOK=True/.test(rI.out) && /SRCOK=True/.test(rI.out),
+        '#101 白名单内的源文件照常进包（含子目录）', rI.out.slice(-400));
+      ok(/SCRATCH_SHIPPED=False/.test(rI.out) && /IGNORED_SHIPPED=False/.test(rI.out),
+        '#101 残留与 ignore 内容都进不了包', rI.out.slice(-400));
+      ok(/ABSENT_NAMED=True/.test(rI.out),
+        '#101 索引里有、工作树里没有的文件同样拒绝（不许交出缺文件的"完整"包）', rI.out.slice(-400));
+      ok(/NO_GIT_IS_NULL=True/.test(rI.out),
+        '#101 git 取不到索引时返回 $null，由调用方报错而非退回整目录复制', rI.out.slice(-400));
+      // 打包脚本里不许再留下"整目录递归复制应用代码"的写法
+      const buildSrc2 = readFileSync(join(repo, 'scripts', 'build-windows.ps1'), 'utf8');
+      ok(!/Copy-Item -Path \(Join-Path \$repoFull \$dir\) -Destination \(Join-Path \$runtime \$dir\) -Recurse/.test(buildSrc2),
+        '#101 bin/src/web 不再整目录 Copy-Item -Recurse', buildSrc2.slice(0, 200));
+    }
+
+    // (j) 源码验证复制的真函数演练：从 verify-windows-source.ps1 抽出
+    // Copy-VerifySourceTree 本尊，在假源码树上跑。关键点是 PowerShell 5.1 的
+    // Copy-Item -Exclude 只对 -Path 通配到的顶层条目生效，对递归进去的子项无效——
+    // 所以这里既断言新实现挡住了嵌套的 target/dist/node_modules，也用一个负对照
+    // 把"修前那种写法就算补上 target 也照样漏"钉在测试里。
+    {
+      const reh = join(base, 'verify-copy-rehearsal.ps1');
+      writeFileSync(reh, [
+        'param([string]$ScriptPath, [string]$Sandbox)',
+        '$ErrorActionPreference = \'Stop\'',
+        '$toks = $null; $perr = $null',
+        '$ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$toks, [ref]$perr)',
+        'if ($perr.Count -gt 0) { throw \'verify-windows-source.ps1 does not parse\' }',
+        '$fn = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq \'Copy-VerifySourceTree\' }, $true))',
+        'if ($fn.Count -ne 1) { throw \'Copy-VerifySourceTree not found\' }',
+        'Invoke-Expression $fn[0].Extent.Text',
+        '$src = Join-Path $Sandbox \'repo\'',
+        'New-Item -ItemType Directory -Path (Join-Path $src \'windows\\gui\\target\\debug\'),(Join-Path $src \'windows\\gui\\src\'),(Join-Path $src \'desktop\\node_modules\\pkg\'),(Join-Path $src \'desktop\\dist\\assets\'),(Join-Path $src \'src\'),(Join-Path $src \'.git\') -Force | Out-Null',
+        'Set-Content -LiteralPath (Join-Path $src \'src\\server.js\') -Value \'server\'',
+        'Set-Content -LiteralPath (Join-Path $src \'windows\\gui\\src\\main.rs\') -Value \'fn main() {}\'',
+        'Set-Content -LiteralPath (Join-Path $src \'windows\\gui\\target\\debug\\huge.bin\') -Value (\'x\' * 4096)',
+        'Set-Content -LiteralPath (Join-Path $src \'desktop\\node_modules\\pkg\\index.js\') -Value \'dep\'',
+        'Set-Content -LiteralPath (Join-Path $src \'desktop\\dist\\assets\\bundle.js\') -Value \'built\'',
+        'Set-Content -LiteralPath (Join-Path $src \'.git\\HEAD\') -Value \'ref: refs/heads/main\'',
+        '$excluded = @(\'node_modules\', \'.git\', \'target\', \'dist\')',
+        '$work = Join-Path $Sandbox \'work\'',
+        'New-Item -ItemType Directory -Path $work -Force | Out-Null',
+        '$n = Copy-VerifySourceTree -SourceRoot $src -TargetRoot $work -Excluded $excluded',
+        'Write-Output (\'COPIED=\' + $n)',
+        'Write-Output (\'SERVER=\' + (Test-Path -LiteralPath (Join-Path $work \'src\\server.js\')))',
+        'Write-Output (\'MAINRS=\' + (Test-Path -LiteralPath (Join-Path $work \'windows\\gui\\src\\main.rs\')))',
+        'Write-Output (\'TARGET_LEAK=\' + (Test-Path -LiteralPath (Join-Path $work \'windows\\gui\\target\\debug\\huge.bin\')))',
+        'Write-Output (\'NM_LEAK=\' + (Test-Path -LiteralPath (Join-Path $work \'desktop\\node_modules\\pkg\\index.js\')))',
+        'Write-Output (\'DIST_LEAK=\' + (Test-Path -LiteralPath (Join-Path $work \'desktop\\dist\\assets\\bundle.js\')))',
+        'Write-Output (\'GIT_LEAK=\' + (Test-Path -LiteralPath (Join-Path $work \'.git\\HEAD\')))',
+        '$old = Join-Path $Sandbox \'old\'',
+        'New-Item -ItemType Directory -Path $old -Force | Out-Null',
+        'Copy-Item -Path (Join-Path $src \'*\') -Destination $old -Recurse -Force -Exclude $excluded',
+        'Write-Output (\'OLD_TARGET_LEAK=\' + (Test-Path -LiteralPath (Join-Path $old \'windows\\gui\\target\\debug\\huge.bin\')))',
+        'Write-Output (\'OLD_NM_LEAK=\' + (Test-Path -LiteralPath (Join-Path $old \'desktop\\node_modules\\pkg\\index.js\')))',
+      ].join('\r\n'));
+      const rJ = runPs(reh, ['-ScriptPath', join(repo, 'scripts', 'verify-windows-source.ps1'), '-Sandbox', join(base, 'verify-copy-sandbox')]);
+      ok(rJ.code === 0 && /SERVER=True/.test(rJ.out) && /MAINRS=True/.test(rJ.out) && /COPIED=2/.test(rJ.out),
+        '#14 验证用源码复制照常带走真实源文件', rJ.out.slice(-500));
+      ok(/TARGET_LEAK=False/.test(rJ.out) && /NM_LEAK=False/.test(rJ.out) && /DIST_LEAK=False/.test(rJ.out) && /GIT_LEAK=False/.test(rJ.out),
+        '#14 嵌套的 target/dist/node_modules/.git 一律不复制（GB 级构建树 + MAX_PATH）', rJ.out.slice(-500));
+      ok(/OLD_TARGET_LEAK=True/.test(rJ.out) && /OLD_NM_LEAK=True/.test(rJ.out),
+        '#14 负对照成立：Copy-Item -Exclude 就算补上 target 也挡不住嵌套构建目录（所以才必须自己走目录树）', rJ.out.slice(-500));
+      const verifySrc = readFileSync(join(repo, 'scripts', 'verify-windows-source.ps1'), 'utf8');
+      ok(!/Copy-Item -Path \(Join-Path \$Root '\*'\) -Destination \$Work -Recurse/.test(verifySrc),
+        '#14 verify-windows-source.ps1 不再用整目录 Copy-Item -Recurse -Exclude', verifySrc.slice(0, 200));
+    }
   }
 } finally {
   rmSync(base, { recursive: true, force: true });

@@ -24,6 +24,9 @@
     never be packaged silently (#101).
   - Output is scanned for secrets/runtime artifacts (.agentchatroom, .workbuddy,
     acr.credential_ tokens, *.db/*.log); any hit fails the build.
+  - The application code that ships is exactly what git tracks under bin\, src\ and
+    web\: a file present in those trees that git neither tracks nor ignores fails the
+    build by name, so no untracked local leftover can ever ride along in a package.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1
@@ -125,6 +128,80 @@ function Resolve-PublishedExe([string]$AppDir, [string]$ExeName, [string]$Label)
 }
 $guiExe = Resolve-PublishedExe 'gui' 'TokenMonitorGui.exe' 'GUI launcher'
 
+# --- 4c. packaged source whitelist: only git-tracked files may ship ----------------
+# Step 6 used to do `Copy-Item -Recurse` over bin\, src\ and web\. Everything living
+# in those trees therefore rode along - including local build leftovers that git has
+# never seen. Step 7's content scan only looks for credential tokens and
+# *.db/*.log, so "one extra file that is not a source file" was invisible: the
+# shipped package could contain content nobody reviewed. The package face is now
+# defined by git's index: tracked files are copied one by one, a file present in the
+# tree that git neither tracks nor ignores fails the build by name, and
+# .gitignore-excluded content is reported as not packaged.
+$PACKAGED_DIRS = @('bin', 'src', 'web')
+
+function New-RelativePathSet([string[]]$Paths) {
+  $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($p in $Paths) { if ($p) { [void]$set.Add($p.Replace('\', '/')) } }
+  return ,$set
+}
+
+# $null means "git could not tell us what the source tree is" (no git on PATH, or a
+# source export rather than a checkout). Callers must fail rather than fall back to
+# the old whole-directory copy - a silent fallback is exactly the hole being closed.
+function Get-PackagedFileSets {
+  Push-Location $repoFull
+  try {
+    $preference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $tracked = @(& git -c core.quotePath=false ls-files -- $PACKAGED_DIRS)
+    $trackedCode = $LASTEXITCODE
+    $others = @(& git -c core.quotePath=false ls-files --others --exclude-standard -- $PACKAGED_DIRS)
+    $othersCode = $LASTEXITCODE
+    $ErrorActionPreference = $preference
+  } finally { Pop-Location }
+  if ($trackedCode -ne 0 -or $othersCode -ne 0) { return $null }
+  return @{ tracked = (New-RelativePathSet $tracked); untracked = (New-RelativePathSet $others) }
+}
+
+function Copy-TrackedSourceTree([string]$Dir, [string]$Runtime, $Sets) {
+  $source = Join-Path $repoFull $Dir
+  if (-not (Test-Path -LiteralPath $source)) { Fail "packaged source directory is missing: $source" }
+  $prefix = "$Dir/"
+  $copied = 0
+  $ignored = 0
+  $strays = @()
+  foreach ($file in @(Get-ChildItem -LiteralPath $source -Recurse -File -Force)) {
+    $rel = $prefix + $file.FullName.Substring($source.Length + 1).Replace('\', '/')
+    if ($Sets.tracked.Contains($rel)) {
+      $target = Join-Path $Runtime $rel
+      $parent = Split-Path -Parent $target
+      if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+      Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+      $copied++
+    } elseif ($Sets.untracked.Contains($rel)) {
+      $strays += $rel
+    } else {
+      $ignored++
+    }
+  }
+  # git's index says a file belongs to the source tree but it is not on disk: the
+  # whitelist copy would otherwise hand out a package that quietly lacks a source
+  # file (staged-but-not-committed deletion, half-finished checkout).
+  $absent = @()
+  foreach ($rel in $Sets.tracked) {
+    if (-not $rel.StartsWith($prefix)) { continue }
+    $probe = Join-Path $source $rel.Substring($prefix.Length).Replace('/', '\')
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) { $absent += $rel }
+  }
+  Write-Host ("[build] packaged {0} git-tracked file(s) from {1}\ (.gitignore-excluded, not packaged: {2})" -f $copied, $Dir, $ignored)
+  if ($strays.Count -gt 0) {
+    Fail ("untracked local files are sitting in the packaged tree " + $Dir + "\ (they would ship without ever being committed or reviewed): " + ($strays -join '; ') + ' - delete them, or git add them and rebuild')
+  }
+  if ($absent.Count -gt 0) {
+    Fail ("git tracks these files under " + $Dir + "\ but they are missing from this checkout: " + ($absent -join '; '))
+  }
+}
+
 # --- 5. clean ONLY the fixed output directory (path validated first) -----------
 $dist = Join-Path $repoFull 'dist\windows-x64'
 if (Test-Path -LiteralPath $dist) {
@@ -151,8 +228,12 @@ try {
   New-Item -ItemType Directory -Path (Join-Path $dist 'tray') -Force | Out-Null
   Copy-Item -LiteralPath $trayExe -Destination (Join-Path $dist 'tray\TokenMonitorTray.exe')
 
-  foreach ($dir in @('bin', 'src', 'web')) {
-    Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $runtime $dir) -Recurse
+  $packagedSets = Get-PackagedFileSets
+  if ($null -eq $packagedSets) {
+    Fail 'cannot read the git index for bin/src/web (git missing or this is not a checkout); the package must be built from git-tracked sources, so the whole-directory fallback is deliberately refused'
+  }
+  foreach ($dir in $PACKAGED_DIRS) {
+    Copy-TrackedSourceTree $dir $runtime $packagedSets
   }
   Copy-Item -LiteralPath (Join-Path $repoFull 'package.json') -Destination (Join-Path $runtime 'package.json')
 
