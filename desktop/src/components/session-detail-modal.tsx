@@ -108,11 +108,14 @@ function formatCompactTokenCount(value: number) {
   return `${Number((value / 1_000_000).toFixed(1))}m`;
 }
 
-function tokenDeltaTone(deltaTokens: number) {
-  if (deltaTokens <= 0) return "text-muted-foreground";
-  if (deltaTokens < 1_000) return "text-emerald-600 dark:text-emerald-400";
-  if (deltaTokens < 10_000) return "text-sky-600 dark:text-sky-400";
-  if (deltaTokens < 50_000) return "text-amber-600 dark:text-amber-400";
+// Colors one request's token volume. Per the contract in session-conversation.ts
+// the backend already reports per-request amounts, so a differenced (and
+// possibly negative) value must never reach this scale.
+function requestTokenTone(tokens: number) {
+  if (tokens <= 0) return "text-muted-foreground";
+  if (tokens < 1_000) return "text-emerald-600 dark:text-emerald-400";
+  if (tokens < 10_000) return "text-sky-600 dark:text-sky-400";
+  if (tokens < 50_000) return "text-amber-600 dark:text-amber-400";
   return "text-red-600 dark:text-red-400";
 }
 
@@ -135,12 +138,10 @@ function TokenMetadata({ usage }: { usage: DisplayTokenUsageItem }) {
         data-testid="token-metadata"
         title={tooltip}
       >
-        {formatCompactTokenCount(usage.totalTokens)}
-        {usage.deltaTokens === undefined ? null : (
-          <span className={`font-semibold ${tokenDeltaTone(usage.deltaTokens)}`}>
-            {` (${usage.deltaTokens >= 0 ? "+" : ""}${formatCompactTokenCount(usage.deltaTokens)})`}
-          </span>
-        )} tokens
+        <span className={`font-semibold ${requestTokenTone(usage.totalTokens)}`}>
+          {formatCompactTokenCount(usage.totalTokens)}
+        </span>{" "}
+        tokens
       </span>
       <span className="font-sans text-[10px] font-normal text-muted-foreground" title={tooltip}>
         {t("sessions.detail.token_breakdown", {

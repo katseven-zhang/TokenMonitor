@@ -4,7 +4,11 @@ const EXEC_TOOL_NAMES = new Set(["exec", "exec_command"]);
 
 export type ReplayItem = SessionReplayDetail["turns"][number]["items"][number];
 export type TokenUsageItem = Extract<ReplayItem, { kind: "tokenUsage" }>;
-export type DisplayTokenUsageItem = TokenUsageItem & { deltaTokens?: number };
+// Contract with `convert_to_delta` in `session_replay.rs`: every `tokenUsage`
+// item carries the token size of a single request, never a running session
+// total. The frontend must display it as-is; differencing adjacent events
+// turns an ordinary cache-hit drop into a misleading negative number.
+export type DisplayTokenUsageItem = TokenUsageItem;
 
 export type TimelineEntry = {
   item: ReplayItem;
@@ -30,22 +34,17 @@ function isVisibleTimelineItem(item: ReplayItem) {
   return item.kind !== "patch" || item.isError || item.success === false;
 }
 
-function timelineEntries(items: ReplayItem[], previousTotalTokens: { value?: number }): TimelineEntry[] {
+function timelineEntries(items: ReplayItem[]): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
 
   for (const item of items) {
     if (item.kind === "tokenUsage") {
-      const tokenUsage = {
-        ...item,
-        deltaTokens: previousTotalTokens.value === undefined ? undefined : item.totalTokens - previousTotalTokens.value,
-      };
-      previousTotalTokens.value = item.totalTokens;
       const previousEntry = entries.findLast((entry) => isVisibleTimelineItem(entry.item));
       if (previousEntry) {
-        previousEntry.tokenUsage = tokenUsage;
+        previousEntry.tokenUsage = item;
         continue;
       }
-      entries.push({ item: tokenUsage });
+      entries.push({ item });
       continue;
     }
     entries.push({ item, activity: item.kind === "toolCall" ? buildToolActivity(item) : undefined });
@@ -722,9 +721,9 @@ export function classifyExploration(command: string): Exploration[] | null {
   return actions.length ? actions : null;
 }
 
-function buildTurnConversation(turn: SessionReplayDetail["turns"][number], previousTotalTokens: { value?: number }): ConversationBlock[] {
+function buildTurnConversation(turn: SessionReplayDetail["turns"][number]): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
-  for (const entry of timelineEntries(orderedItems(turn), previousTotalTokens)) {
+  for (const entry of timelineEntries(orderedItems(turn))) {
     if (!isVisibleTimelineItem(entry.item)) continue;
     const activity = entry.activity;
     const tool = entry.item.kind === "toolCall" ? entry.item : null;
@@ -747,12 +746,11 @@ function buildTurnConversation(turn: SessionReplayDetail["turns"][number], previ
 }
 
 export function buildConversation(turn: SessionReplayDetail["turns"][number]): ConversationBlock[] {
-  return buildTurnConversation(turn, {});
+  return buildTurnConversation(turn);
 }
 
 export function buildSessionConversation(turns: SessionReplayDetail["turns"]): ConversationBlock[][] {
-  const previousTotalTokens: { value?: number } = {};
-  return turns.map((turn) => buildTurnConversation(turn, previousTotalTokens));
+  return turns.map((turn) => buildTurnConversation(turn));
 }
 
 export function summarizeOutput(text: string) {

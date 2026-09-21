@@ -1730,6 +1730,11 @@ fn subtract_raw_usage(current: &RawUsage, previous: Option<&RawUsage>) -> RawUsa
     }
 }
 
+/// Contract with `desktop/src/lib/session-conversation.ts`: the `TokenUsage`
+/// items produced here are per-request amounts (the delta between two
+/// `total_token_usage` snapshots), not running session totals. The frontend
+/// displays them as-is and must never difference adjacent events, because a
+/// later request legitimately costs fewer tokens when cache hits rise.
 fn convert_to_delta(raw: &RawUsage) -> ModelUsage {
     ModelUsage {
         input_tokens: raw.input_tokens,
@@ -2234,6 +2239,9 @@ mod tests {
         assert_eq!(detail.thread_name.as_deref(), Some("First real request"));
     }
 
+    // Fixture shared with the TypeScript side
+    // (`session-conversation.test.ts`: usage(150) then usage(120)): whatever the
+    // running totals do, each emitted event is one request's own volume.
     #[test]
     fn calculates_token_deltas_from_running_totals() {
         let raw = [

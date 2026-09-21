@@ -36,19 +36,31 @@ describe("conversation projection", () => {
     const first = blocks[0];
     if (first.kind !== "exploration") throw new Error("Expected exploration");
     expect(first.entries.map((entry) => entry.tokenUsage?.totalTokens)).toEqual([100, 200, 300]);
-    expect(first.entries.map((entry) => entry.tokenUsage?.deltaTokens)).toEqual([undefined, 100, 100]);
     expect(first.entries[0].item.rawJsonlLineNumbers).toEqual([1, 2]);
     expect(first.actions[0]).toEqual([{ label: "Search", text: "shimmer in src" }]);
   });
 
-  it("keeps token deltas continuous across turns", () => {
+  it("displays every request's own token volume without differencing across turns", () => {
     const conversations = buildSessionConversation([
       replayTurn([command("cat a"), usage(100)]),
       replayTurn([command("cat b"), usage(130)]),
     ]);
 
-    expect(conversations[0][0].kind === "exploration" && conversations[0][0].entries[0].tokenUsage?.deltaTokens).toBeUndefined();
-    expect(conversations[1][0].kind === "exploration" && conversations[1][0].entries[0].tokenUsage?.deltaTokens).toBe(30);
+    expect(conversations[0][0].kind === "exploration" && conversations[0][0].entries[0].tokenUsage?.totalTokens).toBe(100);
+    expect(conversations[1][0].kind === "exploration" && conversations[1][0].entries[0].tokenUsage?.totalTokens).toBe(130);
+  });
+
+  // Same fixture as `calculates_token_deltas_from_running_totals` in
+  // session_replay.rs: the backend already emits per-request amounts, so a
+  // second, smaller request must never render as a negative step.
+  it("keeps a shrinking request positive, matching the Rust per-request contract", () => {
+    const blocks = buildConversation(replayTurn([command("cat a"), usage(150), command("cat b"), usage(120)]));
+    const volumes = blocks.flatMap((block) => (block.kind === "exploration"
+      ? block.entries.map((entry) => entry.tokenUsage?.totalTokens ?? null)
+      : [block.entry.tokenUsage?.totalTokens ?? null]));
+
+    expect(volumes).toEqual([150, 120]);
+    expect(volumes.every((volume) => volume === null || volume >= 0)).toBe(true);
   });
 
   it("keeps failures, running commands, writes and ambiguous shell scripts visible", () => {
