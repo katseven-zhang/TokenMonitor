@@ -55,6 +55,23 @@ function placeholders(value: string): string[] {
   return [...value.matchAll(/\{\{(\w+)\}\}/g)].map((match) => match[1]).sort();
 }
 
+// A Chinese literal inside a component is copy the locale tables can never reach, which is
+// the exact mixing task #72 complains about. Comments are source text, not UI text, so they
+// are stripped before the scan.
+function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+const SRC_PREFIX = path.dirname(SRC_ROOT);
+
+// Task #103 owns the last two files that still bake Chinese into a lib module; the guard
+// turns red for them as soon as that exemption is dropped.
+const UNLOCALISED_MODULES = ["lib/quota-observations.ts", "lib/currency.tsx"];
+
+function relative(file: string): string {
+  return path.relative(SRC_PREFIX, file).replaceAll("\\", "/");
+}
+
 // Keys the UI assembles at runtime are invisible to the literal scan above:
 // `t(`sessions.detail.${toneKey}`)` for a message role, `patch_${action}` for a
 // diff header, `tool_argument_labels.${key}` per argument, and the status token
@@ -74,6 +91,11 @@ const DYNAMIC_KEYS = [
   "sessions.detail.status_failed",
   "sessions.detail.status_success",
   "sessions.detail.status_unrecorded",
+  // The language picker builds its option keys from `LANGUAGES`, so no literal reaches them:
+  // `t(`settings.lang_${code}`)`. These are the strings the switcher actually shows.
+  "settings.lang_zh",
+  "settings.lang_en",
+  "settings.lang_ja",
   ...Object.keys(tables.en).filter((key) => key.startsWith("sessions.detail.tool_argument_labels.")),
 ];
 
@@ -90,6 +112,11 @@ function has(table: Table, key: string): boolean {
 function textFor(table: Table, key: string): string {
   return table[key] ?? table[`${key}_other`] ?? "";
 }
+
+// A language name is written the way its own speakers write it: the picker must not offer
+// 「英語」 to a Japanese user choosing English (task #104), so these keys are exempt from the
+// untranslated-English check below on purpose, and `settings.lang_*` stays a real string.
+const ENDONYM_KEYS = ["settings.lang_en", "settings.lang_zh", "settings.lang_ja"];
 
 describe("locale tables", () => {
   it("finds the translation keys the UI actually uses", () => {
@@ -121,6 +148,7 @@ describe("locale tables", () => {
     // Excel (.xlsx)) are legitimately ASCII, so only letter-bearing words the
     // locale could translate are checked here.
     const untranslated = referenced.filter((key) => {
+      if (ENDONYM_KEYS.includes(key)) return false;
       // Placeholders are code, not copy: `CLI: {{value}}` must not count as an
       // English word that zh and ja failed to translate.
       const source = textFor(tables.en, key).replace(/\{\{[^}]*\}\}/g, "");
@@ -142,5 +170,13 @@ describe("locale tables", () => {
       expect(tables[locale]["settings.lang_zh"]).toBe("简体中文");
       expect(tables[locale]["settings.lang_ja"]).toBe("日本語");
     }
+  });
+
+  it("leaves no hardcoded CJK literal in a component the locale tables should speak for", () => {
+    const offenders = sourceFiles(SRC_ROOT)
+      .filter((file) => !UNLOCALISED_MODULES.some((exempt) => relative(file).endsWith(exempt)))
+      .filter((file) => /[぀-ヿ一-鿿]/.test(stripComments(readFileSync(file, "utf8"))))
+      .map(relative);
+    expect(offenders).toEqual([]);
   });
 });

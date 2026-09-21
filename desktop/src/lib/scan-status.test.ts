@@ -114,8 +114,8 @@ describe("dashboard consumers", () => {
   });
 
   it("renders counts through the degraded-aware helpers", () => {
-    expect(app).toContain("{countOrNull(s.files)}");
-    expect(app).toContain("{timeOrNull(s.updatedAt)}");
+    expect(app).toContain("files:countOrNull(s.files)");
+    expect(app).toContain("updated:timeOrNull(s.updatedAt)");
     expect(app).not.toMatch(/<small>\{s\.files\}/);
     expect(app).not.toMatch(/time\(s\.updatedAt\)/);
   });

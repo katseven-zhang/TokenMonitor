@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { fetchSessionDetail, fetchSessionRawPage, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
 import { formatNumber, formatPercent } from "@/lib/formatters";
+import { formatTimestamp as formatRangeTime } from "../lib/localized-format";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
 import { writeClipboard } from "@/lib/clipboard";
 import { SessionQuotaUsageView } from "./session-quota-usage";
@@ -1148,7 +1149,11 @@ function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; 
 
 export function SessionDetailModal({ session, query, onClose }: SessionDetailModalProps) {
   const {money:formatCurrency}=useCurrency();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // The header's query-range strip is the panel's only timestamp that is not part of the
+  // replay body, and it used to fall back to the runtime default locale, which is neither
+  // the interface language nor a stable one (task #72).
+  const language = i18n.resolvedLanguage ?? i18n.language;
   const [loadedDetail, setDetail] = useState<SessionReplayDetail | null>(null);
   const [activePath, setActivePath] = useState(session.path);
   const detail = loadedDetail?.path === activePath ? loadedDetail : null;
@@ -1434,8 +1439,8 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             aria-hidden={isScrolled}
           >
           <section ref={summaryRef} aria-label={t("sessions.detail.session_summary")} className="min-h-0 overflow-hidden bg-surface">
-          {detail?.range && detail.rangeTotals ? <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs"><strong>当前查询范围</strong> · {new Date(detail.range.start).toLocaleString()} — {new Date(detail.range.end).toLocaleString()}（不含结束时刻）<div className="mt-1 flex flex-wrap gap-4"><span>Tokens <b>{formatNumber(detail.rangeTotals.totalTokens)}</b></span><span>用量记录 <b>{formatNumber(detail.rangeTotals.events)}</b></span><span>费用 <b>{formatCurrency(detail.rangeTotals.costUsd)}</b></span>{detail.rangeTotals.unpricedEvents>0 && <span>{detail.rangeTotals.unpricedEvents} 条记录缺少价格</span>}</div></div> : null}
-          <p className="pt-2 text-xs text-muted-foreground">以下为完整会话回放与父子关系，保留范围外对话上下文；完整会话统计与上方查询范围分别显示。</p>
+          {detail?.range && detail.rangeTotals ? <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs"><strong>{t("sessions.detail.range_scope")}</strong> · {t("sessions.detail.range_between", { start: formatRangeTime(detail.range.start, language), end: formatRangeTime(detail.range.end, language) })}<div className="mt-1 flex flex-wrap gap-4"><span>{t("sessions.total_tokens")} <b>{formatNumber(detail.rangeTotals.totalTokens)}</b></span><span>{t("common.usage_records")} <b>{formatNumber(detail.rangeTotals.events)}</b></span><span>{t("sessions.detail.cost")} <b>{formatCurrency(detail.rangeTotals.costUsd)}</b></span>{detail.rangeTotals.unpricedEvents>0 && <span>{t("sessions.detail.unpriced_records", { records: formatNumber(detail.rangeTotals.unpricedEvents) })}</span>}</div></div> : null}
+          <p className="pt-2 text-xs text-muted-foreground">{t("sessions.detail.replay_scope_note")}</p>
           {detail && <div className="flex flex-wrap gap-1.5 pt-1 pb-0.5">
             {metric(t("sessions.detail.duration"), formatDuration(detail?.summary.durationMs), <Clock3 className="h-3.5 w-3.5" />, "blue")}
             {metric(t("sessions.detail.total_tokens"), formatNumber(detail?.summary.totalTokens ?? session.totalTokens), <Database className="h-3.5 w-3.5" />, "violet")}

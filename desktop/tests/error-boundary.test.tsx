@@ -1,6 +1,13 @@
-import { describe,expect,it } from 'vitest';
+import { describe,expect,it,beforeAll } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import i18n from '../src/i18n';
 import { ErrorBoundary, FailureNotice } from '../src/components/error-boundary';
+
+beforeAll(async()=>{
+  // The notice reads its copy from the locale tables now, so the instance has to be
+  // initialised before a render (same setup `currency-settings.test.tsx` uses).
+  await i18n.changeLanguage('zh');
+});
 
 describe('failure notice',()=>{
   it('states what failed and offers the way out',()=>{

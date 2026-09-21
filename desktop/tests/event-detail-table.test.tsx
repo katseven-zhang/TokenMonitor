@@ -1,7 +1,13 @@
-import { afterEach, describe,expect,it,vi } from 'vitest';
+import { afterEach, describe,expect,it,vi,beforeAll } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import i18n from '../src/i18n';
 import { EventDetailTable } from '../src/components/event-detail-table';
 import type { Query } from '../src/lib/api';
+
+beforeAll(async()=>{
+  // Every string in the panel now comes from the locale tables.
+  await i18n.changeLanguage('zh');
+});
 
 // The effect that loads a page never runs during static rendering, so this is exactly
 // the window a user used to see as a false "no usage records" panel.
