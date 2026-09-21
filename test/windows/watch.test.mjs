@@ -9,6 +9,8 @@
  *  4. stop() 关闭全部 watcher/timer，不留下句柄；重复 start/stop 幂等
  *  5. Windows 路径空格与中文测试通过，测试不依赖真实用户目录
  *  6. 提交聚焦 commit、git diff --check 与 fake watcher/真实临时目录证据
+ *  7. #96 第 8 条：watcher 抛错后按指数退避重新挂上、重挂的那只真的在接活、
+ *     重挂本身失败时继续排下一轮并按 rearmMaxMs 封顶；stop() 取消在途重挂
  */
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs';
@@ -300,6 +302,110 @@ try {
     scanner.stop();
     ok('scanner.stop() 关闭了底层的 watchManager', scanner.watchManager === null);
     store.close();
+  }
+
+  /* ---------- 7. #96 第 8 条：watcher 抛错后要重新挂上，且重挂的那只真的在接活 ---------- */
+  console.log('\n[7] #96 watcher 抛错后的退避重挂');
+  {
+    const dir = join(baseTmp, 'case7-rearm', '项目 B');
+    mkdirSync(dir, { recursive: true });
+
+    // 注入假 watcher：错误与文件事件都由测试触发，不赌真实 fs 事件时序。
+    let made = 0;      // 成功构造出来的 watcher 只数
+    let attempts = 0;  // watchImpl 被调用的次数（含失败）
+    let failNext = false;
+    class FakeWatcher {
+      constructor(watchDir, opts, cb) {
+        this.dir = watchDir; this.opts = opts; this.cb = cb;
+        this.id = ++made; this.closed = false; this.onError = null;
+      }
+      on(ev, fn) { if (ev === 'error') this.onError = fn; }
+      fire(evType, filename) { this.cb(evType, filename); }
+      boom(err) { this.onError(err); }
+      close() { this.closed = true; }
+    }
+    const watchImpl = (watchDir, opts, cb) => {
+      attempts++;
+      if (failNext) throw new Error('EBUSY: resource busy or locked, watch');
+      return new FakeWatcher(watchDir, opts, cb);
+    };
+
+    let scans = 0;
+    const wm = new WatchManager({
+      sources: [{ tool: 'fake', kind: 'jsonl', roots: [dir] }],
+      watchImpl,
+      debounceMs: 20,
+      pollIntervalMs: 0,   // 关掉兜底轮询：此时"有没有实时监听"就是全部差别
+      rearmMs: 30,
+      rearmMaxMs: 120,
+      onChanged: async () => { scans++; },
+      log: () => {},
+    });
+
+    wm.start();
+    ok('start() 恰好挂上 1 个 watcher', wm.watchers.length === 1, String(wm.watchers.length));
+    ok('watchedDirs 精确暴露被监听的目录', wm.watchedDirs.length === 1 && wm.watchedDirs[0] === dir,
+      JSON.stringify(wm.watchedDirs));
+    const first = wm.watchers[0];
+    first.fire('change', 'a.jsonl');
+    await delay(80);
+    ok('重挂前：原 watcher 的事件正常触发扫描', scans === 1, `实际 ${scans} 次`);
+
+    first.boom(new Error('ENOSPC: no space left on device, watch'));
+    ok('抛错瞬间 watcher 计数归零（不留下半死的句柄）', wm.watchers.length === 0);
+    ok('抛错的原 watcher 被 close', first.closed === true);
+    ok('抛错后排上了重挂（修前到此为止，只剩静默降级）', wm.rearmingDirs.length === 1,
+      JSON.stringify(wm.rearmingDirs));
+
+    await delay(150);
+    ok('到点后重新挂上同一个目录', wm.watchers.length === 1 && wm.watchedDirs[0] === dir,
+      JSON.stringify(wm.watchedDirs));
+    const second = wm.watchers[0];
+    ok('重挂上是新 watcher 而不是那只已关闭的',
+      !!second && second !== first && second.closed === false, JSON.stringify({ id: second?.id }));
+
+    ok('重挂完成后待重挂队列清空', wm.rearmingDirs.length === 0);
+
+    const beforeRearm = scans;
+    second?.fire('change', 'b.jsonl');
+    await delay(80);
+    ok('重挂后的 watcher 真的在接活（不是只计数好看）', scans === beforeRearm + 1,
+      `${beforeRearm} -> ${scans}`);
+
+    // 退避封顶：重挂本身一直失败时，既不放弃也不忙等
+    const attemptsBefore = attempts;
+    failNext = true;
+    second?.boom(new Error('EPERM: operation not permitted, watch'));
+    await delay(400);
+    ok('重挂失败后仍继续排下一轮（不能一次失败就永远降级）', attempts - attemptsBefore >= 4,
+      `失败期间又试了 ${attempts - attemptsBefore} 次`);
+    ok('退避按 rearmMaxMs 封顶，不是无限放大',
+      (wm._backoff.get(dir) ?? 0) <= wm.rearmMaxMs && (wm._backoff.get(dir) ?? 0) > wm.rearmMs,
+      `backoff=${wm._backoff.get(dir)} max=${wm.rearmMaxMs}`);
+    ok('失败期间既不虚报在监听也不漏掉待重挂',
+      wm.watchers.length === 0 && wm.rearmingDirs.length === 1,
+      JSON.stringify([wm.watchers.length, wm.rearmingDirs]));
+
+    // 成功挂上之后退避档位归零：一次故障不该让后续重挂永远停在封顶值
+    failNext = false;
+    await delay(200);
+    ok('故障恢复后终于挂上', wm.watchers.length === 1);
+    ok('挂上后退避档位归零', (wm._backoff.get(dir) ?? 0) === 0, String(wm._backoff.get(dir)));
+    const third = wm.watchers[0];
+    const beforeHeal = scans;
+    third?.fire('change', 'c.jsonl');
+    await delay(80);
+    ok('恢复后的 watcher 同样在接活', scans === beforeHeal + 1, `${beforeHeal} -> ${scans}`);
+
+    // stop() 必须连带取消在途重挂，否则就是事件循环句柄泄漏
+    third?.boom(new Error('EBUSY again'));
+    ok('再次抛错后又排上重挂', wm.rearmingDirs.length === 1);
+    const attemptsAtStop = attempts;
+    wm.stop();
+    ok('stop() 清空 watcher 与在途重挂', wm.watchers.length === 0 && wm.rearmingDirs.length === 0);
+    await delay(200);
+    ok('stop() 之后不再有重挂动作（无句柄泄漏）', attempts === attemptsAtStop,
+      `stop 时 ${attemptsAtStop} -> 现 ${attempts}`);
   }
 } finally {
   try {
