@@ -99,7 +99,15 @@ pub fn unchanged(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64
     db.query_row("SELECT 1 FROM source_files WHERE path=?1 AND agent=?2 AND size=?3 AND mtime=?4 AND error IS NULL",params![path,agent,size,mtime],|_|Ok(())).is_ok()
 }
 pub fn malformed_lines(db: &Connection, path: &str, agent: &str) -> Result<usize, String> {
-    db.query_row("SELECT malformed_lines FROM source_health WHERE path=?1 AND agent=?2",params![path,agent],|row|row.get(0)).map_err(|e|e.to_string())
+    match db.query_row("SELECT malformed_lines FROM source_health WHERE path=?1 AND agent=?2",params![path,agent],|row|row.get(0)) {
+        Ok(n) => Ok(n),
+        // #63: 行缺失不是错误。source_health 只在 replace_file 里写入，历史库/迁移前
+        // 索引过的文件可能永远没有这一行；未命中指纹走 unchanged 快速路径时这里曾把
+        // 一次查询失败升级成整源报错——而文件本身不变，下次仍走快速路径，错误就永久
+        // 钉在面板上。没有健康行按“无已知畸形行”计，让源正常复用。
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(e) => Err(e.to_string()),
+    }
 }
 pub fn replace_file(
     db: &mut Connection,
