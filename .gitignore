@@ -1,5 +1,4 @@
 node_modules/
-bin/tokenmonitor-bin
 bin/tokenmonitor.app/
 *.db
 *.db-shm
