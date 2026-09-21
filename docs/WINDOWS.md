@@ -71,6 +71,10 @@ node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://
 | 登录自启 | 任务计划 `TokenMonitor-Server` | tauri-plugin-autostart 写的 `HKCU\...\CurrentVersion\Run` 值 |
 | 进程名 | 启动器 `TokenMonitor.exe` + `node.exe`（**与桌面版主程序同名，见 #89**） | `TokenMonitor.exe` |
 
+- **两者共用同一个数据根环境变量 `TOKENMONITOR_DATA_DIR`**，所以「把它指到同一目录」不是假想场景，而是一次设置就会发生的事（旧版 [../src/config.js](../src/config.js) `env.TOKENMONITOR_DATA_DIR`；桌面版 [../desktop/src-tauri/src/config.rs](../desktop/src-tauri/src/config.rs) `std::env::var_os("TOKENMONITOR_DATA_DIR")`）。逐文件核对两产品各自写出的文件名得出的结论（#89 第 5 条；这是读代码得出的，**没有**把两个产品真跑进同一目录做实测）：**文件名层面不重叠，可以同处一目录而互不损坏**——
+  - 旧版写：`tokenmonitor.db`、`pricing.json`、`tokenmonitor-<端口>.lock`、`tokenmonitor.log`（含 `.1/.2` 轮转副本）、原生启动器的 `gui-settings.json`；
+  - 桌面版写：`events-v2.sqlite`、`prices.json`、`settings.json`、`service.lock`、`service.log`。
+  - 但**能同处一室 ≠ 会互相同步**：`tokenmonitor-<端口>.lock` 与 `service.lock` 是两把互不相干的锁，同目录并不会让一方看见另一方的单实例判定；`pricing.json`（旧版）与 `prices.json`（桌面版）更是两份 schema 不同的价格表（见 #89 的 `price_tables` 分叉报告），改一处不会影响另一处。因此同目录**允许、不推荐**：出现分歧时两产品的金额与状态会各自演算，`tokenmonitor status` 的 `price_tables` 行是唯一会告诉你这点的入口。
 - **探测是双向的**：旧版侧 [../src/coexistence.js](../src/coexistence.js) 只读地看桌面版装没装
   （`%LOCALAPPDATA%\TokenMonitor2\settings.json`）、配在哪个端口、那个端口有没有人监听，
   以及两套自启各自的注册状态；桌面版侧
