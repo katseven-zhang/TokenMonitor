@@ -536,10 +536,10 @@
       "day_caveat": "使用量はこの日の全セッションの合計です。残りクォータは最初と最後の観測スナップショットで、リセットをまたぐ場合があります。",
       "usage_and_remaining": "{{usage}} · 残り {{remaining}}",
       "used_and_remaining_change": "使用 {{usage}} • 残り {{remaining}}",
-      "aria_label": "推定 5 時間および週ごとの割り当て使用量",
+      "aria_label": "推定 5 時間および週ごとの割り当て使用量と残りクォータ",
       "usage_label": "{{window}}の使用量 {{usage}}、残り {{remaining}}",
       "resets": "リセット: {{value}}",
-      "caveat": "整数ログのスナップショットから推定しています。丸めや同時実行中の他のCodexセッションにより、計上結果が変わる場合があります。リセット期間ごとに個別表示します。"
+      "caveat": "一覧は最新に観測したスナップショット時点の残りクォータを表示します。値はログ内の整数スナップショットから推定したもので、リセット期間ごとに個別表示します。"
     },
     "detail": {
       "modal_title": "セッションの詳細",
@@ -623,6 +623,9 @@
       },
       "output": "出力",
       "activity_running": "実行中",
+      "waited_for_background_terminal": "バックグラウンドターミナルを待機しました",
+      "interacted_with_background_terminal": "バックグラウンドターミナルと対話しました",
+      "reasoning_tokens": "推論",
       "token_breakdown": "入力 {{input}} · キャッシュ {{cached}} · 出力 {{output}}",
       "omitted_lines": "… {{count}} 行を省略",
       "activity_ran": "実行済み",
@@ -661,6 +664,9 @@
       "raw_load_failed": "生トランスクリプトを読み込めませんでした",
       "markdown_link_copied": "リンクをコピーしました",
       "markdown_copy_failed": "リンクをコピーできませんでした",
+"markdown_image": "[画像: {{alt}}]",
+      "markdown_image_without_alt": "外部画像は読み込まれていません",
+      "markdown_link_title": "リンクをコピー（オフラインではページを開きません）",
       "copy_session_id": "セッションIDをコピー",
       "session_id_copied": "セッションIDをコピーしました",
       "reveal_in_file_manager": "エクスプローラーで表示"
@@ -708,7 +714,7 @@
     "language_title": "言語設定",
     "language_desc": "アプリケーションの表示言語を変更します。",
     "language_label": "アプリの言語",
-    "lang_en": "英語",
+    "lang_en": "English",
     "lang_zh": "简体中文",
     "menu_bar_title": "メニューバー/システムトレイ設定",
     "menu_bar_desc": "macOSのメニューバー、Windowsのトレイツールチップ、トレイメニューに表示する項目を設定します。",
