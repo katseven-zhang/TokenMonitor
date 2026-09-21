@@ -28,6 +28,9 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
     Ok(db)
 }
 
+// Bump when a collector's accounting changes. Rebuild snapshots from source logs,
+// while preserving cached data until each replacement transaction is ready.
+pub const COLLECTOR_REVISION: &str = "4";
 pub fn open(root: &Path) -> Result<Connection, String> {
     let db = Connection::open(root.join("events-v2.sqlite")).map_err(|e| e.to_string())?;
     register_query_functions(&db)?;
@@ -73,9 +76,6 @@ pub fn open(root: &Path) -> Result<Connection, String> {
           INSERT OR REPLACE INTO cache_metadata VALUES('view_revision','3');
           COMMIT;").map_err(|e|e.to_string())?;
     }
-    // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
-    // while preserving cached data until each replacement transaction is ready.
-    const COLLECTOR_REVISION: &str = "4";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",
@@ -402,4 +402,116 @@ pub fn query_session_hierarchy_records(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use crate::model::{Parsed, Quota, Tokens};
+
+    fn temp_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("tm-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        config::initialize(&root).unwrap();
+        root
+    }
+
+    fn event(id: &str, ts: i64) -> Event {
+        Event {
+            id: id.into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: "m".into(),
+            ts,
+            tokens: Tokens { input: 10, ..Default::default() },
+            path: "f.jsonl".into(),
+            line: 1,
+        }
+    }
+
+    /// #82：collector_revision 的语义迁移此前完全无覆盖。旧语义库重新打开时必须
+    /// 把每个来源重新武装（size=-1，下轮扫描全量重解析），但不得清空原始快照——
+    /// 重建是靠逐个文件的替换事务增量完成的，中途崩溃也不能丢历史数据。
+    #[test]
+    fn stale_collector_revision_rearms_sources_but_keeps_raw_cache() {
+        let root = temp_root();
+        {
+            let mut db = open(&root).unwrap();
+            replace_file(&mut db, "f.jsonl", "codex", 123, 456, &Parsed {
+                events: vec![event("1", 60_000)],
+                ..Default::default()
+            })
+            .unwrap();
+            // 假装这是一个语义升级前留下的库。
+            db.execute("UPDATE cache_metadata SET value='0' WHERE key='collector_revision'", [])
+                .unwrap();
+            db.execute("UPDATE source_files SET size=123", []).unwrap();
+        }
+        let db = open(&root).unwrap();
+        let revision: String = db
+            .query_row("SELECT value FROM cache_metadata WHERE key='collector_revision'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(revision, COLLECTOR_REVISION);
+        let size: i64 = db
+            .query_row("SELECT size FROM source_files WHERE path='f.jsonl' AND agent='codex'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(size, -1, "旧语义缓存必须重新武装");
+        let kept: i64 = db.query_row("SELECT COUNT(*) FROM raw_events", [], |r| r.get(0)).unwrap();
+        assert_eq!(kept, 1, "重新武装不是抹库：旧快照保留到逐个文件被替换为止");
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #82：配额入库路径（Parsed.quotas → quota 表 → quota_history 查询）此前
+    /// 只测过手工 INSERT 进表之后的读取，采集侧写入从未被钉住：payload 要按
+    /// JSON 原样落库，文件重解析后不得留下该文件旧快照的残行。
+    #[test]
+    fn quota_ingestion_round_trips_payload_and_is_cleared_on_reparse() {
+        let root = temp_root();
+        let mut db = open(&root).unwrap();
+        let parsed = Parsed {
+            quotas: vec![Quota {
+                agent: "codex".into(),
+                session: "s".into(),
+                ts: 60_000,
+                payload: serde_json::json!({"used_percent": 42, "window": {"kind": "week", "limit_seconds": 1800}}),
+            }],
+            ..Default::default()
+        };
+        replace_file(&mut db, "f.jsonl", "codex", 1, 1, &parsed).unwrap();
+        let payload: String = db
+            .query_row("SELECT payload FROM quota WHERE path='f.jsonl' AND agent='codex' AND session='s' AND ts=60000", [], |r| r.get(0))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["used_percent"], 42);
+        assert_eq!(value["window"]["limit_seconds"], 1800);
+        // 配额要能从面板的读取路径原样返回（dashboard 的 quotaHistory 查询段）。
+        let prices = crate::pricing::Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        let data = crate::query::dashboard(
+            &db,
+            &crate::model::Query {
+                start: 0,
+                end: 120_000,
+                agent: Some("codex".into()),
+                model: None,
+                project: None,
+                session: None,
+                search: String::new(),
+                time_zone: None,
+                offset_minutes: 0,
+            },
+            &prices,
+        )
+        .unwrap();
+        assert_eq!(data["quotaHistory"]["total"], 1);
+        assert_eq!(data["quotaHistory"]["items"][0]["payload"]["used_percent"], 42);
+        // 同一文件重解析、不再含该配额行时，旧行必须随替换事务一起清掉。
+        replace_file(&mut db, "f.jsonl", "codex", 2, 2, &Parsed::default()).unwrap();
+        let left: i64 = db.query_row("SELECT COUNT(*) FROM quota", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 0);
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

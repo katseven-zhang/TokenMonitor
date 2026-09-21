@@ -29,4 +29,17 @@ for(const [agent,collect] of Object.entries(adapters)) {
   }
 }
 cache.close();
-console.log(JSON.stringify(results,null,2));
+console.log(JSON.stringify(results, null, 2));
+// #82: this is a gate, so it must be able to fail. equal:false is a real parity
+// break and exits non-zero; a probe that compared nothing is "not run", never green.
+const compared = results.filter((r) => r.equal !== undefined);
+const mismatches = compared.filter((r) => !r.equal);
+console.log(`parity probe: ${compared.length} compared, ${mismatches.length} mismatched, ${results.length - compared.length} skipped`);
+if (mismatches.length > 0) {
+  console.error('PARITY FAILED: the desktop cache diverged from the JS collectors (see equal:false rows above).');
+  process.exit(1);
+}
+if (compared.length === 0) {
+  console.error('PARITY NOT RUN: no sample was comparable (missing cache, no indexed rows, or every sample skipped). This is not a pass.');
+  process.exit(1);
+}

@@ -37,6 +37,11 @@ tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-autostart = { version = "2", optional = true }
 chrono-tz = "0.10"
 
+[dev-dependencies]
+# #82：解包级校验 xlsx 导出内容。与 rust_xlsxwriter 0.94.1 的传递依赖同版本
+# 同特性（zip 7.2 / deflate），不引入新的 crate 下载，--locked 直接通过。
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
+
 [profile.release]
 strip = true
 lto = true

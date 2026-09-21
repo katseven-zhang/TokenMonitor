@@ -55,3 +55,44 @@ fn verbatim_source_paths_leave_the_export_text_formats() {
     assert_eq!(hits,1);
     drop(cache);fs::remove_dir_all(root).unwrap();
 }
+
+/// #82：xlsx 导出此前只被断言过 ZIP 魔数（任何 zip 都能过），等于没有校验。
+/// 现在解包看真实内容：必备部件齐全、表头在、成本与 token 是数字单元格里
+/// 的黄金数（1M input × 2/百万 = 2.0），#62 的还原也随 xlsx 落进 sheet。
+#[test]
+fn xlsx_export_content_is_checked_beyond_zip_magic() {
+    let root=std::env::temp_dir().join(format!("tm-xlsx-{}",uuid::Uuid::new_v4()));
+    config::initialize(&root).unwrap();
+    let mut cache=db::open(&root).unwrap();
+    let event=Event{id:"1".into(),model:"priced".into(),agent:"codex".into(),session:"s".into(),project:"p".into(),path:r"\\?\Q:\sessions\a.jsonl".to_string(),line:7,ts:60_000,tokens:Tokens{input:1_000_000,output:0,..Default::default()}};
+    db::replace_file(&mut cache,"f","codex",1,1,&Parsed{events:vec![event],..Default::default()}).unwrap();
+    fs::write(root.join("prices.json"),json!({"version":1,"currency":"USD","models":{"priced":[{"input":2,"cached":0,"cacheWrite":0,"output":0}]}}).to_string()).unwrap();
+    let q=Query{start:60_000,end:120_000,agent:Some("codex".into()),model:None,project:None,session:None,search:String::new(),time_zone:None,offset_minutes:0};
+    let path=root.join("deep.xlsx");
+    service::query_local(&root,"export",&json!({"query":q,"format":"xlsx","path":path})).unwrap();
+    let mut archive=zip::ZipArchive::new(fs::File::open(&path).unwrap()).unwrap();
+    let mut names=Vec::new();
+    let mut sheet=String::new();
+    let mut shared=String::new();
+    for i in 0..archive.len() {
+        let mut entry=archive.by_index(i).unwrap();
+        names.push(entry.name().to_string());
+        if entry.name()=="xl/worksheets/sheet1.xml" {
+            std::io::Read::read_to_string(&mut entry,&mut sheet).unwrap();
+        }
+        if entry.name()=="xl/sharedStrings.xml" {
+            std::io::Read::read_to_string(&mut entry,&mut shared).unwrap();
+        }
+    }
+    for part in ["[Content_Types].xml","xl/workbook.xml","xl/worksheets/sheet1.xml","xl/sharedStrings.xml"] {
+        assert!(names.iter().any(|n|n==part),"{part} 缺失：{names:?}");
+    }
+    assert!(shared.contains(">Source<")&&shared.contains(">Estimated USD<")&&shared.contains(">Line<"),"{shared}");
+    assert!(sheet.contains(r#"<c r="F2"><v>1000000</v></c>"#),"Input 黄金数没进 F2 数字单元格：{sheet}");
+    assert!(sheet.contains(r#"<c r="L2"><v>2</v></c>"#),"成本 1M×2/百万=2.0 没进 L2 数字单元格：{sheet}");
+    assert!(shared.contains(r"Q:\sessions\a.jsonl")&&!shared.contains(r"\\?\"),"#62 的 verbatim 还原没进 xlsx：{shared}");
+    // #83 现状记录：Line 列此刻仍是文本单元格（Excel 会给它挂"以文本形式存储的
+    // 数字"警告）。#83 把它改成数字单元格时，这条断言随之翻转。
+    assert!(shared.contains("<si><t>7</t></si>"),"Line=7 当前以共享字符串落盘：{shared}");
+    drop(cache);fs::remove_dir_all(root).unwrap();
+}

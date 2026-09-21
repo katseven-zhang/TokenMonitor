@@ -2103,6 +2103,59 @@ console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/S
   }
 }
 
+/* ---------- [27] 平价探针门禁（#82：gate 必须能变红） ----------
+ * desktop/scripts/compare-local.mjs 是 JS 采集器与桌面端 events-v2 缓存之间的
+ * 对账探针。修前它只把 equal:false 打印出来，退出码永远是 0，也没有任何 CI
+ * 跑它——形似门禁、实则永不失败。修后：不一致=exit 1，没有可比样本=不算通过
+ * (exit 1)。下面用合成的缓存库（schema 与 desktop/src-tauri/src/db.rs 的列名
+ * 一致）端到端测这三态：一致绿、分歧红、空库红。黄金数：claude-code 一条
+ * input 100 / cache_read 20 / cache_creation 5 / output 30 → total 155
+ * （Anthropic 口径：input 不含缓存，total 为四列之和，两侧同式）。 */
+console.log('\n[27] 平价探针门禁（#82）');
+{
+  const probe = join(ROOT, 'desktop', 'scripts', 'compare-local.mjs');
+  const base = mkdtempSync(join(tmpdir(), 'parity-gate-'));
+  const transcript = join(base, 'parity-gate-transcript.jsonl');
+  writeFileSync(transcript, '{"type":"assistant","timestamp":"2026-09-20T00:00:00Z","sessionId":"gate","cwd":"/tmp/gate","message":{"id":"msg-1","model":"Gate Fixture","usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":30}}}\n');
+  const stat = statSync(transcript);
+  const runProbe = (dbPath) =>
+    spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', probe, dbPath], { encoding: 'utf8' });
+  const buildCache = (inputTokens) => {
+    const dbPath = join(base, 'events-v2.sqlite');
+    if (existsSync(dbPath)) rmSync(dbPath);
+    const cache = new DatabaseSync(dbPath);
+    cache.exec(
+      'CREATE TABLE source_files(path TEXT,agent TEXT,size INTEGER,mtime INTEGER,title TEXT,error TEXT,updated_at INTEGER);' +
+      'CREATE TABLE raw_events(path TEXT,agent TEXT,id TEXT,ts INTEGER,session TEXT,model TEXT,project TEXT,data TEXT);',
+    );
+    cache
+      .prepare('INSERT INTO source_files VALUES(?,?,?,?,?,?,?)')
+      .run(transcript, 'claude-code', stat.size, Math.round(stat.mtimeMs), null, null, Date.now());
+    if (inputTokens !== null) {
+      const data = {
+        id: 'k1', agent: 'claude-code', session: 'gate', project: '/tmp/gate',
+        model: 'gate fixture', ts: 1789862400000,
+        tokens: { input: inputTokens, cached: 20, cacheWrite: 5, output: 30, reasoning: 0 },
+        path: transcript, line: 1,
+      };
+      cache
+        .prepare('INSERT INTO raw_events VALUES(?,?,?,?,?,?,?,?)')
+        .run(transcript, 'claude-code', 'k1', data.ts, 'gate', data.model, data.project, JSON.stringify(data));
+    }
+    cache.close();
+    return dbPath;
+  };
+  let r = runProbe(buildCache(100));
+  ok('#82 两侧数字一致 → 探针 exit 0', r.status === 0, `status=${r.status} ${r.stderr}`);
+  r = runProbe(buildCache(999));
+  ok('#82 桌面缓存与 JS 采集分歧 → equal:false 且 exit 1（修前恒为 0）',
+    r.status === 1 && r.stdout.includes('"equal": false'), `status=${r.status}`);
+  r = runProbe(buildCache(null));
+  ok('#82 没有任何可比样本不算通过 → exit 1（修前空数组静默绿）',
+    r.status === 1 && /PARITY NOT RUN/.test(r.stderr), `status=${r.status}`);
+  rmSync(base, { recursive: true, force: true });
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
