@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # #102：可手动重跑（只验证，不发布）
+  workflow_dispatch:
+
+# #102：显式最小权限，别依赖组织默认值
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -14,13 +20,19 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
         node: ['22.13', '24']
     runs-on: ${{ matrix.os }}
+    # #102：所有 job 都要有超时。npm test 里跑着起服务、spawn 子进程的套件，
+    # 卡住时没有超时就永远不出红/绿（GitHub 默认上限 6 小时）。
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
-      # 只装 echarts（前端 UMD 用），零其他依赖
-      - run: npm ci --omit=dev || npm install --no-audit --no-fund
+      # 只装 echarts（前端 UMD 用），零其他依赖。
+      # #102：原来写的是 `npm ci --omit=dev || npm install --no-audit --no-fund`——
+      # 这个 `||` 让"锁文件与 package.json 不同步"这种真故障被静默兜过去：装出来了，
+      # 于是门永远不会红。装依赖的门必须能红，所以回落分支删掉，只留 npm ci。
+      - run: npm ci --omit=dev
       - run: npm test
 
   # 装成依赖后是否真的能用。仓库内直接跑一切正常，但 npm 会把 echarts 提升到顶层
@@ -32,9 +44,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22.13'
       - run: npm install --no-audit --no-fund
@@ -51,15 +64,31 @@ jobs:
         env:
           TOKENMONITOR_OFFLINE: '1'
         run: |
+          # #102：不再写死 8799。固定端口在共享/自托管 runner 上会和真实实例撞，
+          # 撞了之后 curl 打到的是别人的服务——那种"绿"是假的。让 Node 挑一个真空闲端口。
+          set -u
           cd "$RUNNER_TEMP/consumer"
-          node node_modules/tokenmonitor/bin/tokenmonitor.js serve --port 8799 &
+          SRV=""
+          cleanup() { if [ -n "$SRV" ]; then kill "$SRV" 2>/dev/null || true; fi; }
+          trap cleanup EXIT
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(p));});')
+          test -n "$PORT" || { echo "拿不到空闲端口"; exit 1; }
+          echo "用端口 $PORT"
+          node node_modules/tokenmonitor/bin/tokenmonitor.js serve --port "$PORT" &
+          SRV=$!
+          ready=0
           for i in $(seq 1 40); do
-            curl -sf -o /dev/null "http://127.0.0.1:8799/api/summary?days=1" && break
+            curl -sf -o /dev/null "http://127.0.0.1:${PORT}/api/summary?days=1" && { ready=1; break; }
             sleep 1
           done
+          # #102：起不来要直接红并说明，而不是继续往下 curl 拿一堆 000 再猜原因
+          if [ "$ready" != "1" ]; then
+            echo "服务在 40s 内没有起来（端口 ${PORT}）"
+            exit 1
+          fi
           fail=0
           for p in "/" "/app.js" "/lib/format.js" "/lib/series.js" "/vendor/echarts.min.js"; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:8799$p")
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}$p")
             echo "$p -> $code"
             [ "$code" = "200" ] || fail=1
           done
@@ -69,9 +98,10 @@ jobs:
   # 线上 12 次启动崩溃全属此类，必须单独冒烟
   import-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - run: npm install --no-audit --no-fund

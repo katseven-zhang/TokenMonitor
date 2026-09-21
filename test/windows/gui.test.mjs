@@ -176,7 +176,15 @@ console.log('\n[#41] CI cargo 构建门 + --pumpcheck 消息泵存活（「活�
   ok('#41 windows.yml 有独立 windows-gui job（不拖慢 Node 侧 job）', /windows-gui:/.test(yml));
   ok('#41 CI 真实跑 cargo build --release', /cargo build --release/.test(yml));
   ok('#41 CI 构建产物后强制跑 gui.test.mjs', /gui\.test\.mjs/.test(yml));
-  ok('#41 cargo 缓存（Swatinem/rust-cache）', /rust-cache@v2/.test(yml));
+  // #102：缓存必须仍在，但按 commit SHA 固定而不是浮标签 @v2（上游 force-push 会
+  // 静默换掉这里执行的代码）。同时守住缓存路径不含空格——带空格时 rust-cache 的
+  // key 永远命不中，job 只是变慢，不会有人发现。
+  ok('#41 cargo 缓存（Swatinem/rust-cache，按 SHA 固定）', /Swatinem\/rust-cache@[0-9a-f]{40}/.test(yml));
+  ok('#102 rust-cache workspaces 路径不含空格且指向真实目录',
+    !/workspaces:[ \t]+\S+[ \t]+\S/.test(yml) && /workspaces:[ \t]*windows\/gui/.test(yml));
+  // timeout-minutes / 权限 / SHA 固定的通检在 test/run.mjs 的 [27] 段（那里按 job 作用域解析，
+  // 不会把 on: 下的键误数成 job），这里只守 gui 自己这条路径。
+  ok('#102 gui job 有 timeout-minutes', /timeout-minutes:[ \t]*[1-9]\d*/.test(yml));
   const tcPath = join(repo, 'rust-toolchain.toml');
   ok('#41 rust 工具链版本固定（rust-toolchain.toml）',
     existsSync(tcPath) && /channel\s*=\s*["']?\d+\.\d+\.\d+/.test(readFileSync(tcPath, 'utf8')));

@@ -2137,7 +2137,7 @@ console.log('\n[26] 测试入口全量接线（#67）：每个测试入口必须
     ? readFileSyncList(wfDir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))
     : [];
   ok('#67 找到 workflow 目录（否则"交给 CI"的断言全是空转）', wfFiles.length >= 3, wfFiles.join(','));
-  const wfJobs = wfFiles.flatMap((f) => parseJobs(readFileSync(join(wfDir, f), 'utf8'))
+  const wfJobs = wfFiles.flatMap((f) => parseCiJobs(readFileSync(join(wfDir, f), 'utf8'))
     .map((j) => ({ file: f, ...j })));
 
   /** 目录递归：与 globSync 互为交叉校验，防"发现机制本身漏目录"。 */
@@ -2256,19 +2256,19 @@ console.log('\n[26] 测试入口全量接线（#67）：每个测试入口必须
 
   /* ---- 判定器自检（负例：证明这些门会红） ---- */
   {
-    const noWin = parseJobs('jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    const noWin = parseCiJobs('jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
     ok('#67 自检·无 windows-latest job 时判红',
       !noWin.some((j) => /windows-latest/.test(j.body) && /\bnpm test\b/.test(j.body)));
-    const withSkip = parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    env:\n      SKIP_GUI_ARTIFACT: "1"\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
+    const withSkip = parseCiJobs('jobs:\n  g:\n    runs-on: windows-latest\n    env:\n      SKIP_GUI_ARTIFACT: "1"\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
     ok('#67 自检·job 里出现 SKIP_GUI_ARTIFACT 时判红',
       withSkip.some((j) => /SKIP_GUI_ARTIFACT/.test(j.body)));
     ok('#67 自检·零断言套件判红', !(1 >= MIN_ASSERT));
     ok('#67 自检·非零退出码判红', !(1 === 0));
     ok('#67 自检·continue-on-error 的覆盖 job 判红',
-      !parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: npm test\n        continue-on-error: true\n')
+      !parseCiJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: npm test\n        continue-on-error: true\n')
         .every((j) => !/continue-on-error:\s*true/.test(j.body)));
     // C 档的两类脱钩：job 只跑测试不构建产物 / 干脆不引用该套件
-    const noBuild = parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
+    const noBuild = parseCiJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
     ok('#67 自检·job 不构建产物却跑 gui.test.mjs 时判红',
       !noBuild.some((j) => /build\.ps1/.test(j.body) && /cargo build/.test(j.body)));
     ok('#67 自检·没有任何 job 引用 tray.test.mjs 时判红',
@@ -2278,28 +2278,142 @@ console.log('\n[26] 测试入口全量接线（#67）：每个测试入口必须
       wfJobs.map((j) => j.name).join(','));
   }
 
-  /** 极简 workflow job 解析：按两空格缩进切块；只服务本节的门，不做通用 YAML。 */
-  function parseJobs(text) {
-    const lines = text.split(/\r?\n/);
-    const out = [];
-    let inJobs = false;
-    let cur = null;
-    for (const ln of lines) {
-      if (/^jobs:\s*$/.test(ln)) { inJobs = true; continue; }
-      if (inJobs && /^\S/.test(ln)) { inJobs = false; }
-      if (!inJobs) continue;
-      const m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);
-      if (m) { if (cur) out.push(cur); cur = { name: m[1], body: '' }; continue; }
-      if (cur) cur.body += ln + '\n';
+}
+/* ---------- [27] CI workflow 卫生守卫（#102） ---------- */
+console.log('\n[27] CI workflow 卫生（#102）：超时 / 最小权限 / SHA 固定 / 无兜底绿 / 缓存路径');
+{
+  /*
+   * 这些规则单看像是洁癖，但它们共同决定"红能不能真的传到人身上"：
+   *  - 没有 timeout-minutes 的 job 卡住时永远不出结果（比红更糟）；
+   *  - 不写 permissions 就吃组织默认值，默认一放宽，验证用 workflow 也拿到写权限；
+   *  - `uses:` 跟浮标签（@v4）意味着上游一次 force-push 就能换掉我们执行的代码；
+   *  - `npm ci || npm install`、`continue-on-error: true` 这类兜底把故障吃成绿；
+   *  - rust-cache 的 workspaces 带空格时缓存 key 永远命不中（本仓库曾经的写法），
+   *    job 只是变慢，所以没人会去修——必须有门盯着。
+   * 解析沿用 #67 的 parseCiJobs；每条规则都配一个负例自检，证明它真的会红。
+   */
+  const WF_DIR = join(ROOT, '.github', 'workflows');
+  const wfNames = readdirSync(WF_DIR).filter((n) => /\.ya?ml$/.test(n)).sort();
+  ok('#102 扫到了 workflow 文件（守卫不空转）', wfNames.length >= 3, wfNames.join(','));
+  const allJobs = [];
+  const thirdParty = new Set();
+  for (const n of wfNames) {
+    const text = readFileSync(join(WF_DIR, n), 'utf8');
+    // 整行注释里会出现"原来写的是什么"的反面示例，卫生规则查的是要执行的代码，不是散文
+    const code = text.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+    const jobs = parseCiJobs(text);
+    ok(`#102 ${n} 至少解析出一个 job（解析器没瞎）`, jobs.length >= 1, String(jobs.length));
+    ok(`#102 ${n} 声明了顶层 permissions（不依赖组织默认值）`,
+      /^permissions:[ \t]*$|^permissions:[ \t]*\{/m.test(code), n);
+    // 每个 job 都要有超时
+    for (const j of jobs) {
+      const t = /timeout-minutes:\s*(\d+)/.exec(j.body);
+      ok(`#102 ${n}/${j.name} 有 timeout-minutes`, !!t && Number(t[1]) > 0 && Number(t[1]) <= 90, t ? t[1] : '缺失');
+      allJobs.push({ file: n, ...j });
     }
-    if (cur) out.push(cur);
-    return out;
+    // action 一律按 SHA 固定。正则必须吃下所有 `uses:` 写法：第三方 action 在
+    // `- name: ...` 下面另起一行（`        uses: Swatinem/rust-cache@…`），早期版本
+    // 只匹配 `- uses:` 同行，于是恰恰是最该固定的第三方 action 一条都没被检查（#102）。
+    const uses = ciUsesRefs(text);
+    for (const { ref, comment } of uses) {
+      const sha = (ref.split('@')[1] || '');
+      if (!ref.startsWith('actions/')) thirdParty.add(ref.split('@')[0]);
+      ok(`#102 ${n} 的 ${ref.split('@')[0]} 按完整 commit SHA 固定`, /^[0-9a-f]{40}$/.test(sha), ref);
+      ok(`#102 ${n} 的 ${ref.split('@')[0]} 行尾注明了版本号`, /^v?\d/.test(comment), comment || '无注释');
+    }
+    // 守卫自身的覆盖率：用另一套（trim 逐行）算法数 uses 行数，防正则静默漏
+    const usesLines = text.split(/\r?\n/).filter((l) => /^(?:-[ \t]+)?uses:[ \t]/.test(l.trim())).length;
+    ok(`#102 ${n} 的 SHA 固定守卫覆盖了全部 uses 步骤`, uses.length === usesLines, `${uses.length}/${usesLines}`);
+    // 兜底绿与显式放行
+    ok(`#102 ${n} 没有 continue-on-error: true`, !/continue-on-error:[ \t]*true/.test(code));
+    ok(`#102 ${n} 的依赖安装没有 || 兜底（装不上必须红）`,
+      !/npm (ci|install)[^\n]*\|\|/.test(code));
+    ok(`#102 ${n} 没有把 npm test / 行为测试接在 || true 后面`,
+      !/(npm test|\.test\.mjs)[^\n]*\|\|\s*true/.test(code));
+    // 缓存路径：不得含空白，且必须指向仓库里真实存在的目录
+    for (const w of text.matchAll(/^ +workspaces:\s*([^#\n]+?)\s*(?:#.*)?$/gm)) {
+      const value = w[1].replace(/^['"]|['"]$/g, '');
+      ok(`#102 ${n} 缓存 workspaces 路径不含空格（含空格则永不命中）`, !/\s/.test(value), value);
+      ok(`#102 ${n} 缓存 workspaces 指向真实目录`, existsSync(join(ROOT, ...value.split('/'))), value);
+    }
+    // 端口与本机痕迹
+    ok(`#102 ${n} 没有写死的回环端口（固定端口撞车时会打到别人的服务）`,
+      !/127\.0\.0\.1:\d|localhost:\d|--port \d/.test(code),
+      (code.match(/(127\.0\.0\.1|localhost):\d|--port \d/g) || []).join(' '));
+    ok(`#102 ${n} 没有本机用户目录痕迹`, !/[A-Za-z]:[\\/](Users|home)[\\/]|\/home\/[a-z]{2,}\b/.test(code));
+  }
+  ok('#102 三个 workflow 合计 job 数 ≥8（守卫覆盖到全部真实 job）', allJobs.length >= 8, String(allJobs.length));
+  // 第三方 action（rust-cache 这类）是浮标签风险的主体；这条保证 SHA 守卫真的看到过它们
+  ok('#102 SHA 固定守卫至少扫到一个非 actions/ 的第三方 action',
+    thirdParty.size >= 1, [...thirdParty].join(',') || '一个都没扫到（正则又瞎了）');
+
+  /* ---- 负例自检：证明上面每一条都会红 ---- */
+  {
+    const dirty = [
+      'jobs:\n  a:\n    runs-on: ubuntu-latest\n',                                   // 缺 timeout
+      'jobs:\n  a:\n    timeout-minutes: 10\n    steps:\n      - uses: o/r@v4\n',      // 浮标签
+      'jobs:\n  a:\n    steps:\n      - run: npm ci || npm install\n',                 // 兜底绿
+      'jobs:\n  a:\n    steps:\n      - run: npm test\n        continue-on-error: true\n',
+      'jobs:\n  a:\n    steps:\n      - uses: x\n        with:\n          workspaces: \'a b/c\'\n',
+      'jobs:\n  a:\n    steps:\n      - run: curl http://127.0.0.1:8799/api\n',
+    ];
+    ok('#102 自检·缺 timeout-minutes 判红',
+      !/timeout-minutes:\s*\d+/.test(parseCiJobs(dirty[0])[0].body));
+    ok('#102 自检·`|| npm install` 兜底判红', /npm (ci|install)[^\n]*\|\|/.test(dirty[2]));
+    ok('#102 自检·continue-on-error: true 判红', /continue-on-error:\s*true/.test(dirty[3]));
+    ok('#102 自检·含空格的缓存 workspaces 判红', /\s/.test('a b/c'));
+    ok('#102 自检·写死的回环端口判红', /127\.0\.0\.1:\d/.test(dirty[5]));
+    // #102 的回归本体：第三方 action 写在 `- name:` 下面另起一行，早期正则只认
+    // `- uses:` 同行，这类行一条也扫不到——门看起来全绿，实际什么都没检查。
+    // 两条负例都走 ciUsesRefs 真函数，保证守卫改一次、自检跟着变。
+    const floating = ciUsesRefs(dirty[1]);
+    const indented = ciUsesRefs('jobs:\n  a:\n    steps:\n      - name: cache\n        uses: o/r@v4\n');
+    ok('#102 自检·浮标签 uses 判红',
+      floating.length === 1 && !/^[0-9a-f]{40}$/.test(floating[0].ref.split('@')[1]), JSON.stringify(floating));
+    ok('#102 自检·缩进写法的 uses（第三方 action）也被扫到',
+      indented.length === 1 && indented[0].ref === 'o/r@v4' && indented[0].comment === '', JSON.stringify(indented));
+    ok('#102 自检·SHA 固定 + 版本注释的写法判绿',
+      /^[0-9a-f]{40}$/.test('11d5960a326750d5838078e36cf38b85af677262') && /^v?\d/.test('v4.4.0'));
   }
 }
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
 process.exit(failed ? 1 : 0);
 
 function read(p) { return readFileSync(p, 'utf8'); }
+
+/**
+ * #102：抽出 workflow 文本里所有 `uses:` 步骤 → [{ ref, comment }]。
+ * 两种写法都要吃到：`- uses: a/b@sha # v1` 与 `- name: cache` 下另起一行的
+ * `uses: c/d@sha # v2`（第三方 action 基本都是后者）。只认前一种会让 rust-cache
+ * 这类真正需要固定的 action 一条都不进检查，门全绿却是空转。
+ */
+function ciUsesRefs(text) {
+  const re = /^[ \t]*(?:-[ \t]+)?uses:[ \t]*([^\s#]+)(?:[ \t]+#[ \t]*(\S+))?[ \t]*$/gm;
+  return [...text.matchAll(re)].map((m) => ({ ref: m[1], comment: m[2] ?? '' }));
+}
+
+/**
+ * #67/#102 共用：按两空格缩进把 workflow 的 job 块切出来（只用于本文件的门，
+ * 不做通用 YAML 解析）。返回 [{ name, body }]，body 是该 job 的原文缩进块。
+ */
+function parseCiJobs(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let inJobs = false;
+  let cur = null;
+  for (const ln of lines) {
+    if (/^jobs:\s*$/.test(ln)) { inJobs = true; continue; }
+    if (inJobs && /^\S/.test(ln)) { inJobs = false; }
+    if (!inJobs) continue;
+    const m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);
+    if (m) { if (cur) out.push(cur); cur = { name: m[1], body: '' }; continue; }
+    if (cur) cur.body += `${ln}
+`;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 import { readFileSync, statSync } from 'node:fs';
