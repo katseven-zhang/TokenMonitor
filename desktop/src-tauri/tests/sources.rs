@@ -726,6 +726,70 @@ fn compare_local_golden_is_what_the_desktop_collector_produces() {
     );
 }
 
+/// #71 第 7 项：antigravity 的两处秒→毫秒（行内完成时间 `gen.9.4` 与 `steps.metadata.1`）
+/// 之前是裸 `sec * 1000 + nanos / 1e6`。上游把一个离谱的秒值写进这两个 varint 里，
+/// debug 构造直接 overflow panic（采集这一源就断在 `read_antigravity` 里），release 构造
+/// 回绕成一个 1970 前后的荒唐日期——面板上那条事件既不落在它该在的时间桶，也不报错。
+/// 现在换算不出来就是"这条没有可用时间"：坏行计 malformed，同库的健康行照常入库。
+#[test]
+fn antigravity_bogus_second_timestamp_is_not_a_date() {
+    let root = std::env::temp_dir().join(format!("tokenmonitor-agy-71-{}", uuid::Uuid::new_v4()));
+    let conv = root.join("conversations/a-session.db");
+    let db = sqlite(&conv);
+    db.execute_batch("CREATE TABLE steps(idx INTEGER,metadata BLOB);CREATE TABLE gen_metadata(idx INTEGER,data BLOB);")
+        .unwrap();
+    const SEC: u64 = 1_800_000_000;
+    const BOGUS: u64 = i64::MAX as u64; // 乘 1000 必然溢出 i64
+    let step_time = |sec: u64| blob(1, &[number(1, sec), number(2, 0)].concat());
+    let inline_time = |sec: u64, nanos: u64| {
+        blob(9, &blob(4, &[number(1, sec), number(2, nanos)].concat()))
+    };
+    let usage = || blob(4, &[number(2, 10), number(3, 5), number(5, 0)].concat());
+
+    // 1) 行内时间是坏秒值，回退用的 steps 时间也是坏秒值 → 这一行没有时间，不入库
+    db.execute("INSERT INTO steps VALUES(1,?1)", [step_time(BOGUS)]).unwrap();
+    db.execute(
+        "INSERT INTO gen_metadata VALUES(1,?1)",
+        [blob(1, &[usage(), inline_time(BOGUS, 0), blob(19, b"g71-bogus")].concat())],
+    )
+    .unwrap();
+    // 2) 只有坏的行内时间、steps 时间正常 → 回退后照常入库（证明拒的是溢出，不是整源）
+    db.execute("INSERT INTO steps VALUES(2,?1)", [step_time(SEC + 60)]).unwrap();
+    db.execute(
+        "INSERT INTO gen_metadata VALUES(2,?1)",
+        [blob(1, &[usage(), inline_time(BOGUS, 0), blob(19, b"g71-fallback")].concat())],
+    )
+    .unwrap();
+    // 3) 行内时间是正常秒值 → 毫秒换算照常
+    db.execute(
+        "INSERT INTO gen_metadata VALUES(3,?1)",
+        [blob(1, &[usage(), inline_time(SEC + 10, 500_000_000), blob(19, b"g71-ok")].concat())],
+    )
+    .unwrap();
+    drop(db);
+
+    let parsed = tokenmonitor_core::collectors::read_antigravity(&conv, "a-project").unwrap();
+    let by_model = |name: &str| {
+        parsed
+            .events
+            .iter()
+            .find(|e| e.model == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("事件缺失：{name} 现有 {:?}", parsed.events))
+    };
+    assert!(
+        parsed.events.iter().all(|e| e.model != "g71-bogus"),
+        "两处时间都换算不出来的行不能编一个日期入库：{:?}",
+        parsed.events
+    );
+    assert_eq!(parsed.malformed_lines, 1, "{:?}", parsed.events);
+    assert_eq!(parsed.events.len(), 2, "{:?}", parsed.events);
+    assert_eq!(by_model("g71-fallback").ts, (SEC as i64 + 60) * 1000);
+    assert_eq!(by_model("g71-ok").ts, (SEC as i64 + 10) * 1000 + 500);
+    assert!(by_model("g71-ok").ts > 1_700_000_000_000, "正常值仍是正常日期");
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// #85：opencode 的工具调用时间与 Node 端 `collectors/opencode.js` 同一优先级——
 /// `data.state.time.start`（工具真正开始的时刻）优先，行内没有才退回 part 行的
 /// `time_created`。此前桌面端只认 `time_created`：一次跑了 60 秒的工具调用在桌面端

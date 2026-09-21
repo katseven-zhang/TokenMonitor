@@ -39,6 +39,25 @@ fn json_int(v: &Value) -> i64 {
 fn number(v: &Value, key: &str) -> i64 {
     json_int(v.get(key).unwrap_or(&Value::Null))
 }
+/// #71 第 7 项：秒 + 纳秒 → 毫秒，必须用 `checked_*`。
+///
+/// protobuf 的 `Timestamp` 里这两个 varint 由写入方说了算，读不出来的值不能变成一个大数：
+/// 修前 antigravity 两处（`step_times` 与行内完成时间）都是裸 `sec * 1000 + nanos / 1e6`，
+/// debug 构造下直接 overflow panic（采集线程炸），release 下回绕成 1970 前后的荒唐日期
+/// ——面板里那条事件既不在"今日/本周"，也不在时间轴该在的位置，属于静默归零那一类。
+/// 口径与本文件 `json_int()`（:26）和 `cache_write_of()` 的"两种写法不等就拒读记 0"一致：
+/// **返回 0 表示"这条没有可用时间"**，由调用方决定回退（steps 时间）还是计 malformed，
+/// 而不是替上游编一个日期出来。`timestamp()`（:7）走的是另一条路：它先把 ≥1e11 的值
+/// 当毫秒用，乘 1000 的那一支只接 <1e11 的输入，天然不可能溢出，故不需要这里兜底。
+fn seconds_to_ms(seconds: i64, nanos: i64) -> i64 {
+    seconds
+        .checked_mul(1000)
+        .and_then(|ms| ms.checked_add(nanos / 1_000_000))
+        // 负数同样不是时间：调用方只需要 `ts <= 0` 这一道判据（step_times 的回退查表
+        // 也按 0 处理），不必再多记一种"负毫秒"的形态。
+        .filter(|ms| *ms > 0)
+        .unwrap_or(0)
+}
 fn string(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
@@ -917,7 +936,7 @@ fn step_times(db: &Connection) -> rusqlite::Result<BTreeMap<i64, i64>> {
         let Ok((idx, b)) = row else { continue };
         if let Ok(f) = fields(&b) {
             let t = nested(&f, 1);
-            out.insert(idx, num(&t, 1) * 1000 + num(&t, 2) / 1_000_000);
+            out.insert(idx, seconds_to_ms(num(&t, 1), num(&t, 2)));
         }
     }
     Ok(out)
@@ -963,7 +982,7 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
         // （docs/sources/antigravity.md「collector 同时支持两代：行内时间戳优先，缺失时
         // 回退 steps 对齐」）。此前取两者 max：steps 一行覆盖多次生成，它的时间可以晚于
         // 本次生成的完成时间，取 max 会把事件推到错误的时间轴上，而 Node 端记的是行内值。
-        let inline = num(&t, 1) * 1000 + num(&t, 2) / 1_000_000;
+        let inline = seconds_to_ms(num(&t, 1), num(&t, 2));
         let ts = if inline > 0 {
             inline
         } else {
@@ -1076,6 +1095,27 @@ pub fn antigravity_projects(index: &Path) -> Result<BTreeMap<String, String>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #71 第 7 项：秒→毫秒不再裸乘。真实 antigravity 时间（18 亿秒量级）照常换算，
+    /// 上游写坏的秒值一律读成"没有可用时间"(0)，既不 panic（debug 下修前是 overflow
+    /// panic）也不回绕成一个 1970 前后的荒唐日期。端到端的那一条见
+    /// `tests/sources.rs::antigravity_bogus_second_timestamp_is_not_a_date`。
+    #[test]
+    fn seconds_to_ms_refuses_to_invent_a_date() {
+        assert_eq!(seconds_to_ms(1_800_000_000, 0), 1_800_000_000_000);
+        assert_eq!(seconds_to_ms(1_800_000_000, 500_000_000), 1_800_000_000_500);
+        assert_eq!(seconds_to_ms(0, 0), 0);
+        // 裸乘会 overflow panic / 回绕的两个量级：读不出来就是 0，不是日期
+        assert_eq!(seconds_to_ms(i64::MAX, 0), 0, "sec 大到乘不动 → 无可用时间");
+        assert_eq!(seconds_to_ms(9_000_000_000_000_000_000, 0), 0);
+        assert_eq!(seconds_to_ms(-5, 0), 0, "负的同样不是时间，调用方只需认 0");
+        // 边界内侧仍是合法值：拒的是"换算不出日期"，不是"数字大"。能落进 i64 的换算结果
+        // 一律如实上报——这里不再发明第二条丢弃规则（真实上游的秒值在 1e10 量级以下，
+        // 而"读得出来却荒谬"该由秒/毫秒粒度那条 1e11 阈值管，见 timestamp() 与 tokens.js）
+        assert_eq!(seconds_to_ms(i64::MAX / 1000, 0), 9_223_372_036_854_775_000);
+        // 纳秒按 /1e6 进位（与 Node 端 antigravity.js 的 `Math.floor(nanos/1e6)` 同式，
+        // 上游写出超过 1e9 的纳秒时两端不能一个加一个不加）
+        assert_eq!(seconds_to_ms(1_800_000_000, 1_500_000_000), 1_800_000_001_500);
+    }
     #[test]
     fn cache_correction_cannot_inflate_cumulative_delta() {
         let prev = Tokens {
