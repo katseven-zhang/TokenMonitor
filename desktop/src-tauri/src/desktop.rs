@@ -79,16 +79,19 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
                 Ok(())
             })
             .map_err(|_| "只允许打开已索引的本地文件".to_string())?;
+            // #62: 存储键是 canonicalize 的 verbatim 形态（\\?\…），explorer.exe
+            // 的命令行不接受它；只在这个对外端点上还原。
+            let open_path = crate::model::display_path(path);
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
                 std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,{path}"))
+                    .arg(format!("/select,{open_path}"))
                     .creation_flags(0x08000000)
                     .spawn()
                     .map_err(|e| e.to_string())?;
             }
-            Ok(json!({"path":path}))
+            Ok(json!({"path":open_path}))
         }
         "dashboard" | "events" | "activities" | "replay" | "export" => service::query_local(&root, method, &args),
         _ => Err(format!("未知本地操作: {method}")),

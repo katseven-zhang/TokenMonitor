@@ -148,7 +148,9 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
                 p.cost(e)
                     .map(|c| format!("{:.8}",c*p.display_factor()))
                     .unwrap_or_else(|| "unpriced".into()),
-                e.path.clone(),
+                // #62: the stored key may be a `\\?\` verbatim path; exported
+                // workbooks and CSVs must show a path the user can actually use.
+                crate::model::display_path(&e.path),
                 e.line.to_string(),
             ]
         })

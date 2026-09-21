@@ -122,3 +122,34 @@ pub fn windows_project_key(value: &str) -> Option<String> {
 pub fn project_key(value: &str) -> String {
     windows_project_key(value).unwrap_or_else(||value.to_string())
 }
+
+/// #62: `fs::canonicalize` yields Windows verbatim paths (`\\?\...`);
+/// `explorer.exe /select,` cannot handle them and the export "Source" column
+/// becomes unreadable. Only the user-facing endpoints strip the prefix — the
+/// stored cache keys stay exactly as indexed (old and new rows share one
+/// format). A verbatim UNC (`\\?\UNC\server\share\x`) is restored to
+/// `\\server\share\x`; anything else passes through unchanged.
+pub fn display_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("\\\\?\\UNC\\") {
+        return format!("\\\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix("\\\\?\\") {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_path;
+    /// #62 黄金样例：三种 verbatim 形态各自的展示结果；普通路径原样保留。
+    /// 合成盘符 Q: 与 UNC 服务器名都是纯字符串输入，不触碰文件系统。
+    #[test]
+    fn verbatim_prefix_only_disappears_for_user_facing_endpoints() {
+        assert_eq!(display_path(r"\\?\Q:\sessions\a.jsonl"), r"Q:\sessions\a.jsonl");
+        assert_eq!(display_path(r"\\?\UNC\nas-share\sessions\a.jsonl"), r"\\nas-share\sessions\a.jsonl");
+        assert_eq!(display_path(r"\\?\Q:\"), r"Q:\");
+        assert_eq!(display_path(r"Q:\already\normal.jsonl"), r"Q:\already\normal.jsonl");
+        assert_eq!(display_path("/tmp/plain.jsonl"), "/tmp/plain.jsonl");
+    }
+}
