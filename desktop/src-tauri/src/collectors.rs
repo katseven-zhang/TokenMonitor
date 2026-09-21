@@ -794,6 +794,13 @@ pub fn antigravity_projects(index: &Path) -> Result<BTreeMap<String, String>, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Codex 的一条 `token_count` 快照，#71 的去重用例与 #82 的入库用例共用同一
+    /// 份夹具形状：前者钉"重复快照不重插"，后者钉"抽出来的 rate_limits 真的落进
+    /// quota 表"。`window` 这个嵌套对象是故意的——它用来证明 payload 是原样落库、
+    /// 没有在入库路上被削平。
+    fn rate_limit_line(used: u32, ts: &str) -> String {
+        format!(r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"used_percent":{used},"window":{{"kind":"week","limit_seconds":1800}}}},"info":{{"last_token_usage":{{"input_tokens":1,"output_tokens":0}}}}}}}}"#)
+    }
     #[test]
     fn cache_correction_cannot_inflate_cumulative_delta() {
         let prev = Tokens {
@@ -885,15 +892,12 @@ mod tests {
     /// 载荷与同会话上一条观测相同就不再入库；载荷一变（10%→11%）立刻新的一行。
     #[test]
     fn repeated_quota_snapshots_are_not_reinserted() {
-        let line = |used: u32, ts: &str| {
-            format!(r#"{{"timestamp":"{ts}","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"used_percent":{used}}},"info":{{"last_token_usage":{{"input_tokens":1,"output_tokens":0}}}}}}}}"#)
-        };
         let text = [
-            line(10, "2026-09-20T00:00:01Z"),
-            line(10, "2026-09-20T00:00:02Z"),
-            line(10, "2026-09-20T00:00:03Z"),
-            line(11, "2026-09-20T00:00:04Z"),
-            line(11, "2026-09-20T00:00:05Z"),
+            rate_limit_line(10, "2026-09-20T00:00:01Z"),
+            rate_limit_line(10, "2026-09-20T00:00:02Z"),
+            rate_limit_line(10, "2026-09-20T00:00:03Z"),
+            rate_limit_line(11, "2026-09-20T00:00:04Z"),
+            rate_limit_line(11, "2026-09-20T00:00:05Z"),
         ]
         .join("\n")
             + "\n";
@@ -901,5 +905,62 @@ mod tests {
         assert_eq!(p.quotas.len(), 2, "5 条重复快照只留 2 个不同观测");
         assert_eq!(p.quotas[0].payload["used_percent"], 10);
         assert_eq!(p.quotas[1].payload["used_percent"], 11);
+    }
+    /// #82：把上面 #71 那条去重用例（共用 `rate_limit_line` 这份夹具）往后再推
+    /// 一格——抽取出来的 rate_limits 必须真的落进 quota 表。此前配额入库只测过
+    /// "手工 Parsed 写进 db::replace_file 再读出来"（db.rs）与"手工 INSERT 进表
+    /// 再查"，采集侧的解析→入库这一段在 Rust 端没有钉住：session/ts 取自哪条
+    /// 记录、payload 是不是原样落库，改错了无人变红。
+    /// 黄金数：三条快照（10/10/11）→ 两行；ts 为各自那条 token_count 的时刻。
+    #[test]
+    fn rate_limits_rows_reach_the_quota_table() {
+        let text = [
+            rate_limit_line(10, "2026-09-20T00:00:01Z"),
+            rate_limit_line(10, "2026-09-20T00:00:02Z"),
+            rate_limit_line(11, "2026-09-20T00:00:03Z"),
+        ]
+        .join("\n")
+            + "\n";
+        let parsed = parse_jsonl("codex", "q.jsonl", &text);
+        assert_eq!(parsed.events.len(), 3, "每条 token_count 都该出一条事件");
+        let root = std::env::temp_dir().join(format!("tm-quota-row-{}", uuid::Uuid::new_v4()));
+        crate::config::initialize(&root).unwrap();
+        let mut db = crate::db::open(&root).unwrap();
+        crate::db::replace_file(&mut db, "q.jsonl", "codex", 1, 1, &parsed).unwrap();
+        let rows: Vec<(i64, String, serde_json::Value)> = db
+            .prepare("SELECT ts,session,payload FROM quota WHERE agent='codex' ORDER BY ts")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    serde_json::from_str(&r.get::<_, String>(2)?).unwrap(),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "去重后的两个观测都要入库");
+        assert_eq!(rows[0].2["used_percent"], 10);
+        assert_eq!(rows[1].2["used_percent"], 11);
+        // payload 原样落库：嵌套对象不能在入库路上被削平。
+        assert_eq!(rows[0].2["window"]["kind"], "week");
+        assert_eq!(rows[0].2["window"]["limit_seconds"], 1800);
+        // ts 取自各自那条 token_count，session 全部落在同一会话上。
+        assert_eq!(
+            rows[0].0,
+            chrono::DateTime::parse_from_rfc3339("2026-09-20T00:00:01Z")
+                .unwrap()
+                .timestamp_millis()
+        );
+        assert_eq!(
+            rows[1].0,
+            chrono::DateTime::parse_from_rfc3339("2026-09-20T00:00:03Z")
+                .unwrap()
+                .timestamp_millis()
+        );
+        assert!(!rows[0].1.is_empty() && rows[0].1 == rows[1].1, "{rows:?}");
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

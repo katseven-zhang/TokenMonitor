@@ -150,7 +150,7 @@ pub fn display_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_path, windows_project_key, Tokens};
+    use super::{display_path, windows_project_key, Query, Tokens};
     /// #62 黄金样例：三种 verbatim 形态各自的展示结果；普通路径原样保留。
     /// 合成盘符 Q: 与 UNC 服务器名都是纯字符串输入，不触碰文件系统。
     #[test]
@@ -185,5 +185,60 @@ mod tests {
         assert!(big.total() >= before && big.total() > 0, "total 不得回绕：{}", big.total());
         let overflowed = Tokens { input: i64::MAX, cached: 1, ..Default::default() }.total();
         assert_eq!(overflowed, i64::MAX, "单行 total 加法也不能回绕");
+    }
+    /// #82：`Query::validate` 的时区分支（model.rs:102）此前没有任何用例喂过
+    /// 非法 IANA 名——"无效 IANA 时区" 这串文案在 src/ 与 tests/ 里都查不到。
+    /// 偏移越界与时间范围越界各占一条断言，保证错误串一一对应：把两个分支的
+    /// 文案（或判定条件）对调，这里就会红。
+    #[test]
+    fn validate_rejects_an_invalid_iana_time_zone() {
+        let base = Query {
+            start: 0,
+            end: 60_000,
+            agent: None,
+            model: None,
+            project: None,
+            session: None,
+            search: String::new(),
+            time_zone: Some("Asia/Shanghai".into()),
+            offset_minutes: 0,
+        };
+        assert_eq!(base.validate(), Ok(()), "合法时区不得被误拒");
+        for zone in ["Mars/Olympus_Mons", "UTC+9", "Asia/Shangai", ""] {
+            assert_eq!(
+                Query { time_zone: Some(zone.into()), ..base.clone() }.validate(),
+                Err(format!("无效 IANA 时区: {zone}")),
+                "{zone}"
+            );
+        }
+        // 缺省时区（fixed-offset 调用方）仍然合法，走 offset_minutes。
+        assert_eq!(Query { time_zone: None, ..base.clone() }.validate(), Ok(()));
+        // 另一条分支：偏移越界报的是"无效时区"，不是 IANA 文案。
+        assert_eq!(
+            Query { time_zone: None, offset_minutes: 24 * 60 + 1, ..base.clone() }.validate(),
+            Err("无效时区".into())
+        );
+        assert_eq!(
+            Query { time_zone: None, offset_minutes: -(24 * 60 + 1), ..base.clone() }.validate(),
+            Err("无效时区".into())
+        );
+        assert_eq!(Query { offset_minutes: 24 * 60, ..base.clone() }.validate(), Ok(()));
+        // 范围分支同样各归各的文案。
+        assert_eq!(
+            Query { start: 60_000, end: 60_000, ..base.clone() }.validate(),
+            Err("无效时间范围：开始时间必须早于结束时间".into())
+        );
+        // 时间范围与 IANA 同时非法时，范围先判——固定住分支顺序，避免日后
+        // 有人把两个检查合并成一条含糊的错误。
+        assert_eq!(
+            Query {
+                start: 60_000,
+                end: 0,
+                time_zone: Some("Mars/Olympus_Mons".into()),
+                ..base.clone()
+            }
+            .validate(),
+            Err("无效时间范围：开始时间必须早于结束时间".into())
+        );
     }
 }

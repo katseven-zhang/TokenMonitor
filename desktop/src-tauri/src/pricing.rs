@@ -320,6 +320,54 @@ mod tests {
             .unwrap_err()
             .contains("价格JSON无效"));
     }
+    /// #82：`cost_parts` 里 `filter(rate_time <= ts)` 与 `max_by_key` 那条腿从未
+    /// 被"事件早于所有 effectiveFrom"喂过（:102-103）。修前面板只会看到一个和
+    /// 免费无异的 0；修后必须显式记成未计价。同时钉住反向对照：晚于所有价目的
+    /// 事件取最新一条，落在两条之间取较早那条生效价。
+    #[test]
+    fn effective_from_before_every_dated_rate_is_unpriced() {
+        let text = r#"{"version":1,"currency":"USD","models":{"m":[{"effectiveFrom":"2026-01-01T00:00:00Z","input":1,"cached":0,"cacheWrite":0,"output":1},{"effectiveFrom":"2027-01-01T00:00:00Z","input":100,"cached":0,"cacheWrite":0,"output":100}]}}"#;
+        let p = Prices::parse(text).unwrap();
+        let at = |ms: i64| Event {
+            id: "1".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: "m".into(),
+            ts: ms,
+            tokens: Tokens { input: 1_000_000, ..Default::default() },
+            path: String::new(),
+            line: 1,
+        };
+        let epoch = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let later = chrono::DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        // 早于全部生效时间：没有任何一条价格适用，未计价而不是 0 美元。
+        assert_eq!(p.cost(&at(epoch - 1)), None);
+        assert_eq!(p.cost_parts(&at(0)), None);
+        // 恰好等于生效瞬间算已生效（闭区间）。
+        assert_eq!(p.cost(&at(epoch)), Some(1.0));
+        // 落在两档之间取先生效那档；晚于全部则取最新档。
+        assert_eq!(p.cost(&at(later - 1)), Some(1.0));
+        assert_eq!(p.cost(&at(later)), Some(100.0));
+        // 未计价要能从面板口径读出来：known=0、unpriced=1、成本未知（null）。
+        let summary = crate::query::summarize(&[at(epoch - 1)], &p);
+        assert_eq!(summary.known_cost_usd, 0.0);
+        assert_eq!(summary.unpriced_events, 1);
+        assert_eq!(summary.cost_usd, None);
+        let priced = crate::query::summarize(&[at(epoch)], &p);
+        assert_eq!(priced.unpriced_events, 0);
+        assert_eq!(priced.cost_usd, Some(1.0));
+        // 没有任何日期的基础价从纪元起就适用，绝不能再被算成"早于全部"。
+        let base = Prices::parse(
+            r#"{"version":1,"currency":"USD","models":{"m":[{"input":5,"cached":0,"cacheWrite":0,"output":0}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(base.cost(&at(0)), Some(5.0));
+    }
     #[test]
     fn mixed_currencies_normalize_before_aggregation_and_validate_exchange_rate() {
         let text=r#"{"version":1,"currency":"USD","displayCurrency":"CNY","usdCny":7,"models":{"domestic":[{"currency":"CNY","input":7,"cached":0.7,"cacheWrite":14,"output":21}],"foreign":[{"input":1,"cached":0.1,"cacheWrite":2,"output":3}]}}"#;

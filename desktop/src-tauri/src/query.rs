@@ -9,8 +9,22 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use chrono::{Datelike, TimeZone};
 
+/// 读取路径上的时区解释：`None` = 调用方用 fixed-offset（`offset_minutes`）。
+/// 文案与 `Query::validate` 里的同一个（model.rs 的 `无效 IANA 时区: {zone}`），
+/// 不再把 chrono_tz 的英文 ParseError 直接抛给面板——两处解析点此前各自内联，
+/// 报的是第三种字符串。公共入口（`db::events`）先过 `validate`，所以这里是防御
+/// 性的第二道；两条腿都由单测直接调用钉住（见 `zone_of_*` 测试）。
+fn zone_of(q: &Query) -> Result<Option<chrono_tz::Tz>, String> {
+    match &q.time_zone {
+        None => Ok(None),
+        Some(zone) => zone
+            .parse::<chrono_tz::Tz>()
+            .map(Some)
+            .map_err(|_| format!("无效 IANA 时区: {zone}")),
+    }
+}
 fn calendar_rows(rows: BTreeMap<String, Summary>, q: &Query, month: bool) -> Result<Vec<Value>,String> {
-    let zone=q.time_zone.as_deref().map(str::parse::<chrono_tz::Tz>).transpose().map_err(|e|e.to_string())?;
+    let zone=zone_of(q)?;
     rows.into_values().map(|row| {
         let date=chrono::NaiveDate::parse_from_str(&if month {format!("{}-01",row.key)} else {row.key.clone()},"%Y-%m-%d").map_err(|e|e.to_string())?;
         let end=if month { if date.month()==12 {chrono::NaiveDate::from_ymd_opt(date.year()+1,1,1)} else {chrono::NaiveDate::from_ymd_opt(date.year(),date.month()+1,1)} } else {date.succ_opt()}.ok_or("Invalid calendar boundary")?;
@@ -123,7 +137,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
 /// 跨两次分组读取复用（并发提交必须看不到），见 tests。
 fn dashboard_snapshot(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, String> {
     let events = db::events(db, q)?;
-    let zone=q.time_zone.as_deref().map(str::parse::<chrono_tz::Tz>).transpose().map_err(|e|e.to_string())?;
+    let zone = zone_of(q)?;
     let titles = db::titles(db)?;
     let mut totals = Summary { cost_usd: Some(0.0), ..Default::default() };
     let mut models = BTreeMap::new();
@@ -261,6 +275,57 @@ pub fn event_page(
 mod tests {
     use super::*;
     use crate::model::Parsed;
+    /// 读取路径上有两处时区解释：`calendar_rows`（日历/月份分桶的边界）与
+    /// `dashboard_snapshot`（series 分桶）。它们都排在 `db::events` 的
+    /// `Query::validate` 之后，公共入口其实拿不到非法值——但这两点此前各自内联
+    /// `str::parse::<Tz>()`，把 chrono_tz 的英文 ParseError 直接当错误抛出去，
+    /// 与 model.rs 的中文文案并存三套。修后统一走 `zone_of`：这里直接调用这两条
+    /// 腿（绕不过去就只能靠单测），钉住"非法时区点名失败、合法时区正常分桶、
+    /// 缺省时区仍按 offset_minutes 走"。
+    #[test]
+    fn zone_of_is_the_single_time_zone_verdict_on_the_read_paths() {
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text).unwrap().timestamp_millis()
+        };
+        let query = |zone: Option<&str>, offset: i32| Query {
+            start: 0,
+            end: 32_503_680_000_000,
+            agent: None,
+            model: None,
+            project: None,
+            session: None,
+            search: String::new(),
+            time_zone: zone.map(str::to_string),
+            offset_minutes: offset,
+        };
+        let rows = BTreeMap::from([(
+            "2026-09-20".to_string(),
+            Summary { key: "2026-09-20".into(), label: "2026-09-20".into(), ..Default::default() },
+        )]);
+        // 合法 IANA 名：分桶边界按该时区的当地零点算，不是"退回 UTC"的静默降级。
+        let shanghai =
+            calendar_rows(rows.clone(), &query(Some("Asia/Shanghai"), 0), false).unwrap();
+        assert_eq!(shanghai[0]["rangeStart"], at("2026-09-19T16:00:00Z"));
+        assert_eq!(shanghai[0]["rangeEnd"], at("2026-09-20T16:00:00Z"));
+        // 缺省时区走 fixed-offset；两者给出的边界必须不同（否则时区根本没生效）。
+        let utc = calendar_rows(rows.clone(), &query(None, 0), false).unwrap();
+        assert_eq!(utc[0]["rangeStart"], at("2026-09-20T00:00:00Z"));
+        assert_ne!(utc[0]["rangeStart"], shanghai[0]["rangeStart"]);
+        let offset = calendar_rows(rows.clone(), &query(None, 480), false).unwrap();
+        assert_eq!(offset[0]["rangeStart"], at("2026-09-19T16:00:00Z"));
+        // 非法 IANA 名：点名报给调用方，文案与 Query::validate 完全一致。
+        for zone in ["Mars/Olympus_Mons", "Asia/Shangai", "UTC+9", ""] {
+            let q = query(Some(zone), 0);
+            assert_eq!(zone_of(&q), Err(format!("无效 IANA 时区: {zone}")));
+            let err = calendar_rows(rows.clone(), &q, false).unwrap_err();
+            assert_eq!(err, format!("无效 IANA 时区: {zone}"), "{zone}");
+        }
+        assert_eq!(zone_of(&query(None, 0)), Ok(None));
+        assert!(
+            matches!(zone_of(&query(Some("Asia/Shanghai"), 0)), Ok(Some(_))),
+            "合法 IANA 名不得被 zone_of 误拒"
+        );
+    }
     #[test]
     fn quota_history_is_half_open_deduplicated_and_session_scoped() {
         let db = Connection::open_in_memory().unwrap();
@@ -729,7 +794,25 @@ mod tests {
             None
         };
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 主线程若在 scope 里 panic（任何一条断言），`thread::scope` 会去等一个
+        // "永不停止"的写线程：测试就此挂死并留下一个转满 CPU 的测试进程，而不是
+        // 报红。RAII 兜底放在闭包内部——panic 展开时它先跑，写线程才收工。
+        struct StopOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        // 两个连接同时 `db::open` 一个**新**库时，`PRAGMA journal_mode=WAL` 与建表
+        // 语句会立刻返回 SQLITE_BUSY（这条不走 busy_timeout 的防死锁规则），
+        // committer 线程直接 unwrap 炸掉——同一份代码因此偶发红、偶发挂。
+        // 先把库建起来，再让两个连接并发，争的就只有数据。
+        let reader = db::open(&root).unwrap();
         std::thread::scope(|scope| {
+            let _stop_guard = StopOnDrop(stop.clone());
+            // 连接移进闭包作用域：它必须随闭包一起关闭，否则 Windows 上收尾的
+            // `remove_dir_all` 会撞上 ERROR_SHARING_VIOLATION（文件仍被占用）。
+            let reader = reader;
             let writer_stop = stop.clone();
             let writer_root = root.clone();
             let committer = scope.spawn(move || {
@@ -799,7 +882,6 @@ mod tests {
                 }
                 committed
             });
-            let reader = db::open(&root).unwrap();
             let mut checked = 0_u32;
             let mut busy = 0_u32;
             for round in 0..400_u32 {

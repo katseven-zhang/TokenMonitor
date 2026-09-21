@@ -767,4 +767,88 @@ mod tests {
         assert!(leftovers.is_empty(), "原子导出不得留临时文件：{leftovers:?}");
         fs::remove_dir_all(root).unwrap();
     }
+    /// #82：改端口的成功腿此前只测过失败腿（occupied_port_preserves_settings）。
+    /// 两条腿：
+    /// ① 后台没在跑时——新端口要真的落盘，其余设置一字不改地保留（这就是"成功
+    ///    腿"，修前无人断言过保存后的端口值）；
+    /// ② 后台在跑时——用一个假控制端口顶替 status/stop，钉住"先探活、再停旧后台"
+    ///    的调用顺序，以及停完之后的重启失败必须把原设置恢复回去（不是留下一个
+    ///    没人监听的端口）。②里重启必然失败：单元测试的 current_exe 是 libtest
+    ///    壳、不认 `--service`，起不来真后台；顺序与回滚两条断言与被测代码路径
+    ///    无关地成立，真实重启腿由 desktop/scripts/service-smoke.mjs 覆盖。
+    /// 端口一律现绑现取，不写死号段。
+    #[test]
+    fn save_settings_port_change_saves_and_rebinds_a_running_service() {
+        let free = || {
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let (root, current) = fixture();
+        // 腿①：没有后台在跑（fixture 的端口无人监听、也没有 service.lock）。
+        let idle_port = free();
+        let mut idle = current.clone();
+        idle.port = idle_port;
+        assert_eq!(save_settings(&root, &idle).unwrap(), json!({"saved": true}));
+        let saved = config::settings(&root).unwrap();
+        assert_eq!(saved.port, idle_port, "新端口没落盘");
+        assert_eq!(saved.refresh_seconds, current.refresh_seconds);
+        assert_eq!(saved.roots, current.roots);
+        assert_eq!(saved.disabled_agents, current.disabled_agents);
+        // 腿②：旧端口上有个肯应答 status/stop 的假后台。
+        let old_port = free();
+        let old_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, old_port)).unwrap();
+        let mut running = idle.clone();
+        running.port = old_port;
+        config::save_json(&root.join("settings.json"), &running).unwrap();
+        // stop() 靠这把锁判断后台是否真的退干净；假后台不持锁，文件存在即可。
+        fs::write(root.join("service.lock"), b"").unwrap();
+        let answers = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = answers.clone();
+        let fake = std::thread::spawn(move || {
+            // save_settings 会问：status（在不在跑）→ status、stop（改端口前）。
+            for stream in old_listener.incoming().take(3) {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut line = String::new();
+                if BufReader::new(&mut stream).read_line(&mut line).is_err() {
+                    break;
+                }
+                let method = serde_json::from_str::<Value>(&line)
+                    .ok()
+                    .and_then(|v| v["method"].as_str().map(str::to_string))
+                    .unwrap_or_default();
+                stream
+                    .write_all(
+                        format!("{}\n", json!({"ok": true, "result": {"running": true}})).as_bytes(),
+                    )
+                    .unwrap();
+                seen.lock().unwrap().push(method);
+            }
+        });
+        let new_port = free();
+        let mut next = running.clone();
+        next.port = new_port;
+        let err = save_settings(&root, &next).unwrap_err();
+        assert!(
+            err.contains("设置应用失败，已恢复原设置"),
+            "重启失败必须报回滚：{err}"
+        );
+        assert_eq!(
+            *answers.lock().unwrap(),
+            vec!["status", "status", "stop"],
+            "改端口前必须先探活再停掉旧后台"
+        );
+        assert_eq!(
+            config::settings(&root).unwrap().port,
+            old_port,
+            "后台没能重启时，设置不得留在新端口上"
+        );
+        let _ = fake.join();
+        let _ = fs::remove_dir_all(&root);
+    }
 }

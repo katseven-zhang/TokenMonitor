@@ -110,5 +110,25 @@ fn xlsx_export_content_is_checked_beyond_zip_magic() {
     service::query_local(&root,"export",&json!({"query":q,"format":"xlsx","path":path})).unwrap();
     let leftovers:Vec<String>=fs::read_dir(&root).unwrap().filter_map(|e|e.ok()).map(|e|e.file_name().to_string_lossy().into_owned()).filter(|n|n.ends_with(".tmp")).collect();
     assert!(leftovers.is_empty(),"原子导出不得留临时文件：{leftovers:?}");
+    // #82：这份夹具没有 displayCurrency，display_factor() 恒为 1.0，所以上面那
+    // 三个真单元格钉不住"显示币种要乘进单元格"这件事——CSV/Markdown 侧已有
+    // "28.00000000" 的断言，xlsx 侧此前是空白。换成 CNY 显示币种再导一次：
+    // 1M input × 2/百万 = 2.0 USD，× usdCny 7 = 14，必须落在成本单元格里，
+    // 而表头是 Estimated CNY、token 单元格一个都不许跟着缩放。
+    fs::write(root.join("prices.json"),json!({"version":1,"currency":"USD","displayCurrency":"CNY","usdCny":7,"models":{"priced":[{"input":2,"cached":0,"cacheWrite":0,"output":0}]}}).to_string()).unwrap();
+    let cny=root.join("cny.xlsx");
+    service::query_local(&root,"export",&json!({"query":q,"format":"xlsx","path":cny})).unwrap();
+    let mut archive=zip::ZipArchive::new(fs::File::open(&cny).unwrap()).unwrap();
+    let mut sheet=String::new();
+    let mut shared=String::new();
+    for i in 0..archive.len() {
+        let mut entry=archive.by_index(i).unwrap();
+        if entry.name()=="xl/worksheets/sheet1.xml" { std::io::Read::read_to_string(&mut entry,&mut sheet).unwrap(); }
+        if entry.name()=="xl/sharedStrings.xml" { std::io::Read::read_to_string(&mut entry,&mut shared).unwrap(); }
+    }
+    assert!(shared.contains(">Estimated CNY<"),"表头没跟着显示币种走：{shared}");
+    assert!(sheet.contains(r#"<c r="L2"><v>14</v></c>"#),"2.0 USD × 7 必须等于单元格里的 14：{sheet}");
+    assert!(!sheet.contains(r#"<c r="L2"><v>2</v></c>"#),"显示币种生效后不得再留 USD 的 2：{sheet}");
+    assert!(sheet.contains(r#"<c r="F2"><v>1000000</v></c>"#),"换显示币种不得改动 token 单元格：{sheet}");
     drop(cache);fs::remove_dir_all(root).unwrap();
 }

@@ -504,20 +504,35 @@ mod tests {
     /// #82：collector_revision 的语义迁移此前完全无覆盖。旧语义库重新打开时必须
     /// 把每个来源重新武装（size=-1，下轮扫描全量重解析），但不得清空原始快照——
     /// 重建是靠逐个文件的替换事务增量完成的，中途崩溃也不能丢历史数据。
+    /// 断言做到扫描层：武装之后必须真的看到 parsed>0 / reused==0，而不是只从
+    /// unchanged() 的 size 谓词上推断（原测试用不存在的文件 + replace_file 播种，
+    /// 从来没扫过一轮）。
     #[test]
     fn stale_collector_revision_rearms_sources_but_keeps_raw_cache() {
         let root = temp_root();
+        let source = root.join("sources");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("f.jsonl"),
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"armed\"}}\n{\"timestamp\":\"2026-09-20T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":40,\"output_tokens\":5}}}}\n",
+        )
+        .unwrap();
+        let settings = config::Settings {
+            roots: BTreeMap::from([("codex".into(), vec![source.display().to_string()])]),
+            ..Default::default()
+        };
+        let codex_scan = || {
+            let statuses = crate::scanner::scan(&root, &settings).unwrap();
+            let s = statuses.iter().find(|x| x.agent == "codex").expect("codex status");
+            (s.parsed, s.reused, s.events, s.errors.clone())
+        };
+        // 首轮：真实扫描建立缓存，健康行与 source_files 都是新语义写出来的。
+        assert_eq!(codex_scan(), (1, 0, 1, vec![]));
+        // 假装这是一个语义升级前留下的库（revision 落后，但文件指纹仍然有效）。
         {
-            let mut db = open(&root).unwrap();
-            replace_file(&mut db, "f.jsonl", "codex", 123, 456, &Parsed {
-                events: vec![event("1", 60_000)],
-                ..Default::default()
-            })
-            .unwrap();
-            // 假装这是一个语义升级前留下的库。
+            let db = open(&root).unwrap();
             db.execute("UPDATE cache_metadata SET value='0' WHERE key='collector_revision'", [])
                 .unwrap();
-            db.execute("UPDATE source_files SET size=123", []).unwrap();
         }
         let db = open(&root).unwrap();
         let revision: String = db
@@ -525,11 +540,22 @@ mod tests {
             .unwrap();
         assert_eq!(revision, COLLECTOR_REVISION);
         let size: i64 = db
-            .query_row("SELECT size FROM source_files WHERE path='f.jsonl' AND agent='codex'", [], |r| r.get(0))
+            .query_row("SELECT size FROM source_files WHERE path LIKE '%f.jsonl' AND agent='codex'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(size, -1, "旧语义缓存必须重新武装");
         let kept: i64 = db.query_row("SELECT COUNT(*) FROM raw_events", [], |r| r.get(0)).unwrap();
         assert_eq!(kept, 1, "重新武装不是抹库：旧快照保留到逐个文件被替换为止");
+        drop(db);
+        // 扫描层证明：指纹真的没变（size 被人为改成 -1 才失效），下一轮必须
+        // 完整重解析这个文件、一条都不复用，且重解析是替换而不是追加。
+        assert_eq!(codex_scan(), (1, 0, 1, vec![]));
+        let db = open_read(&root).unwrap();
+        let rows: i64 = db.query_row("SELECT COUNT(*) FROM raw_events", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "重解析后仍是 1 条事件：武装不得翻倍");
+        let rearmed: i64 = db
+            .query_row("SELECT COUNT(*) FROM source_files WHERE size=-1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rearmed, 0, "重解析成功后指纹要重新有效");
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
     }

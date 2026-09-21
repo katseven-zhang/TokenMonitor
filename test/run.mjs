@@ -2103,56 +2103,100 @@ console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/S
   }
 }
 
-/* ---------- [27] 平价探针门禁（#82：gate 必须能变红） ----------
+/* ---------- [27] 平价探针门禁（#82：gate 必须能变红，且不许无理由跳过） ----------
  * desktop/scripts/compare-local.mjs 是 JS 采集器与桌面端 events-v2 缓存之间的
  * 对账探针。修前它只把 equal:false 打印出来，退出码永远是 0，也没有任何 CI
- * 跑它——形似门禁、实则永不失败。修后：不一致=exit 1，没有可比样本=不算通过
- * (exit 1)。下面用合成的缓存库（schema 与 desktop/src-tauri/src/db.rs 的列名
- * 一致）端到端测这三态：一致绿、分歧红、空库红。黄金数：claude-code 一条
- * input 100 / cache_read 20 / cache_creation 5 / output 30 → total 155
- * （Anthropic 口径：input 不含缓存，total 为四列之和，两侧同式）。 */
+ * 跑它——形似门禁、实则永不失败。修后它有四种结局，这里逐条端到端验证：
+ * ① 数字一致 → exit 0；② 分歧 → equal:false + exit 1；③ 缓存里没有可行 →
+ * PARITY NOT RUN + exit 1；④ 有源没被比过（没有适配器 / 只索引了文件却没有
+ * 事件 / 文件在扫描后动过）→ PARITY INCOMPLETE + exit 1，且必须点出源名。
+ * 十源真实对账（桌面侧由 scanner::scan 写出缓存、再让探针跑同一批夹具）在
+ * desktop/src-tauri/tests/parity.rs —— npm test 不编译 Rust，那半边由
+ * desktop.yml 的 cargo test --tests 执行。这里用合成的缓存库（schema 与
+ * desktop/src-tauri/src/db.rs 的列名一致）测门禁本身。
+ * 黄金数：claude-code 一条 input 100 / cache_read 20 / cache_creation 5 /
+ * output 30 → total 155（Anthropic 口径：input 不含缓存，total 为四列之和，
+ * 两侧同式）。 */
 console.log('\n[27] 平价探针门禁（#82）');
 {
   const probe = join(ROOT, 'desktop', 'scripts', 'compare-local.mjs');
   const base = mkdtempSync(join(tmpdir(), 'parity-gate-'));
   const transcript = join(base, 'parity-gate-transcript.jsonl');
-  writeFileSync(transcript, '{"type":"assistant","timestamp":"2026-09-20T00:00:00Z","sessionId":"gate","cwd":"/tmp/gate","message":{"id":"msg-1","model":"Gate Fixture","usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":30}}}\n');
+  const gateLine = '{"type":"assistant","timestamp":"2026-09-20T00:00:00Z","sessionId":"gate","cwd":"/tmp/gate","message":{"id":"msg-1","model":"Gate Fixture","usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":30}}}\n';
+  writeFileSync(transcript, gateLine);
   const stat = statSync(transcript);
   const runProbe = (dbPath) =>
     spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', probe, dbPath], { encoding: 'utf8' });
-  const buildCache = (inputTokens) => {
-    const dbPath = join(base, 'events-v2.sqlite');
+  const openCache = (name) => {
+    const dbPath = join(base, `${name}.sqlite`);
     if (existsSync(dbPath)) rmSync(dbPath);
     const cache = new DatabaseSync(dbPath);
     cache.exec(
       'CREATE TABLE source_files(path TEXT,agent TEXT,size INTEGER,mtime INTEGER,title TEXT,error TEXT,updated_at INTEGER);' +
       'CREATE TABLE raw_events(path TEXT,agent TEXT,id TEXT,ts INTEGER,session TEXT,model TEXT,project TEXT,data TEXT);',
     );
+    return [dbPath, cache];
+  };
+  // indexOnly=true 只写 source_files（桌面端"扫过这个文件但一条事件都没索引"）。
+  const buildCache = (inputTokens, agent = 'claude-code', name = 'events-v2', { indexOnly = false } = {}) => {
+    const [dbPath, cache] = openCache(name);
     cache
       .prepare('INSERT INTO source_files VALUES(?,?,?,?,?,?,?)')
-      .run(transcript, 'claude-code', stat.size, Math.round(stat.mtimeMs), null, null, Date.now());
-    if (inputTokens !== null) {
+      .run(transcript, agent, stat.size, Math.round(stat.mtimeMs), null, null, Date.now());
+    if (inputTokens !== null && !indexOnly) {
       const data = {
-        id: 'k1', agent: 'claude-code', session: 'gate', project: '/tmp/gate',
+        id: 'k1', agent, session: 'gate', project: '/tmp/gate',
         model: 'gate fixture', ts: 1789862400000,
         tokens: { input: inputTokens, cached: 20, cacheWrite: 5, output: 30, reasoning: 0 },
         path: transcript, line: 1,
       };
       cache
         .prepare('INSERT INTO raw_events VALUES(?,?,?,?,?,?,?,?)')
-        .run(transcript, 'claude-code', 'k1', data.ts, 'gate', data.model, data.project, JSON.stringify(data));
+        .run(transcript, agent, 'k1', data.ts, 'gate', data.model, data.project, JSON.stringify(data));
     }
     cache.close();
     return dbPath;
   };
-  let r = runProbe(buildCache(100));
-  ok('#82 两侧数字一致 → 探针 exit 0', r.status === 0, `status=${r.status} ${r.stderr}`);
-  r = runProbe(buildCache(999));
+  let r = runProbe(buildCache(100, 'claude-code', 'match'));
+  ok('#82 两侧数字一致 → 探针 exit 0', r.status === 0 && /1 compared, 0 quantified divergence, 0 mismatched, 0 unexplained skipped/.test(r.stdout), `status=${r.status} ${r.stderr}${r.stdout}`);
+  r = runProbe(buildCache(999, 'claude-code', 'mismatch'));
   ok('#82 桌面缓存与 JS 采集分歧 → equal:false 且 exit 1（修前恒为 0）',
-    r.status === 1 && r.stdout.includes('"equal": false'), `status=${r.status}`);
-  r = runProbe(buildCache(null));
-  ok('#82 没有任何可比样本不算通过 → exit 1（修前空数组静默绿）',
-    r.status === 1 && /PARITY NOT RUN/.test(r.stderr), `status=${r.status}`);
+    r.status === 1 && r.stdout.includes('"equal": false') && /PARITY FAILED/.test(r.stderr), `status=${r.status} ${r.stderr}`);
+  {
+    const [dbPath, cache] = openCache('empty');
+    cache.close();
+    r = runProbe(dbPath);
+    ok('#82 缓存里一行都没有 → PARITY NOT RUN 且 exit 1（修前空数组静默绿）',
+      r.status === 1 && /PARITY NOT RUN/.test(r.stderr), `status=${r.status} ${r.stderr}${r.stdout}`);
+  }
+  // 缓存里有行、却没有适配器认识的源：必须红色并点名，而不是"跳过就算通过"。
+  {
+    const [dbPath, cache] = openCache('unknown');
+    cache.prepare('INSERT INTO source_files VALUES(?,?,?,?,?,?,?)')
+      .run(transcript, 'quantum-reader', stat.size, Math.round(stat.mtimeMs), null, null, Date.now());
+    cache.prepare('INSERT INTO raw_events VALUES(?,?,?,?,?,?,?,?)').run(
+      transcript, 'quantum-reader', 'k1', 1789862400000, 'gate', 'm', '/tmp/gate',
+      JSON.stringify({ id: 'k1', agent: 'quantum-reader', tokens: { input: 1, cached: 0, cacheWrite: 0, output: 0 }, path: transcript }));
+    cache.close();
+    r = runProbe(dbPath);
+    ok('#82 缓存里有没适配器的源 → PARITY INCOMPLETE 点名该源且 exit 1（修前直接看不见）',
+      r.status === 1 && /PARITY INCOMPLETE/.test(r.stderr) && r.stderr.includes('quantum-reader')
+        && r.stdout.includes('no adapter for this agent'), `status=${r.status} ${r.stderr}`);
+  }
+  r = runProbe(buildCache(100, 'claude-code', 'noevents', { indexOnly: true }));
+  ok('#82 索引了文件却没索引到事件 → PARITY INCOMPLETE 且 exit 1（不许当成"没有分歧"）',
+    r.status === 1 && /PARITY INCOMPLETE/.test(r.stderr) && r.stdout.includes('never compared'),
+    `status=${r.status} ${r.stderr}${r.stdout}`);
+  {
+    // 扫描之后源文件又长了：探针必须报"这条源没比过"，而不是拿旧指纹继续比。
+    const dbPath = buildCache(100, 'claude-code', 'drifted');
+    appendFileSync(transcript, gateLine);
+    r = runProbe(dbPath);
+    ok('#82 缓存指纹与源文件不符 → 记为未比过并 exit 1（不得静默用旧数据比对）',
+      r.status === 1 && /PARITY INCOMPLETE/.test(r.stderr) && !r.stdout.includes('"equal": true'),
+      `status=${r.status} ${r.stderr}${r.stdout}`);
+    writeFileSync(transcript, gateLine);
+  }
   rmSync(base, { recursive: true, force: true });
 }
 
