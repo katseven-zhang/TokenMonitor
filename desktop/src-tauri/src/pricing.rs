@@ -75,6 +75,18 @@ impl Prices {
                 return Err(format!("别名 {alias} 必须直接指向已配置模型"));
             }
         }
+        // #76：校验此前只看别名的目标，不看别名的键。键与某个真实模型同名时，
+        // cost_parts 先查 aliases：事件计费会路由到别名目标，而价目表按 models
+        // 展示该模型自身的单价——两处数字静默背离。归一（去首尾空白+小写）后
+        // 同名即冲突，保存时必须报错；唯一例外是恒等别名（X→X），路由结果就是
+        // 模型自身价格，不构成背离。
+        let priced: BTreeSet<String> = p.models.keys().map(|name| lexical_key(name)).collect();
+        for (alias, dest) in &p.aliases {
+            let (key, target) = (lexical_key(alias), lexical_key(dest));
+            if key != target && priced.contains(&key) {
+                return Err(format!("别名 {alias} 与已配置模型同名：计费会路由到 {dest}，价目表展示的却是该模型自身的单价，两处必然背离；请删除这条别名或这个模型条目"));
+            }
+        }
         Ok(p)
     }
     pub fn cost(&self, e: &Event) -> Option<f64> {
@@ -97,6 +109,10 @@ impl Prices {
             t.output as f64*rate.output/1_000_000.0].map(|cost|cost*factor))
     }
     pub fn display_factor(&self) -> f64 { if self.display_currency == "CNY" { self.usd_cny.unwrap_or(1.0) } else { 1.0 } }
+}
+/// #76/#78 共用词法：键比较一律先去首尾空白、再小写（与采集侧模型名归一同一条规则）。
+fn lexical_key(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 fn rate_time(r: &Rate) -> Result<i64, String> {
     match &r.effective_from {
@@ -146,6 +162,51 @@ mod tests {
     #[test]
     fn invalid_price_is_not_accepted() {
         assert!(Prices::parse(r#"{"version":1,"currency":"USD","models":{"m":[{"input":-1,"cached":0,"cacheWrite":0,"output":0}]}}"#).is_err());
+    }
+    /// #76 黄金数：glm-4 自身单价 input=2/百万，glm-3 input=1/百万。事件
+    /// 1,000,000 input 走别名 {GLM-4→glm-3} 时成本=1.0，而价目表展示 glm-4 行
+    /// 的单价算出来是 2.0——修前这种背离能保存成功。归一后同名（含大小写/空白
+    /// 变体）必须保存即报错；恒等别名路由回自身单价 2.0，不构成背离。
+    #[test]
+    fn alias_key_shadowing_a_priced_model_is_rejected() {
+        let rates = r#"[{"input":2,"cached":0,"cacheWrite":0,"output":0}]"#;
+        let make = |aliases: &str| {
+            format!(r#"{{"version":1,"currency":"USD","aliases":{aliases},"models":{{"glm-4":{rates},"glm-3":[{{"input":1,"cached":0,"cacheWrite":0,"output":0}}]}}}}"#)
+        };
+        let event = |model: &str| Event {
+            id: "1".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: model.into(),
+            ts: 1,
+            tokens: Tokens { input: 1_000_000, ..Default::default() },
+            path: String::new(),
+            line: 1,
+        };
+        // 修前：能保存，且 1.0 ≠ 价目表展示的 2.0，两处静默背离。
+        let shadowing = Prices::parse(&make(r#"{"glm-4":"glm-3"}"#));
+        assert!(shadowing.is_err(), "{shadowing:?}");
+        assert!(shadowing.unwrap_err().contains("glm-4"));
+        // 大小写变体同样顶掉真实模型，也报错。
+        assert!(Prices::parse(&make(r#"{"GLM-4":"glm-3"}"#)).is_err());
+        // 恒等别名不背离：路由回自身，按 2/百万 = 2.0 计费。
+        let identity = Prices::parse(&make(r#"{"glm-4":"glm-4"}"#)).unwrap();
+        assert_eq!(identity.cost(&event("glm-4")), Some(2.0));
+        // 正常别名不受影响：stealth→glm-3，1M input 按 glm-3 的 1/百万 = 1.0。
+        let routed = Prices::parse(&make(r#"{"stealth":"glm-3"}"#)).unwrap();
+        assert_eq!(routed.cost(&event("stealth")), Some(1.0));
+        assert_eq!(routed.cost(&event("glm-4")), Some(2.0));
+    }
+    /// #83 卫生项的守护：价目表里出现结构之外的字段必须保存即报错，而不是被
+    /// 静默丢出文件（deny_unknown_fields 一旦回退，用户手写的字段会在下一次保存
+    /// 后无声消失）。
+    #[test]
+    fn unknown_fields_are_rejected_not_silently_dropped() {
+        let top = Prices::parse(r#"{"version":1,"currency":"USD","models":{},"note":"手写的备注"}"#);
+        assert!(top.is_err(), "{top:?}");
+        let rate = Prices::parse(r#"{"version":1,"currency":"USD","models":{"m":[{"input":1,"cached":0,"cacheWrite":0,"output":0,"reasoning":1}]}}"#);
+        assert!(rate.is_err(), "{rate:?}");
     }
     #[test]
     fn mixed_currencies_normalize_before_aggregation_and_validate_exchange_rate() {
