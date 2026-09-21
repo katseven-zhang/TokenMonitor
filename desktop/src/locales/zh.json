@@ -1,5 +1,6 @@
 {
   "common": {
+    "rate_missing": "未设置美元汇率，金额按 {{code}} 原样显示，没有做货币换算。",
     "model": "模型",
     "time": "时间",
     "new_input": "新输入",
@@ -264,7 +265,8 @@
     "region_failed": "{{label}}无法显示",
     "retry": "重试",
     "close_region": "关闭此栏",
-    "read_failed": "本地数据读取失败"
+    "read_failed": "本地数据读取失败",
+    "data_dir_hint": "用量数据保存在本机的一个文件夹里，设置页会显示它使用的位置；首次使用请先等后台扫描完成，再点重试。"
   },
   "empty": {
     "usage_title": "这个时间范围内没有用量记录",

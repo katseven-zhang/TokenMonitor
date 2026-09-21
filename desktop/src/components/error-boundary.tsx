@@ -8,13 +8,16 @@ import { AlertTriangle, RotateCcw, X } from 'lucide-react';
 //
 // `title` is copy the caller already translated; `label` names the guarded region and is
 // placed into `errors.region_failed` here, because a class component cannot read the
-// active language and the boundary has to render its own heading.
-export function FailureNotice({title,label,message,onRetry,onClose}:{title?:string;label?:string;message:string;onRetry?:()=>void;onClose?:()=>void}) {
+// active language and the boundary has to render its own heading. `hint` is the way out the
+// caller knows about - where the data lives, what to check first - shown under the failure so
+// a first run that is only slow no longer looks like a broken install.
+export function FailureNotice({title,label,message,hint,onRetry,onClose}:{title?:string;label?:string;message:string;hint?:string;onRetry?:()=>void;onClose?:()=>void}) {
   const {t}=useTranslation();
   const heading=title??(label?t('errors.region_failed',{label}):t('errors.region_default'));
   return <div role="alert" className="panel">
     <div className="panel-heading"><h2><AlertTriangle size={16}/> {heading}</h2>{onRetry&&<button className="secondary" onClick={onRetry}><RotateCcw size={14}/>{t('errors.retry')}</button>}{onClose&&<button className="icon-button" aria-label={t('errors.close_region')} onClick={onClose}><X size={15}/></button>}</div>
     <p className="error-text">{message}</p>
+    {hint&&<p className="muted">{hint}</p>}
   </div>;
 }
 

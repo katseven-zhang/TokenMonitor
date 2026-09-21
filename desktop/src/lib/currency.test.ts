@@ -27,6 +27,29 @@ describe('display currency',()=>{
       expect(display.money(undefined)).toBe(translate?`[${UNPRICED_KEY}]`:'Unpriced');
     }
   });
+  // Task #72: CNY with no rate used to keep factor 1, so every cost column printed a yuan
+  // sign in front of unconverted dollars. A wrong magnitude wearing the right symbol is the
+  // worst thing this screen can do, so the display falls back to the currency the amounts are
+  // recorded in and reports that nothing was converted.
+  it('refuses a yuan sign for dollars it was never given a rate for',()=>{
+    const display=currencyFromJson('{"displayCurrency":"CNY"}');
+    expect(display.money(6.1)).toBe('$6.10');
+    expect(display.code).toBe('USD');
+    expect(display.rateMissing).toBe(true);
+  });
+  it('treats a zero, negative, absent or unparseable rate as no rate at all',()=>{
+    for(const text of ['{"displayCurrency":"CNY","usdCny":0}','{"displayCurrency":"CNY","usdCny":-7}','{"displayCurrency":"CNY","usdCny":null}','{"displayCurrency":"CNY","usdCny":"7"}','{"displayCurrency":"CNY"}','{"displayCurrency":"CNY","usdCny":false}']){
+      const display=currencyFromJson(text);
+      expect(display.money(6.1)).toBe('$6.10');
+      expect(display.rateMissing).toBe(true);
+    }
+  });
+  it('only claims a missing rate when a CNY display actually went unconverted',()=>{
+    expect(currencyFromJson('{}').rateMissing).toBe(false);
+    expect(currencyFromJson('{"displayCurrency":"USD","usdCny":0}').rateMissing).toBe(false);
+    expect(currencyFromJson('{"displayCurrency":"CNY","usdCny":7}').rateMissing).toBe(false);
+    expect(currencyFromJson('{unclosed').rateMissing).toBe(false);
+  });
   it('puts the sign in front of the currency symbol, not inside it',()=>{
     const cny=currencyFromJson('{"displayCurrency":"CNY","usdCny":7}');
     expect(currencyFromJson().money(-1.5)).toBe('-$1.50');

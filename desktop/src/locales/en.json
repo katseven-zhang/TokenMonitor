@@ -1,5 +1,6 @@
 {
   "common": {
+    "rate_missing": "No USD exchange rate is set, so amounts show in {{code}} exactly as recorded, without any currency conversion.",
     "model": "Model",
     "time": "Time",
     "new_input": "New input",
@@ -257,7 +258,8 @@
     "region_failed": "{{label}} cannot be shown",
     "retry": "Retry",
     "close_region": "Close this panel",
-    "read_failed": "Could not read local data"
+    "read_failed": "Could not read local data",
+    "data_dir_hint": "Usage data lives in a folder on this machine, and the settings page shows the path it uses. On a first run, wait for the background scan to finish and then retry."
   },
   "empty": {
     "usage_title": "No usage records in this range",

@@ -24,13 +24,27 @@ function formatMoney(usd:number|null|undefined,code:'CNY'|'USD',factor=1,unprice
   const sign=value<0&&Math.abs(value)>=0.00005?'-':'';
   return `${sign}${code==='CNY'?'¥':'$'}${amount}`;
 }
-export function currencyFromJson(text?:string,translate?:Translate) {
+export type CurrencyDisplay = {
+  code: 'CNY' | 'USD';
+  factor: number;
+  /** The display asked for CNY but the document carries no rate to convert with. */
+  rateMissing: boolean;
+  money: (usd: number | null | undefined) => string;
+};
+
+export function currencyFromJson(text?:string,translate?:Translate): CurrencyDisplay {
   let config:{displayCurrency?:string;usdCny?:number}={};
   try { config=JSON.parse(text||'{}'); } catch { /* Keep the saved default until valid JSON is saved. */ }
-  const code=config.displayCurrency?.toUpperCase()==='CNY'?'CNY':'USD';
-  const factor=code==='CNY'&&typeof config.usdCny==='number'&&config.usdCny>0?config.usdCny:1;
+  const wanted=config.displayCurrency?.toUpperCase()==='CNY'?'CNY':'USD';
+  const rate=typeof config.usdCny==='number'&&Number.isFinite(config.usdCny)&&config.usdCny>0?config.usdCny:null;
+  // A ¥ in front of dollars that were never multiplied is a wrong magnitude wearing the right
+  // symbol, and no marker on the page can make that number honest. Without a usable rate the
+  // display keeps the currency the amounts are actually recorded in, and `rateMissing` is what
+  // lets the UI say out loud that nothing was converted.
+  const code=wanted==='CNY'&&rate!==null?'CNY':'USD';
+  const factor=code==='CNY'&&rate!==null?rate:1;
   const unpriced=translate?translate(UNPRICED_KEY):UNPRICED_FALLBACK;
-  return {code,factor,money:(usd:number|null|undefined)=>formatMoney(usd,code,factor,unpriced)};
+  return {code,factor,rateMissing:wanted==='CNY'&&code==='USD',money:(usd:number|null|undefined)=>formatMoney(usd,code,factor,unpriced)};
 }
 export const CurrencyContext=createContext(currencyFromJson());
 export const useCurrency=()=>useContext(CurrencyContext);
