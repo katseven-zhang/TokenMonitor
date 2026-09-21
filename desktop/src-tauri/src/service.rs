@@ -7,7 +7,7 @@ use std::{
     net::{Ipv4Addr, Shutdown, SocketAddrV4, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
         Arc,
     },
     thread,
@@ -249,11 +249,49 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
     }
     Ok(json!({"path":path,"rows":rows.len()}))
 }
+/// #113: the port the control channel should dial, plus an optional reason why
+/// `settings.json` was *not* used.
+///
+///修前这里是 `config::settings(root)?` —— 一个文本文件读不动就让 `status`/`stop`/`scan`
+/// 全部报「配置错误」，而后台进程本身毫发无损（「能看数据不能停服务」）。用户手工加一个
+/// 未知键、或新版写入字段后降级运行旧版，都会踩到。现在按
+/// 「文件里的端口 > 本进程上次成功读到的端口 > 内置默认端口」退回，控制通道照旧连通，
+/// 失败原因进服务日志；连不上时再把它拼进错误信息。
+fn control_port(root: &Path) -> (u16, Option<String>) {
+    let (port, note) = control_port_with_last(root, LAST_CONTROL_PORT.load(Ordering::Relaxed));
+    if note.is_none() {
+        LAST_CONTROL_PORT.store(port, Ordering::Relaxed);
+    }
+    (port, note)
+}
+
+/// 上面那层的纯函数形态：`last_good` 由参数给，不碰进程全局。
+/// 单测必须走这一层——`LAST_CONTROL_PORT` 是进程级静态量，同进程里并行的
+/// service 测试也会经 `rpc` 写它，直接断言静态量会得到别的测试留下的端口。
+fn control_port_with_last(root: &Path, last_good: u16) -> (u16, Option<String>) {
+    match config::settings(root) {
+        Ok(s) => (s.port, None),
+        Err(e) => {
+            let port = if last_good != 0 { last_good } else { config::Settings::default().port };
+            (port, Some(e))
+        }
+    }
+}
+
+/// 本进程最近一次从 `settings.json` 成功读到的端口（0 = 还没读到过）。
+static LAST_CONTROL_PORT: AtomicU16 = AtomicU16::new(0);
+
 pub fn rpc(root: &Path, method: &str, args: Value) -> Result<Value, String> {
-    let cfg = config::settings(root)?;
-    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, cfg.port);
+    let (port, config_error) = control_port(root);
+    if let Some(e) = &config_error {
+        log(root, &format!("settings.json 未被采用，控制通道退回端口 {port} 继续工作：{e}"));
+    }
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_millis(500))
-        .map_err(|e| format!("后台未连接: {e}"))?;
+        .map_err(|e| match &config_error {
+            Some(c) => format!("后台未连接: {e}（settings.json 未被采用，已退回端口 {port}；原因：{c}）"),
+            None => format!("后台未连接: {e}"),
+        })?;
     stream
         .set_read_timeout(Some(Duration::from_secs(
             if matches!(method, "status" | "start" | "stop" | "scan") {
@@ -850,5 +888,50 @@ mod tests {
         );
         let _ = fake.join();
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod tests_control_port {
+    use super::*;
+
+    /// #113：控制通道不得因为 settings.json 读不动就整体失灵。
+    /// 顺序在同一个测试里排好：先成功读到 P1（缓存住），再把文件写坏，
+    /// 断言退回的是**上次成功的端口**而不是默认端口——这正是"后台在跑、
+    /// 客户端却停不下来"的那个现场。
+    #[test]
+    fn control_channel_falls_back_instead_of_failing_the_whole_rpc() {
+        let root = std::env::temp_dir().join(format!("tm-rpc-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"port":12345,"refreshSeconds":60,"roots":{},"disabledAgents":[]}"#,
+        )
+        .unwrap();
+        let (port, note) = control_port_with_last(&root, 0);
+        assert_eq!(port, 12345);
+        assert!(note.is_none(), "正常文件不该有降级说明：{note:?}");
+
+        fs::write(&path, b"{ not json at all").unwrap();
+        let (port, note) = control_port_with_last(&root, 12345);
+        assert_eq!(port, 12345, "必须退回上次成功的端口，而不是默认 8787");
+        // 没有"上次成功"时退回内置默认端口（仍然要能连，而不是直接报错）
+        let (dflt, note2) = control_port_with_last(&root, 0);
+        assert_eq!(dflt, config::Settings::default().port);
+        assert!(note2.is_some());
+        let note = note.expect("降级必须带上原因");
+        assert!(note.contains("settings.json"), "{note}");
+
+        // 未知键不算降级：那正是修前会让 status/stop 全灭的输入。
+        fs::write(
+            &path,
+            r#"{"port":13579,"refreshSeconds":60,"roots":{},"disabledAgents":[],"fromNewerVersion":true}"#,
+        )
+        .unwrap();
+        let (port, note) = control_port_with_last(&root, 0);
+        assert_eq!(port, 13579);
+        assert!(note.is_none(), "未知键不该被当成配置错误：{note:?}");
+        fs::remove_dir_all(&root).ok();
     }
 }

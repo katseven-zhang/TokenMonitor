@@ -30,9 +30,27 @@ async fn local_request(
 fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, String> {
     let root = config::data_dir();
     match method {
-        "bootstrap" => Ok(
-            json!({"settings":config::settings(&root)?,"prices":fs::read_to_string(root.join("prices.json")).map_err(|e|e.to_string())?,"dataDir":root,"agents":config::AGENTS,"autostart":app.autolaunch().is_enabled().map_err(|e|e.to_string())?}),
-        ),
+        "bootstrap" => {
+            // #113: unknown keys no longer abort bootstrap (see `Settings::unknown`),
+            // but a downgrade must not be *silent* either: the unrecognised keys are
+            // logged and echoed to the UI as `settingsWarnings` so the user can see
+            // which field came from a newer version instead of wondering why a
+            // setting "disappeared".
+            let settings = config::settings(&root)?;
+            let warnings = config::unknown_keys(&settings);
+            if !warnings.is_empty() {
+                service::log(
+                    &root,
+                    &format!(
+                        "settings.json 含本版本不认识的键，已忽略并原样保留：{}",
+                        warnings.join(", ")
+                    ),
+                );
+            }
+            Ok(
+                json!({"settings":settings,"settingsWarnings":warnings,"prices":fs::read_to_string(root.join("prices.json")).map_err(|e|e.to_string())?,"dataDir":root,"agents":config::AGENTS,"autostart":app.autolaunch().is_enabled().map_err(|e|e.to_string())?}),
+            )
+        }
         "status" => {
             let result=service::rpc(&root,"status",json!({}));
             let state=app.state::<StartupError>();

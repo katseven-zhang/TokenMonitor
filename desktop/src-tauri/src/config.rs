@@ -17,12 +17,20 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("antigravity", "Antigravity"),
 ];
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub port: u16,
     pub refresh_seconds: u64,
     pub roots: BTreeMap<String, Vec<String>>,
     pub disabled_agents: Vec<String>,
+    /// #113: unknown keys are collected here instead of hard-failing the whole file.
+    /// `deny_unknown_fields` made the control channel depend on a text file: one extra
+    /// key written by a newer version (or by hand) turned `status`/`stop`/`scan` into
+    /// "config error" while the background process was perfectly alive. The keys are
+    /// ignored for behaviour, reported by `unknown_keys()`, and round-tripped on save
+    /// so a downgrade-then-upgrade does not silently drop them.
+    #[serde(flatten, default)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -87,6 +95,7 @@ impl Default for Settings {
             refresh_seconds: 60,
             roots,
             disabled_agents: vec![],
+            unknown: Default::default(),
         }
     }
 }
@@ -141,16 +150,131 @@ pub fn initialize(root: &Path) -> Result<(), String> {
     Ok(())
 }
 pub fn settings(root: &Path) -> Result<Settings, String> {
-    let s: Settings = serde_json::from_str(
-        &fs::read_to_string(root.join("settings.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    s.validate()?;
+    let path = root.join("settings.json");
+    // #113: every failure here must say *which* file and *which* field, otherwise
+    // the user gets "config error" with nothing to act on.
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let s: Settings = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: {e}{}", path.display(), top_level_types(&text)))?;
+    s.validate()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(s)
+}
+
+/// #113: serde 的原文只给「invalid type: string "8787", expected u16 at line 1
+/// column 14」——不点名是哪个字段。手工编辑或降级场景里用户要的恰恰是那一个名字，
+/// 所以失败时把顶层键与实际 JSON 类型一并列出（`；当前顶层键：port=字符串`）。
+/// 只在失败路径上多解析一次，正常路径零成本。
+fn top_level_types(text: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return String::new();
+    };
+    let Some(map) = value.as_object() else {
+        return "；当前顶层不是 JSON 对象".to_string();
+    };
+    let kind = |v: &serde_json::Value| match v {
+        serde_json::Value::Null => "空",
+        serde_json::Value::Bool(_) => "布尔",
+        serde_json::Value::Number(_) => "数字",
+        serde_json::Value::String(_) => "字符串",
+        serde_json::Value::Array(_) => "数组",
+        serde_json::Value::Object(_) => "对象",
+    };
+    let known = ["port", "refreshSeconds", "roots", "disabledAgents"];
+    let parts: Vec<String> = map
+        .iter()
+        .map(|(k, v)| {
+            let tag = if known.contains(&k.as_str()) { "" } else { "(未识别)" };
+            format!("{k}{tag}={}", kind(v))
+        })
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("；当前顶层键：{}", parts.join(", "))
+}
+
+/// #113: keys in `settings.json` that this version does not know about.
+/// They are ignored for behaviour on purpose (see `Settings::unknown`); the
+/// point of listing them is that a downgrade is *visible* instead of fatal.
+pub fn unknown_keys(settings: &Settings) -> Vec<String> {
+    let mut keys: Vec<String> = settings.unknown.keys().cloned().collect();
+    keys.sort();
+    keys
 }
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let text = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, text).map_err(|e| e.to_string())?;
     fs::rename(&temp, path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests_unknown_keys {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn root_with(text: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("tm-cfg-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("settings.json"), text).unwrap();
+        root
+    }
+
+    /// #113：一个未知键不得让整份配置作废（修前 `deny_unknown_fields` 直接 Err，
+    /// 于是 bootstrap 卡死、正在跑的后台 status/stop/scan 全部报「配置错误」）。
+    #[test]
+    fn unknown_keys_are_ignored_listed_and_round_tripped() {
+        let root = root_with(
+            r#"{"port":9999,"refreshSeconds":60,"roots":{},"disabledAgents":[],"themeMode":"dark","nested":{"a":1}}"#,
+        );
+        let s = settings(&root).expect("含未知键的 settings.json 必须仍能加载");
+        assert_eq!(s.port, 9999);
+        assert_eq!(unknown_keys(&s), vec!["nested".to_string(), "themeMode".to_string()]);
+        // 保存一次：未知键必须原样带回（降级→升级不丢用户写的字段）
+        save_json(&root.join("settings.json"), &s).unwrap();
+        let again = settings(&root).unwrap();
+        assert_eq!(unknown_keys(&again), vec!["nested".to_string(), "themeMode".to_string()]);
+        assert_eq!(again.port, 9999);
+        assert_eq!(
+            again.unknown["themeMode"],
+            serde_json::Value::String("dark".into())
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// #113：错误信息必须点名是哪个文件——修前只有一句 serde 的原文，
+    /// 用户面对两个数据根（便携/源码）时无法知道改哪个文件。
+    #[test]
+    fn errors_name_the_file_and_the_field() {
+        let root = root_with(r#"{"port":"8787","refreshSeconds":60,"roots":{},"disabledAgents":[]}"#);
+        let err = settings(&root).unwrap_err();
+        assert!(err.contains("settings.json"), "{err}");
+        assert!(err.contains(&root.display().to_string()), "错误里必须有完整路径：{err}");
+        assert!(
+            err.contains("port=字符串"),
+            "错误里必须点名是哪个字段、它实际是什么类型：{err}"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// 类型正确但值非法（端口 0）也必须带上文件名——validate 的原文没有路径。
+    #[test]
+    fn validation_errors_also_carry_the_path() {
+        let root = root_with(
+            r#"{"port":0,"refreshSeconds":60,"roots":{"codex":["D:/x"]},"disabledAgents":[]}"#,
+        );
+        let err = settings(&root).unwrap_err();
+        assert!(err.contains(&root.join("settings.json").display().to_string()), "{err}");
+        assert!(err.contains("端口"), "{err}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_settings_have_no_unknown_keys() {
+        assert!(unknown_keys(&Settings::default()).is_empty());
+        let mut s = Settings::default();
+        s.roots = BTreeMap::new();
+        assert!(unknown_keys(&s).is_empty());
+    }
 }
