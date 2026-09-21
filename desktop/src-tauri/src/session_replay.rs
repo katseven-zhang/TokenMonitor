@@ -19,11 +19,11 @@ use std::{
     path::Path,
 };
 
-use crate::pricing::Prices;
-
 /// A Codex rollout writes `session_meta` at its head, so the hierarchy scan never
 /// needs the whole file.
 const SESSION_META_HEAD_BYTES: u64 = 256 * 1024;
+
+use crate::pricing::Prices;
 
 const LEGACY_FALLBACK_MODEL: &str = "unknown";
 const UNGROUPED_TURN_ID: &str = "Ungrouped";
@@ -286,7 +286,9 @@ fn build_agent_hierarchy(
     for agent in &agents {
         visit_agent(&agent.session_id, &agents, &mut ordered_ids, &mut ordered);
     }
-    // Pricing is bounded by the family actually shown, not by every session stored.
+    // Pricing is bounded by the family actually shown. The read service re-prices
+    // these rows with the same query tables and exports use; this value keeps the
+    // hierarchy honest for every other consumer of the struct.
     for agent in &mut ordered {
         agent.cost_usd = query_session_cost_usd(db, &agent.path, prices);
     }

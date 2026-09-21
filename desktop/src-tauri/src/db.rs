@@ -401,6 +401,27 @@ pub fn query_session_rollup_record(
         prompt_title: title,
     }))
 }
+/// Cost of one session file, priced with the caller's already-parsed table. Only
+/// called for the agents a replay keeps in its family, so pricing is proportional
+/// to the tree being displayed rather than to the whole cache.
+pub fn query_session_cost_usd(db: &Connection, path: &str, prices: Option<&Prices>) -> f64 {
+    let Ok(mut stmt) = db.prepare(
+        "SELECT data FROM raw_events WHERE path=?1 AND agent='codex' ORDER BY ts",
+    ) else {
+        return 0.0;
+    };
+    let Ok(rows) = stmt.query_map([path], |r| r.get::<_, String>(0)) else {
+        return 0.0;
+    };
+    rows.filter_map(|row| row.ok())
+        .filter_map(|data| {
+            EVENT_DESERIALIZE_COUNT.with(|counter| counter.set(counter.get() + 1));
+            serde_json::from_str::<Event>(&data).ok()
+        })
+        .filter_map(|event| prices?.cost(&event))
+        .sum::<f64>()
+}
+
 /// Per-session token totals computed by SQL. The previous version rebuilt a full
 /// daily rollup for *every* codex file — deserializing all of their events and
 /// re-parsing `prices.json` each time — just to open one replay.
@@ -437,25 +458,4 @@ pub fn query_session_hierarchy_records(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(rows)
-}
-
-/// Cost of one session file, priced with the caller's already-parsed table. Only
-/// called for the agents a replay keeps in its family, so pricing is proportional
-/// to the tree being displayed rather than to the whole cache.
-pub fn query_session_cost_usd(db: &Connection, path: &str, prices: Option<&Prices>) -> f64 {
-    let Ok(mut stmt) = db.prepare(
-        "SELECT data FROM raw_events WHERE path=?1 AND agent='codex' ORDER BY ts",
-    ) else {
-        return 0.0;
-    };
-    let Ok(rows) = stmt.query_map([path], |r| r.get::<_, String>(0)) else {
-        return 0.0;
-    };
-    rows.filter_map(|row| row.ok())
-        .filter_map(|data| {
-            EVENT_DESERIALIZE_COUNT.with(|counter| counter.set(counter.get() + 1));
-            serde_json::from_str::<Event>(&data).ok()
-        })
-        .filter_map(|event| prices?.cost(&event))
-        .sum::<f64>()
 }
