@@ -104,6 +104,21 @@ fn show(app: &tauri::AppHandle) {
         let _ = w.set_focus();
     }
 }
+/// #71(8)：托盘"退出应用并停止后台"这条承诺的兑现顺序，抽成与 Tauri、与原生
+/// 消息框都无关的三个闭包，好让 `#[test]` 能钉住它——修前这一段是
+/// `if let Err(e)=stop {log(e)}; exit(0)`，日志写在正在关闭的界面背后，停不下来
+/// 与停下来了在用户那边一模一样。现在：停不下来必须先有一条看得见的告警，
+/// 然后仍然退出（不能把用户关在一个关不掉的托盘上）。
+fn quit_with(
+    stop: impl FnOnce() -> Result<(), String>,
+    warn: impl FnOnce(&str),
+    exit: impl FnOnce(),
+) {
+    if let Err(error) = stop() {
+        warn(&error);
+    }
+    exit();
+}
 pub fn run() {
     // The runtime otherwise shows an English dialog but can leave a headless
     // tray/service process alive. Stop before constructing either subsystem.
@@ -186,10 +201,13 @@ pub fn run() {
                             let app = app.clone();
                             std::thread::spawn(move || {
                                 let root = config::data_dir();
-                                if let Err(e) = service::stop(&root) {
-                                    service::log(&root, &e);
-                                }
-                                app.exit(0);
+                                quit_with(
+                                    || service::stop(&root).map(|_| ()),
+                                    // 这个出口自己会写 service.log，再弹一次原生告警：
+                                    // 修前只有前者，等于没告诉任何人。
+                                    |error| crate::instance::warn_background_not_stopped(error),
+                                    || app.exit(0),
+                                );
                             });
                         }
                         _ => {}
@@ -209,7 +227,82 @@ pub fn run() {
     }
 }
 fn fatal_desktop(error:&str)->! {
-    // MessageBoxW 只在 instance::fatal_startup 里有一份：main.rs 的实例锁故障与
-    // 这里的 WebView2 故障共用同一出口。
+    // MessageBoxW 只在 instance::native_dialog 里有一份：main.rs 的实例锁故障、
+    // 这里的 WebView2 故障、以及托盘退出时"后台没停下来"的告警共用同一个出口。
     crate::instance::fatal_startup("请确认 Microsoft Edge WebView2 Runtime 已安装且可用。", error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quit_with;
+    use std::cell::RefCell;
+
+    /// #71(8)：菜单写着"退出应用并停止后台"，所以停不下来是一个必须让用户看见的
+    /// 结果，不是一行日志。修前失败与成功在用户侧完全同形（界面一关，日志没人读），
+    /// 后台进程继续占着数据目录锁与端口。
+    /// 这里钉住两件事：① 失败 → 告警恰好一次、且带着原始错误、然后仍然退出；
+    /// ② 成功 → 一声不吭地退出（不许把"停止成功"也弹成故障）。
+    #[test]
+    fn quit_surfaces_a_background_stop_failure_and_still_exits() {
+        let steps = RefCell::new(Vec::<String>::new());
+        let error = "后台进程仍持有缓存锁，但控制端口未响应；请保留当前端口并检查日志";
+        quit_with(
+            || Err(error.to_string()),
+            |detail| {
+                assert_eq!(detail, error, "告警必须带上真实失败原因，不能只说\"未能停止\"");
+                steps.borrow_mut().push("warn".into());
+            },
+            || steps.borrow_mut().push("exit".into()),
+        );
+        assert_eq!(
+            *steps.borrow(),
+            vec!["warn", "exit"],
+            "停不下来要\"先告警再退出\"：只退出就是修前的静默失败，只告警会把用户卡在关不掉的托盘上"
+        );
+
+        let steps = RefCell::new(Vec::<String>::new());
+        quit_with(
+            || Ok(()),
+            |_| panic!("后台确实停下来了就不得弹告警"),
+            || steps.borrow_mut().push("exit".into()),
+        );
+        assert_eq!(*steps.borrow(), vec!["exit"], "成功路径必须安静");
+    }
+
+    /// 上一条只证明 `quit_with` 本身正确；真正会退化的是**接线**——把菜单臂改回
+    /// "只写日志再 exit(0)"，行为测试一点感觉都没有。所以这里按调用点（不是函数
+    /// 定义）钉住 quit 菜单项：它必须经由 `quit_with`，把可见告警出口和退出都交
+    /// 进去，不再自己直接调 `service::log`。桌面消息框无法在无头 CI 里点，这是
+    /// 唯一能把这条承诺钉住的检查。
+    #[test]
+    fn the_quit_menu_item_is_wired_to_the_visible_outcome() {
+        let source = include_str!("desktop.rs");
+        let marker = "\"quit\" =>";
+        let at = source.find(marker).expect("退出菜单项") + marker.len();
+        let rest = &source[at..];
+        let open = rest.find('{').expect("quit 臂体的左花括号");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (index, ch) in rest[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &rest[open + 1..end.expect("quit 臂体的右花括号")];
+        for required in ["quit_with(", "service::stop(&root)", "warn_background_not_stopped", "app.exit(0)"] {
+            assert!(body.contains(required), "quit 菜单臂少了 {required}：{body}");
+        }
+        assert!(
+            !body.contains("service::log"),
+            "退出路径不得再把错误只写进日志（那正是修前的静默失败）：{body}"
+        );
+    }
 }

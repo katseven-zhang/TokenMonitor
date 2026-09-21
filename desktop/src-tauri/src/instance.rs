@@ -44,21 +44,48 @@ pub fn acquire_desktop_lock(root: &Path) -> InstanceLock {
 
 /// 界面起不来时唯一的对外报错通道：写日志、弹原生消息框、以非零码退出。
 /// `advice` 是给人看的处置建议，`detail` 是原始错误。desktop.rs 的 WebView2
-/// 致命错误也走这里，MessageBoxW 全仓库只此一份。
+/// 致命错误也走这里。
 pub fn fatal_startup(advice: &str, detail: &str) -> ! {
     let message = format!("TokenMonitor 无法打开桌面界面。{advice}\n\n详细错误：{detail}");
     service::log(&config::data_dir(), &message);
+    // 0x10 = MB_ICONERROR：Native fallback still works when WebView2 cannot create any UI.
+    native_dialog("TokenMonitor 启动失败", &message, 0x10);
+    eprintln!("{message}");
+    std::process::exit(1);
+}
+
+/// #71(8)：托盘"退出应用并停止后台"停不下来时的用户可见结果。
+///
+/// 修前只有 `service::log`：那一刻界面正在关闭，用户在下次打开应用之前读不到
+/// 它，而后台进程仍活着（占着数据目录锁与本地端口）——菜单的承诺静默落空。
+/// 现在除了同一条日志还弹一次原生告警，然后照常退出：既不能假装停成功，也不能
+/// 把用户卡在一个关不掉的托盘上。
+/// 只有桌面壳（`desktop` feature）会调它；`cargo test --no-default-features`
+/// （desktop/README.md 记的无界面跑法）下它是纯 API 面，不该报 dead_code。
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub fn warn_background_not_stopped(detail: &str) {
+    let message = format!(
+        "TokenMonitor 即将退出，但后台采集没有停下来。{detail}\n\
+         后台进程仍在占用数据目录与本地端口：再次打开应用可以用托盘里的\u{201c}停止后台采集\u{201d}重试，\
+         仍然失败请带着 service.log 反馈。"
+    );
+    service::log(&config::data_dir(), &message);
+    native_dialog("TokenMonitor 后台未停止", &message, 0x30); // MB_ICONWARNING
+}
+
+/// MessageBoxW 全仓库只此一份：启动致命错误与"后台没停下来"的告警共用同一个
+/// 出口。非 Windows 目标上没有原生壳可弹，退化为只写日志（调用方已写过）。
+fn native_dialog(title: &str, text: &str, flags: u32) {
     #[cfg(windows)]
     {
         #[link(name = "user32")]
         extern "system" { fn MessageBoxW(window: *mut std::ffi::c_void, text: *const u16, title: *const u16, flags: u32) -> i32; }
-        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-        let title: Vec<u16> = "TokenMonitor 启动失败".encode_utf16().chain(Some(0)).collect();
-        // Native fallback still works when WebView2 cannot create any UI.
-        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10); }
+        let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), flags); }
     }
-    eprintln!("{message}");
-    std::process::exit(1);
+    #[cfg(not(windows))]
+    { let _ = (title, text, flags); }
 }
 
 #[cfg(test)]
