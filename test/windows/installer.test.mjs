@@ -11,7 +11,8 @@
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/installer.test.mjs
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -36,9 +37,12 @@ const UNINSTALL_PS1 = join(repo, 'scripts', 'uninstall-windows.ps1');
 
 let passed = 0;
 const failures = [];
-function ok(cond, label) {
+function ok(cond, label, detail) {
   if (cond) { passed++; console.log('  ✓ ' + label); }
-  else { failures.push(label); console.log('  ✗ ' + label); }
+  else {
+    failures.push(label);
+    console.log('  ✗ ' + label + (detail === undefined ? '' : '\n      ' + String(detail).replace(/\n/g, '\n      ')));
+  }
 }
 
 function runPs(script, args, { stdin = '' } = {}) {
@@ -47,20 +51,50 @@ function runPs(script, args, { stdin = '' } = {}) {
   return { code: r.status, out: ((r.stdout || '') + (r.stderr || '')) };
 }
 
+/** All files under root, POSIX-relative, manifest.json excluded (it cannot hash itself). */
+function packageFiles(root) {
+  const out = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else out.push(p);
+    }
+  };
+  walk(root);
+  return out
+    .map((p) => ({ abs: p, rel: p.slice(root.length + 1).replace(/\\/g, '/') }))
+    .filter((f) => f.rel !== 'manifest.json')
+    .sort((a, b) => (a.rel < b.rel ? -1 : 1));
+}
+
+function sha256File(p) {
+  return createHash('sha256').update(readFileSync(p)).digest('hex');
+}
+
+function safeReaddir(dir) {
+  try { return readdirSync(dir); } catch { return ['<unreadable>']; }
+}
+
 /** Minimal but REAL layout-v2 candidate: root manifest.json + TokenMonitor.exe
  *  (existence-checked only, so a small stand-in works) + runtime\ with a real
  *  node.exe and runnable --version. web/ 不能省：server.js 自 #16 起静态导入
- *  ../web/lib/theme.js（评审 4020427f187e46b4）。 */
+ *  ../web/lib/theme.js（评审 4020427f187e46b4）。
+ *  #101：manifest 的 files[] SHA-256 清单现在真的被安装器消费了，所以夹具必须写出
+ *  真实哈希——否则夹具本身就是一个"装不出来的假包"。清单最后写，且不含自身。 */
 function makeCandidate(root, version) {
   const cand = join(root, 'cand-' + version);
   mkdirSync(join(cand, 'runtime', 'bin'), { recursive: true });
-  writeFileSync(join(cand, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', version, os: 'windows', arch: 'x64', layout: 2 }));
   writeFileSync(join(cand, 'TokenMonitor.exe'), 'fake-gui-exe-stand-in');
   cpSync(process.execPath, join(cand, 'runtime', 'node.exe'));
   copyFileSync(join(repo, 'bin', 'tokenmonitor.js'), join(cand, 'runtime', 'bin', 'tokenmonitor.js'));
   copyTree(join(repo, 'src'), join(cand, 'runtime', 'src'));
   copyTree(join(repo, 'web'), join(cand, 'runtime', 'web'));
   writeFileSync(join(cand, 'runtime', 'package.json'), JSON.stringify({ name: 'tokenmonitor', version, type: 'module' }));
+  const files = packageFiles(cand).map((f) => ({ path: f.rel, bytes: statSync(f.abs).size, sha256: sha256File(f.abs) }));
+  writeFileSync(join(cand, 'manifest.json'), JSON.stringify({
+    name: 'TokenMonitor', version, os: 'windows', arch: 'x64', layout: 2, fileCount: files.length, files,
+  }));
   return cand;
 }
 
@@ -265,19 +299,223 @@ try {
     writeFileSync(injected, src.replace(needle, "if ($true) { Fail 'injected: post-upgrade verification failed' }"));
 
     const r0 = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '9.0.0-test'), ...args9]);
-    ok(r0.code === 0, '9 基线安装 exit 0');
+    ok(r0.code === 0, '9 基线安装 exit 0', r0.out.slice(-500));
     mkdirSync(join(install9, 'data'), { recursive: true });
     writeFileSync(join(install9, 'data', 'wallet.json'), '{"balance":42}');
 
     const r = runPs(injected, ['-Source', makeCandidate(base, '10.0.0-test'), '-Repo', repo, ...args9]);
-    ok(r.code !== 0, '验证失败 → 非零退出');
+    ok(r.code !== 0, '验证失败 → 非零退出', r.out.slice(-500));
+    // 失败时打印脚本输出尾部与现场目录：回滚路径若被文件占用打断（本机 AV 有先例），
+    // ERROR 行里的文件名就是打断点，别把归因留给猜。
+    const scene = () => 'r.out tail: ' + r.out.slice(-600) + '\np9: ' + safeReaddir(p9).join(', ');
     ok(existsSync(join(install9, 'data', 'wallet.json'))
       && readFileSync(join(install9, 'data', 'wallet.json'), 'utf8') === '{"balance":42}',
-      'data\\wallet.json 未被删除（修前此文件连同新目录一起被 Remove-Item -Recurse 抹掉）');
+      'data\\wallet.json 未被删除（修前此文件连同新目录一起被 Remove-Item -Recurse 抹掉）', scene());
     ok(installedVersion(install9) === '9.0.0-test'
       && !existsSync(join(p9, 'TokenMonitor.new')) && !existsSync(join(p9, 'TokenMonitor.old')),
-      '回滚到旧版本 9.0.0-test 且没有残留 .new/.old');
-    ok(!existsSync(join(p9, 'TokenMonitor-data')), '数据不在过渡目录里（已归位，不留 TokenMonitor-data）');
+      '回滚到旧版本 9.0.0-test 且没有残留 .new/.old', scene());
+    ok(!existsSync(join(p9, 'TokenMonitor-data')), '数据不在过渡目录里（已归位，不留 TokenMonitor-data）', scene());
+  }
+
+  /* ---------- [10] #101：清单哈希终于有了消费方；占用中的安装树不再被删一半 ---------- */
+  console.log('\n[10] #101 manifest SHA-256 消费方 + 安装树占用守卫');
+  {
+    const p10 = join(base, 'root10', 'Programs');
+    const a10 = ['-InstallRoot', p10, '-StartMenuRoot', join(base, 'root10', '菜单'), '-DesktopRoot', join(base, 'root10', '桌面')];
+    const install10 = join(p10, 'TokenMonitor');
+
+    // (a) 内容与清单不符：必须拒装，且一个文件都不落地
+    const tampered = makeCandidate(base, '11.0.0-test');
+    appendFileSync(join(tampered, 'runtime', 'src', 'config.js'), '\n// silently edited after hashing\n');
+    const rTamper = runPs(INSTALL_PS1, ['-Source', tampered, '-Repo', repo, ...a10]);
+    ok(rTamper.code !== 0, '#101 内容被改过的包拒装（非零退出）', `code=${rTamper.code}`);
+    ok(/SHA-256 mismatch/i.test(rTamper.out) && /runtime\/src\/config\.js/.test(rTamper.out),
+      '#101 拒装原因点名 SHA-256 与具体文件', rTamper.out.slice(-400));
+    ok(!existsSync(install10), '#101 拒装发生在写入之前：安装目录根本没建', install10);
+
+    // (b) 清单里没有的文件混进包里 → 同样拒装（否则等于允许装来路不明的内容）
+    const smuggled = makeCandidate(base, '12.0.0-test');
+    writeFileSync(join(smuggled, 'runtime', 'unexpected.js'), 'module.exports = 1');
+    const rExtra = runPs(INSTALL_PS1, ['-Source', smuggled, '-Repo', repo, ...a10]);
+    ok(rExtra.code !== 0 && /not in manifest/.test(rExtra.out), '#101 清单未登记的文件也拒装', rExtra.out.slice(-400));
+    ok(/unexpected\.js/.test(rExtra.out), '#101 点名那个未登记的文件', rExtra.out.slice(-300));
+
+    // (c) 清单没有 files[] —— "干脆不写哈希" 不能成为绕过校验的办法
+    const bare = makeCandidate(base, '13.0.0-test');
+    writeFileSync(join(bare, 'manifest.json'), JSON.stringify({ name: 'TokenMonitor', version: '13.0.0-test', os: 'windows', arch: 'x64', layout: 2 }));
+    const rBare = runPs(INSTALL_PS1, ['-Source', bare, '-Repo', repo, ...a10]);
+    ok(rBare.code !== 0 && /no files\[\] hash list/.test(rBare.out), '#101 无哈希清单的包拒装，并说明要重建', rBare.out.slice(-400));
+
+    // (d) 完好无损的包照常装成 —— 上面三条不是把安装整体弄坏
+    const good = makeCandidate(base, '14.0.0-test');
+    const rGood = runPs(INSTALL_PS1, ['-Source', good, '-Repo', repo, ...a10]);
+    ok(rGood.code === 0, '#101 校验通过的包正常安装', rGood.out.slice(-400));
+    ok(/integrity verified: \d+ files/.test(rGood.out) && !/integrity verified: 0 files/.test(rGood.out),
+      '#101 安装日志报告了实际校验过的文件数', rGood.out.slice(-400));
+
+    // (e) 占用守卫：静态断言，绝不真起进程（本机有真实安装在跑，不许碰）
+    {
+      const instSrc = readFileSync(INSTALL_PS1, 'utf8');
+      const uninsSrc = readFileSync(UNINSTALL_PS1, 'utf8');
+      for (const [label, src] of [['安装器', instSrc], ['卸载器', uninsSrc]]) {
+        // 主执行流程 = 顶层 try 块中真正开始干活的那一个（首行即 Assert-BackendStopped）。
+        // 不能锚"第一个 ^try {"：清单校验块 (#101) 也是一个顶层 try，从它切会
+        // 把 Remove-InstallTree 的函数定义体当成"第一处递归删除"。
+        const flowStart = src.search(/^try \{\r?\n\s*Assert-BackendStopped/m);
+        ok(flowStart > -1, `#101 ${label} 主流程 try 块可定位`);
+        const flow = src.slice(flowStart);
+        ok(/function Assert-InstallTreeIdle/.test(src) && /Assert-InstallTreeIdle\b/.test(flow),
+          `#101 ${label} 有安装树占用守卫且在主流程被调用`);
+        const guardCall = flow.search(/^\s*Assert-InstallTreeIdle\b/m);
+        const firstDelete = flow.search(/Remove-InstallTree -Path|Remove-Item -LiteralPath \$(staging|backup|full) -Recurse/);
+        ok(guardCall > -1 && firstDelete > -1 && guardCall < firstDelete,
+          `#101 ${label} 的占用检查在任何递归删除之前`, `guard=${guardCall} firstDelete=${firstDelete}`);
+        const guardDef = src.search(/function Assert-InstallTreeIdle/);
+        ok(!/Stop-Process|taskkill|\bKill\(/.test(src.slice(guardDef, src.indexOf('\n}', guardDef))),
+          `#101 ${label} 只报告不杀进程（守卫里没有 Stop-Process/Kill/taskkill）`);
+      }
+      ok(/install tree is in use by/.test(instSrc) && /install tree is in use by/.test(uninsSrc),
+        '#101 占用守卫说的是"停不掉就别删"，不是静默跳过删除');
+    }
+
+    // (f) 打包器不再静默装旧 exe
+    {
+      const buildSrc = readFileSync(join(repo, 'scripts', 'build-windows.ps1'), 'utf8');
+      ok(/function Get-NewestSourceWrite/.test(buildSrc) && /stale \(newest source/.test(buildSrc),
+        '#101 build-windows.ps1 按源码时间判定 publish 产物是否过期');
+      ok((buildSrc.match(/Resolve-PublishedExe/g) || []).length === 3,
+        '#101 GUI 与托盘两个产物走同一条过期即重建的路径'); // 1 定义 + 2 调用
+      ok(/\$rel -match '\^\(publish\|target\)/.test(buildSrc),
+        '#101 过期判定排除 publish\\ 与 target\\（否则 exe 永远比自身新）');
+      ok(!/-not \(Test-Path -LiteralPath \$guiExe\)/.test(buildSrc),
+        '#101 打包器不再保留"只在缺失时才构建"的旧分支');
+      // 清单的生产方与消费方枚举口径必须一致：消费方 (install-windows.ps1) 用
+      // -Force 扫描未登记文件，生产方若不带 -Force，一个隐藏的合法文件会让
+      // 完整构建的包在安装时被误拒。
+      ok(/Get-ChildItem -LiteralPath \$dist -Recurse -File -Force/.test(buildSrc),
+        '#101 manifest 的文件枚举与安装器的校验枚举同用 -Force');
+    }
+
+    // (g) 占用守卫的正向分支演练：静态断言只能证明"代码在那儿"，证明不了它会拦。
+    // 这里从 %TEMP% 沙箱安装树里真起一个改名的 node.exe（进程名即 TokenMonitor.exe），
+    // 卸载与安装都必须停下来且一毫未删；测试只结束自己按 PID 起的假进程，
+    // 绝不触碰本机真实安装（守卫按镜像路径比对，真实进程不在沙箱根下，天然不受影响）。
+    {
+      const waitPs = join(base, 'wait-pid.ps1');
+      writeFileSync(waitPs, [
+        'param([int]$TargetPid, [string]$Mode)',
+        '$deadline = (Get-Date).AddSeconds(25)',
+        'while ((Get-Date) -lt $deadline) {',
+        '  $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue',
+        '  if ($null -eq $proc) { if ($Mode -eq \'exited\') { Write-Output \'OK-exited\'; exit 0 }; Start-Sleep -Milliseconds 200; continue }',
+        '  if ($Mode -eq \'exited\' -and $proc.HasExited) { Write-Output \'OK-exited\'; exit 0 }',
+        '  if ($Mode -eq \'visible\') { $path = \'\'; try { $path = $proc.Path } catch {}; if (-not [string]::IsNullOrEmpty($path)) { Write-Output \'OK-visible\'; exit 0 } }',
+        '  Start-Sleep -Milliseconds 200',
+        '}',
+        'Write-Output ("TIMEOUT-" + $Mode)',
+        'exit 1',
+      ].join('\r\n'));
+      const waitPid = (pid, mode) => {
+        const w = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', waitPs, '-TargetPid', String(pid), '-Mode', mode], { encoding: 'utf8' });
+        return ((w.stdout || '') + (w.stderr || '')).trim();
+      };
+
+      const pG = join(base, 'rootg', 'Programs');
+      const installG = join(pG, 'TokenMonitor');
+      mkdirSync(join(installG, 'runtime'), { recursive: true });
+      writeFileSync(join(installG, 'keep.txt'), 'G');
+      const dummy = join(installG, 'TokenMonitor.exe');
+      copyFileSync(process.execPath, dummy);
+      const child = spawn(dummy, ['-e', 'setTimeout(function () {}, 120000)'], { stdio: 'ignore' });
+      try {
+        ok(waitPid(child.pid, 'visible') === 'OK-visible', '#101 演练假进程已就绪（Get-Process 可查到镜像路径）');
+        const rG = runPs(UNINSTALL_PS1, ['-InstallRoot', pG,
+          '-StartMenuRoot', join(base, 'rootg', '菜单'), '-DesktopRoot', join(base, 'rootg', '桌面'), '-SkipScheduledTask']);
+        ok(rG.code !== 0 && /install tree is in use by/.test(rG.out) && new RegExp('TokenMonitor \\(PID ' + child.pid + '\\)').test(rG.out),
+          '#101 卸载遇占用真中止，且点名 PID（正向分支演练）', rG.out.slice(-600));
+        ok(existsSync(join(installG, 'keep.txt')) && existsSync(join(installG, 'runtime')),
+          '#101 占用中止发生在任何删除之前：沙箱树完好', rG.out.slice(-300));
+
+        const pI = join(base, 'rooti', 'Programs');
+        const installI = join(pI, 'TokenMonitor');
+        mkdirSync(join(installI, 'runtime'), { recursive: true });
+        writeFileSync(join(installI, 'keep.txt'), 'I');
+        const dummyI = join(installI, 'TokenMonitorTray.exe');
+        copyFileSync(process.execPath, dummyI);
+        const childI = spawn(dummyI, ['-e', 'setTimeout(function () {}, 120000)'], { stdio: 'ignore' });
+        try {
+          ok(waitPid(childI.pid, 'visible') === 'OK-visible', '#101 演练假进程2已就绪');
+          const rI = runPs(INSTALL_PS1, ['-Source', good, '-Repo', repo,
+            '-InstallRoot', pI, '-StartMenuRoot', join(base, 'rooti', '菜单'), '-DesktopRoot', join(base, 'rooti', '桌面')]);
+          ok(rI.code !== 0 && /install tree is in use by/.test(rI.out),
+            '#101 安装遇占用同样中止', rI.out.slice(-600));
+          ok(existsSync(join(installI, 'keep.txt')) && !existsSync(join(pI, 'TokenMonitor.new')),
+            '#101 安装中止未留下半截交换：树完好且无 .new 残留', rI.out.slice(-300));
+        } finally {
+          childI.kill();
+          waitPid(childI.pid, 'exited');
+        }
+      } finally {
+        child.kill();
+        waitPid(child.pid, 'exited');
+      }
+    }
+
+    // (h) 打包器过期判定的真函数演练：从 build-windows.ps1 的 AST 里抽出
+    // Get-NewestSourceWrite / Resolve-PublishedExe 本尊，在 %TEMP% 假 windows\gui
+    // 树上跑缺失/新鲜/过期/target 排除四种判定，build.ps1 用替身计数，
+    // 因此不跑 cargo、不碰真实 windows\*\publish。
+    {
+      const reh = join(base, 'stale-rehearsal.ps1');
+      writeFileSync(reh, [
+        'param([string]$ScriptPath, [string]$Sandbox)',
+        '$ErrorActionPreference = \'Stop\'',
+        'function Fail([string]$m) { throw $m }',
+        '$toks = $null; $perr = $null',
+        '$ast = [System.Management.Automation.Language.Parser]::ParseFile($ScriptPath, [ref]$toks, [ref]$perr)',
+        'if ($perr.Count -gt 0) { throw \'build-windows.ps1 does not parse\' }',
+        '$fns = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and @(\'Get-NewestSourceWrite\',\'Resolve-PublishedExe\') -contains $a.Name }, $true))',
+        'if ($fns.Count -ne 2) { throw \'functions under test not found\' }',
+        'Invoke-Expression ((@($fns) | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine)',
+        '$repoFull = $Sandbox',
+        '$gui = Join-Path $repoFull \'windows\\gui\'',
+        'New-Item -ItemType Directory -Path (Join-Path $gui \'src\'),(Join-Path $gui \'publish\'),(Join-Path $gui \'target\') -Force | Out-Null',
+        '@\'',
+        'param()',
+        '$dir = Split-Path -Parent $MyInvocation.MyCommand.Path',
+        '$cf = Join-Path $dir \'buildcount.txt\'',
+        '$c = 0',
+        'if (Test-Path -LiteralPath $cf) { $c = [int](Get-Content -LiteralPath $cf -Raw) }',
+        '$c++',
+        'Set-Content -LiteralPath $cf -Value $c',
+        '$exe = Join-Path $dir \'publish\\TokenMonitorGui.exe\'',
+        // PS 5.1 的 New-Item 没有 -LiteralPath；沙箱目录名只含随机字母数字，-Path 安全。
+        'New-Item -ItemType File -Path $exe -Force | Out-Null',
+        '(Get-Item -LiteralPath $exe).LastWriteTime = Get-Date',
+        '\'@ | Set-Content -LiteralPath (Join-Path $gui \'build.ps1\') -Encoding UTF8',
+        'Set-Content -LiteralPath (Join-Path $gui \'src\\main.rs\') -Value \'fn main() {}\'',
+        'function BC { if (Test-Path -LiteralPath (Join-Path $gui \'buildcount.txt\')) { [int](Get-Content -LiteralPath (Join-Path $gui \'buildcount.txt\') -Raw) } else { 0 } }',
+        'Resolve-PublishedExe \'gui\' \'TokenMonitorGui.exe\' \'GUI launcher\' | Out-Null   # 缺失 -> 构建 (1)',
+        'Write-Output ("C1=" + (BC))',
+        'Resolve-PublishedExe \'gui\' \'TokenMonitorGui.exe\' \'GUI launcher\' | Out-Null   # 新鲜 -> 不构建',
+        'Write-Output ("C2=" + (BC))',
+        '(Get-Item -LiteralPath (Join-Path $gui \'publish\\TokenMonitorGui.exe\')).LastWriteTime = (Get-Date).AddMinutes(-5)',
+        'Resolve-PublishedExe \'gui\' \'TokenMonitorGui.exe\' \'GUI launcher\' | Out-Null   # 源码比 exe 新 -> 过期, 重建 (2)',
+        'Write-Output ("C3=" + (BC))',
+        'Set-Content -LiteralPath (Join-Path $gui \'target\\scratch.o\') -Value \'newer than exe but excluded\'',
+        'Resolve-PublishedExe \'gui\' \'TokenMonitorGui.exe\' \'GUI launcher\' | Out-Null   # target\\ 排除 -> 仍新鲜',
+        'Write-Output ("C4=" + (BC))',
+        'Set-Content -LiteralPath (Join-Path $gui \'src\\added.rs\') -Value \'fn added() {}\'',
+        'Resolve-PublishedExe \'gui\' \'TokenMonitorGui.exe\' \'GUI launcher\' | Out-Null   # 真源码更新 -> 过期, 重建 (3)',
+        'Write-Output ("C5=" + (BC))',
+      ].join('\r\n'));
+      const rH = runPs(reh, ['-ScriptPath', join(repo, 'scripts', 'build-windows.ps1'), '-Sandbox', join(base, 'stale-sandbox')]);
+      ok(rH.code === 0 && /C1=1/.test(rH.out) && /C2=1/.test(rH.out) && /C3=2/.test(rH.out)
+        && /C4=2/.test(rH.out) && /C5=3/.test(rH.out),
+        '#101 过期判定真函数演练：缺失→建、新鲜→跳过、过期→重建、target\\ 排除', rH.out.slice(-800));
+      ok(/exe missing, building/.test(rH.out) && /exe stale \(newest source/.test(rH.out),
+        '#101 演练同时覆盖 missing 与 stale 两种报告文案', rH.out.slice(-400));
+    }
   }
 } finally {
   rmSync(base, { recursive: true, force: true });

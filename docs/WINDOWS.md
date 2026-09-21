@@ -171,7 +171,9 @@ node bin\tokenmonitor.js status    # 确认后台在线；如已停止则重新 
 
 - 基于安装器的覆盖升级（先验证候选、失败可回滚、保留 `data\`）：✅ 已集成（#13，`558380a` + 修复 `50fab85`；布局 v2 由 #25 重构）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
 - **升级失败时的数据边界（#100）**：`data\` 只有在**新安装验证通过之后**才放回安装目录，验证失败时它仍留在 `TokenMonitor-data`；安装脚本里每一处递归删除都走同一个守卫函数，删除前先把树内的 `data\` 移到保留目录，两边都存在时直接拒绝删除。修前的顺序是"先放回 data → 再验证 → 失败就把整个新目录 `Remove-Item -Recurse`"，一次验证失败会连同用户数据一起删掉，README 承诺的"数据永不进入删除范围"当时是不成立的。
-- 固定目录覆盖式运行包构建（`dist/windows-x64`）：✅ 已集成（#12 `c5db723`；布局 v2 由 #25 重构）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256）。
+- **候选包完整性校验（#101）**：安装/升级在写入任何东西之前，把候选包逐文件对照 `manifest.json` 的 `files[]`（bytes/SHA-256）校验：哈希不符、出现清单未登记的文件、或清单干脆没有 `files[]`，一律拒装并点名到具体文件。这份清单由构建脚本一直就在写，但此前没有任何消费方——被截断、被手改、下载了一半的包与完好包被同等对待。校验是强制的（无哈希清单算失败而非跳过），否则"忘了算哈希"就成了绕过入口。
+- **安装树占用守卫（#101）**：锁文件守卫只看得见后台；启动器与托盘是安装树里各自持有镜像文件的原生 exe。若仍有 `TokenMonitor`/`TokenMonitorTray`/`node` 进程**从即将删除的目录树里**运行，递归删除会半途失败——旧树已改名、交换完不成，之后每次重装都踩在残留的 `.old`/`.new` 上卡死。因此安装与卸载在任何破坏性步骤之前先检测占用，列出 PID 与镜像路径后中止；脚本不替你结束任何进程，请先用启动器「停止」并关闭托盘/启动器窗口。
+- 固定目录覆盖式运行包构建（`dist/windows-x64`）：✅ 已集成（#12 `c5db723`；布局 v2 由 #25 重构）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256，含隐藏文件——与安装器的校验枚举同口径 #101）。`windows\gui`/`windows\tray` 的 publish exe **缺失或比任何源码旧都立即重建**（#101）：此前只在缺失时构建，一个早先提交留下的 publish 产物会被静默打包，出货的 exe 落后于源码而包里没有任何东西说明这点。
 
 ### 运行包布局（v2，#25）
 
@@ -211,6 +213,10 @@ Remove-Item "$env:USERPROFILE\.tokenmonitor" -Recurse -Force
 - 演练入口：`-SchtasksExe <命令路径>` 只给自动化测试用，把该步指向 `%TEMP%` 里的替身命令，
   因此这一段破坏性代码在本机可被完整验证而**不会触碰真实任务计划**；`-SkipScheduledTask`
   仍然是完全跳过。
+- **卸载同样有安装树占用守卫（#101）**：第 4 步对安装目录做递归删除前，先确认没有
+  `TokenMonitor`/`TokenMonitorTray`/`node` 进程仍从 `TokenMonitor`、`.new`、`.old` 树里运行
+  （含锁文件缺失/损坏时漏掉的后台孤儿进程）。有占用就在第 1 步之前中止，任务计划、快捷方式、
+  数据一样未动；放任执行则会得到"任务与快捷方式已删、目录只删掉一半"的半截卸载。
 
 备份（建议先停止后台进程，获得一致快照；目标路径含空格/中文同样加引号）：
 
@@ -255,8 +261,8 @@ Copy-Item "$env:USERPROFILE\.tokenmonitor" "D:\备份路径\tokenmonitor-backup"
 | 文件监听降级与防抖生命周期 | 🟡 | #7 `e24ad72` | [watch.js](../src/platform/watch.js) | [watch.test.mjs](../test/windows/watch.test.mjs) |
 | 单实例锁/日志/端口诊断/受控关闭 | 🟡 | #11 `235cbda` | [runtime.js](../src/platform/runtime.js) | [runtime.test.mjs](../test/windows/runtime.test.mjs) |
 | 系统托盘（WinForms，单实例，状态轮询） | ✅ | #9 `b534213` | [windows/tray/](../windows/tray/) | [tray.test.mjs](../test/windows/tray.test.mjs) |
-| 非管理员安装器（安装/升级/卸载/回滚） | ✅ | #13 `558380a`/`50fab85` | [install-windows.ps1](../scripts/install-windows.ps1)、[uninstall-windows.ps1](../scripts/uninstall-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
-| EXE 覆盖式构建（dist/windows-x64 + manifest） | ✅ | #12 `c5db723` | [build-windows.ps1](../scripts/build-windows.ps1) | —（验收轮实跑验证） |
+| 非管理员安装器（安装/升级/卸载/回滚 + 候选完整性与占用守卫） | ✅ | #13 `558380a`/`50fab85`；#100、#101 | [install-windows.ps1](../scripts/install-windows.ps1)、[uninstall-windows.ps1](../scripts/uninstall-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
+| EXE 覆盖式构建（dist/windows-x64 + manifest；publish 过期即重建） | ✅ | #12 `c5db723`；#101 | [build-windows.ps1](../scripts/build-windows.ps1) | —（验收轮实跑验证） |
 | 面板来源元数据动态展示（/api/sources + 回退色） | ✅ | #16 `eedf2c4` | [../src/server.js](../src/server.js)、[../web/lib/sources.js](../web/lib/sources.js) | [ui-sources.test.mjs](../test/windows/ui-sources.test.mjs) |
 | 数据目录便携化（打包形态 <根>\data + 旧库迁移） | ✅ | #23 `d568ba2` | [../src/config.js](../src/config.js)、[../src/platform/runtime.js](../src/platform/runtime.js) | [runtime.test.mjs](../test/windows/runtime.test.mjs) |
 | 运行包布局 v2（根 GUI exe + runtime\） | ✅ | #25 `71a04e2` | [build-windows.ps1](../scripts/build-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |

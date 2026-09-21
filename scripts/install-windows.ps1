@@ -83,6 +83,48 @@ foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenmonitor.js', 'runtime\p
   if (-not (Test-Path -LiteralPath (Join-Path $srcFull $rel))) { Fail "candidate is missing $rel" }
 }
 
+# --- manifest integrity (#101): the SHA-256 list finally gets a consumer ---------
+# build-windows.ps1 has always written sizes+SHA-256 for every file into
+# manifest.json, but nothing ever read them back: a truncated, hand-edited or
+# partially re-downloaded package installed exactly as happily as a intact one.
+# Verification is now mandatory (a manifest with no file list is a failure, not a
+# skip - otherwise "forget to hash" becomes the way to bypass this).
+$manifest = $null
+try {
+  $manifest = Get-Content -LiteralPath (Join-Path $srcFull 'manifest.json') -Raw | ConvertFrom-Json
+} catch {
+  Fail "candidate manifest.json cannot be parsed: $($_.Exception.Message)"
+}
+$fileProp = $manifest.PSObject.Properties['files']
+if ($null -eq $fileProp -or @($fileProp.Value).Count -eq 0) {
+  Fail 'candidate manifest.json carries no files[] hash list - rebuild it with scripts/build-windows.ps1'
+}
+$manifestEntries = @($fileProp.Value)
+$listedRel = New-Object System.Collections.Generic.HashSet[string]
+$hashChecks = 0
+$integrityProblems = @()
+foreach ($entry in $manifestEntries) {
+  $rel = [string]$entry.path
+  $normalized = $rel.Replace('/', '\')
+  [void]$listedRel.Add($normalized.ToLowerInvariant())
+  $target = Join-Path $srcFull $normalized
+  if (-not (Test-Path -LiteralPath $target)) { $integrityProblems += "listed in manifest but absent: $rel"; continue }
+  $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+  $expected = ([string]$entry.sha256).ToLowerInvariant()
+  if ($actual -ne $expected) { $integrityProblems += ("SHA-256 mismatch: {0} (manifest {1} != actual {2})" -f $rel, $expected, $actual) }
+  $hashChecks++
+}
+# Content that is not in the manifest would be installed unaccounted for.
+foreach ($f in @(Get-ChildItem -LiteralPath $srcFull -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+  $rel = $f.FullName.Substring($srcFull.Length + 1)
+  if ($rel -ieq 'manifest.json') { continue }
+  if (-not $listedRel.Contains($rel.ToLowerInvariant())) { $integrityProblems += "present but not in manifest: $rel" }
+}
+if ($integrityProblems.Count -gt 0) {
+  Fail ("candidate package does not match its own manifest - refusing to install it: " + ($integrityProblems -join '; '))
+}
+Info "candidate integrity verified: $hashChecks files, SHA-256 ok (manifest version=$($manifest.version))"
+
 $candNode = Join-Path $srcFull 'runtime\node.exe'
 $candScript = Join-Path $srcFull 'runtime\bin\tokenmonitor.js'
 $candVersion = (& $candNode $candScript --version)
@@ -170,8 +212,42 @@ function Assert-BackendStopped {
   }
 }
 
+# #101: the lock-file guard above only sees the *backend*. The GUI launcher and the
+# tray are separate native exes that live inside the install tree and hold their own
+# image file open, so `Remove-Item -Recurse` over installDir/.new/.old fails halfway:
+# the old tree is already renamed away, the swap cannot finish, and the next
+# reinstall then trips over the leftover .old/.new - a wedged install that no
+# message explains. Anything still running *out of the trees about to be deleted* is
+# therefore detected before the first destructive step. Read-only: this reports and
+# aborts, it never kills a process it does not own.
+function Assert-InstallTreeIdle {
+  $blockers = @()
+  $roots = @($installDir, $staging, $backup) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+  foreach ($procName in @('TokenMonitor', 'TokenMonitorTray', 'node')) {
+    foreach ($p in @(Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
+      $imagePath = ''
+      try { $imagePath = $p.Path } catch { continue }  # not ours to query: cannot conclude it is running there
+      if ([string]::IsNullOrEmpty($imagePath)) { continue }
+      foreach ($root in $roots) {
+        if ($imagePath.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $blockers += ("{0} (PID {1}) 从 {2} 运行" -f $p.ProcessName, $p.Id, $imagePath)
+        }
+      }
+    }
+  }
+  if ($blockers.Count -gt 0) {
+    Write-Host ''
+    Write-Host '检测到仍在使用安装目录的进程，安装/升级/卸载无法安全完成：'
+    foreach ($b in $blockers) { Write-Host ("  - {0}" -f $b) }
+    Write-Host '请先通过启动器 TokenMonitor.exe 的「停止」按钮停后台，并关闭托盘/启动器窗口后再重试。'
+    Write-Host '本脚本不会替你结束任何进程。'
+    throw ("install tree is in use by: {0} - stop it first" -f ($blockers -join '; '))
+  }
+}
+
 try {
   Assert-BackendStopped  # :41
+  Assert-InstallTreeIdle # :101 no launcher/tray/node still running out of the trees we are about to delete
   if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
   if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
 
