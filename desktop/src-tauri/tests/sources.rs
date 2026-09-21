@@ -676,6 +676,56 @@ fn antigravity_decoder_branches_and_project_match_node() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// #75 第 5 项：`desktop/scripts/compare-local.mjs` 的 codex 样本必须 `equal: true`，
+/// 但那个脚本原本只能对用户机器上的真实数据说话（`desktop/.dev-data/events-v2.sqlite`
+/// + `~/.codex` 日志），CI 与离线审查都拿它没办法。这里把它的两端拆开各自钉住：
+///
+/// - **桌面端这一侧**就是下面这份黄金文件：`test/fixtures/codex-parity/desktop-events.json`
+///   逐字段等于 `collectors.rs` 现场解析 `rollout.jsonl` 产出的 `Event` 序列化结果，
+///   也就是 `raw_events.data` 落库的那段 JSON（db.rs 直接 `serde_json::to_string(e)`）。
+///   改采集器不改黄金 → 本测试红；改黄金不改采集器 → 本测试红。
+/// - **legacy Node 这一侧**由 `node desktop/scripts/compare-local.mjs --fixture` 现场跑
+///   `src/collectors/codex.js` 与上面这段黄金 JSON 对照（同一份 rollout 文件），
+///   断言在 `test/windows/codex-blackbox.test.mjs`。
+///
+/// fixture 覆盖 #75 修过的每一条：首个采样取本轮量、稳态差分、cache_write 换写法、
+/// 两种写法同时且不等（拒读记 0）、compaction 回落、重复通知不落库（7 行 → 6 条事件）。
+/// 六条总量 [880000,440000,240000,230000,345000,223000] = 2,358,000，cached 合计 1,250,000。
+#[test]
+fn compare_local_golden_is_what_the_desktop_collector_produces() {
+    const REL: &str = "test/fixtures/codex-parity/rollout.jsonl";
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let text = fs::read_to_string(root.join(REL)).unwrap();
+    let golden: Vec<Value> =
+        serde_json::from_str(&fs::read_to_string(root.join("test/fixtures/codex-parity/desktop-events.json")).unwrap())
+            .unwrap();
+    let parsed = tokenmonitor_core::collectors::parse_jsonl("codex", REL, &text);
+    assert_eq!(parsed.malformed_lines, 0, "fixture 本身不能有坏行");
+    assert_eq!(parsed.events.len(), golden.len(), "{:#?}", parsed.events);
+    for (index, event) in parsed.events.iter().enumerate() {
+        let actual = serde_json::to_value(event).unwrap();
+        assert_eq!(actual, golden[index], "第 {} 条事件与 compare-local 的黄金不符", index + 1);
+        assert_eq!(
+            event.tokens.total(),
+            golden[index]["tokens"]["input"].as_i64().unwrap()
+                + golden[index]["tokens"]["cached"].as_i64().unwrap()
+                + golden[index]["tokens"]["cacheWrite"].as_i64().unwrap()
+                + golden[index]["tokens"]["output"].as_i64().unwrap(),
+            "落库公式 total = input + cached + cacheWrite + output"
+        );
+    }
+    assert_eq!(
+        parsed.events.iter().map(|e| e.tokens.total()).sum::<i64>(),
+        2_358_000,
+        "六条事件的总量黄金数"
+    );
+    assert_eq!(
+        parsed.events.iter().map(|e| e.tokens.cached).sum::<i64>(),
+        1_250_000,
+        "cached 单独合计：compare-local 比的就是这两项 + 事件数"
+    );
+}
+
 /// #85：opencode 的工具调用时间与 Node 端 `collectors/opencode.js` 同一优先级——
 /// `data.state.time.start`（工具真正开始的时刻）优先，行内没有才退回 part 行的
 /// `time_created`。此前桌面端只认 `time_created`：一次跑了 60 秒的工具调用在桌面端

@@ -29,8 +29,28 @@ const ok = (name, cond, detail = '') => {
   else { failed++; console.error(`  ✗ ${name} ${detail}`); }
 };
 
-const base = mkdtempSync(join(tmpdir(), 'codex50 黑盒-'));
-const dataDir = join(base, '数据 目录');
+// #75 第 5 项：桌面端↔legacy 的对账脚本原本只能对用户机器上的真实数据说话，
+// --fixture 模式把同一件事搬到仓库内：legacy 现场跑 collectCodexFile，桌面端一侧取自
+// tests/sources.rs 钉住的那份黄金（同一份 rollout.jsonl）。脚本自己带负对照。
+{
+  const probe = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning',
+    join(repo, 'desktop', 'scripts', 'compare-local.mjs'), '--fixture'], {
+    encoding: 'utf8', timeout: 120000, env: { ...process.env, TOKENMONITOR_OFFLINE: '1' },
+  });
+  const out = String(probe.stdout || '');
+  let verdict = null;
+  try { verdict = JSON.parse(out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1)); } catch { /* 下面按失败处理 */ }
+  ok('对账夹具：compare-local --fixture 退出 0', probe.status === 0,
+    `exit=${probe.status} ${String(probe.stderr).slice(0, 160)}`);
+  ok('对账夹具：codex 样本 equal:true（事件数/总量/cached 三项全等）',
+    verdict?.clean?.length === 1 && verdict.clean[0].equal === true
+    && verdict.clean[0].old?.events === 6 && verdict.clean[0].old?.tokens === 2_358_000
+    && verdict.clean[0].old?.cached === 1_250_000, out.slice(0, 300));
+  ok('对账夹具：负对照（黄金改一个 token）报出 equal:false，不是恒真',
+    verdict?.control?.length === 1 && verdict.control[0].equal === false, out.slice(0, 300));
+}
+
+const base = mkdtempSync(join(tmpdir(), 'codex50 黑盒-'));const dataDir = join(base, '数据 目录');
 mkdirSync(join(dataDir, 'logs'), { recursive: true });
 
 // 脱敏合成 fixture：两窗口快照 + 事件源
