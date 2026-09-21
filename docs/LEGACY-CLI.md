@@ -2,7 +2,7 @@
 
 本文件只适用于仓库保留的 Node CLI 和 macOS 菜单栏实现；主产品 Windows 桌面版请使用根 README 的构建与运行流程。
 
-## macOS 菜单栏胶囊的打包定位（#94 决策记录）
+## macOS 菜单栏胶囊的打包定位（#91 第 7 项决策记录）
 
 - 它是**有意保留的 legacy 实现**，不是被遗忘的旁支：`bin/tokenmonitor.app/` 仍在根 `package.json` 的 `files` 白名单里，
   所以 **`npm pack` 出来的 tarball 会带上这个 macOS-only 目录**（约 340KB），Windows/Linux 使用者拿到也不会用到。
