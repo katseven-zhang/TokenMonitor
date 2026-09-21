@@ -206,6 +206,79 @@ try {
     ok(r.code !== 0, '盘符根作为 InstallRoot 被拒绝');
     ok(existsSync(join(programsRoot, 'TokenMonitor', 'data')), '守卫生效，未发生删除');
   }
+  console.log('[8] #100(a) 任务计划步骤演练：默认机器（无任务）也必须走完卸载');
+  {
+    // 破坏性的 schtasks 删除步骤用 %TEMP% 里的替身命令演练，绝不调用真实任务计划。
+    const schAbsent = join(base, 'fake-schtasks-absent.cmd');
+    const schDenied = join(base, 'fake-schtasks-denied.cmd');
+    const schOk = join(base, 'fake-schtasks-ok.cmd');
+    writeFileSync(schAbsent, '@echo off\r\necho ERROR: The system cannot find the file specified. 1>&2\r\nexit /b 1\r\n');
+    writeFileSync(schDenied, '@echo off\r\necho ERROR: Access is denied. 1>&2\r\nexit /b 1\r\n');
+    writeFileSync(schOk, '@echo off\r\necho SUCCESS: The scheduled task was successfully deleted.\r\nexit /b 0\r\n');
+
+    const p8 = join(base, 'root8', 'Programs');
+    const install8 = join(p8, 'TokenMonitor');
+    const args8 = ['-InstallRoot', p8, '-StartMenuRoot', join(base, 'root8', '菜单'), '-DesktopRoot', join(base, 'root8', '桌面')];
+    const cand8 = makeCandidate(base, '8.0.0-test');
+    const rSetup = runPs(INSTALL_PS1, ['-Source', cand8, ...args8, '-SkipScheduledTask']);
+    ok(rSetup.code === 0, '8 演练环境就绪（先按老路装一份，-SkipScheduledTask）');
+    mkdirSync(join(install8, 'data'), { recursive: true });
+    writeFileSync(join(install8, 'data', 'keep.txt'), 'DATA8');
+
+    // A) 真实的删除失败（拒绝访问）必须中止，且中止发生在任何删除之前
+    const rA = runPs(UNINSTALL_PS1, [...args8, '-SchtasksExe', schDenied]);
+    ok(rA.code !== 0 && /Access is denied/.test(rA.out),
+      'A 任务删除被拒绝 → 非零退出并带出 schtasks 原文');
+    ok(existsSync(join(install8, 'runtime', 'node.exe')) && readFileSync(join(install8, 'data', 'keep.txt'), 'utf8') === 'DATA8',
+      'A 中止发生在第 1 步：安装目录与 data 完好');
+
+    // B) 默认机器（任务不存在）：修前 2>&1 + EAP=Stop 抛 NativeCommandError，整段卸载在第 1 步中止
+    const rB = runPs(UNINSTALL_PS1, [...args8, '-SchtasksExe', schAbsent]);
+    ok(rB.code === 0 && /not present/.test(rB.out),
+      'B 任务本就不存在 → 卸载继续并 exit 0（#100a 回归）');
+    ok(!existsSync(install8) && existsSync(join(p8, 'TokenMonitor-data', 'keep.txt'))
+      && readFileSync(join(p8, 'TokenMonitor-data', 'keep.txt'), 'utf8') === 'DATA8',
+      'B 卸载真的做完了：安装目录已删，data 移到 TokenMonitor-data 保留');
+
+    // C) 任务存在且删除成功（先清掉 B 留下的保留目录，否则卸载会被双 data 守卫拦下）
+    rmSync(join(p8, 'TokenMonitor-data'), { recursive: true, force: true });
+    const rC1 = runPs(INSTALL_PS1, ['-Source', cand8, ...args8, '-SkipScheduledTask']);
+    ok(rC1.code === 0, 'C 重装以便验证删除成功的分支');
+    const rC = runPs(UNINSTALL_PS1, [...args8, '-SchtasksExe', schOk]);
+    ok(rC.code === 0 && /removed scheduled task TokenMonitor-Server/.test(rC.out),
+      'C 任务删除成功 → exit 0 且报告 removed scheduled task');
+  }
+
+  console.log('[9] #100(b) 升级后验证失败：用户数据绝不进入删除范围');
+  {
+    // 该分支在真机上由 SRP/EDPA 拦掉安装目录里的 node.exe 触发，沙箱里无法自然复现，
+    // 因此对脚本副本注入"唯一一处"验证失败，其余控制流与真实脚本完全一致。
+    const p9 = join(base, 'root9', 'Programs');
+    const menu9 = join(base, 'root9', '菜单');
+    const desk9 = join(base, 'root9', '桌面');
+    const install9 = join(p9, 'TokenMonitor');
+    const args9 = ['-InstallRoot', p9, '-StartMenuRoot', menu9, '-DesktopRoot', desk9];
+    const needle = "if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }";
+    const src = readFileSync(INSTALL_PS1, 'utf8');
+    ok(src.includes(needle), '注入点仍在（升级后验证失败那一处 Fail）');
+    const injected = join(base, 'install-injected.ps1');
+    writeFileSync(injected, src.replace(needle, "if ($true) { Fail 'injected: post-upgrade verification failed' }"));
+
+    const r0 = runPs(INSTALL_PS1, ['-Source', makeCandidate(base, '9.0.0-test'), ...args9]);
+    ok(r0.code === 0, '9 基线安装 exit 0');
+    mkdirSync(join(install9, 'data'), { recursive: true });
+    writeFileSync(join(install9, 'data', 'wallet.json'), '{"balance":42}');
+
+    const r = runPs(injected, ['-Source', makeCandidate(base, '10.0.0-test'), '-Repo', repo, ...args9]);
+    ok(r.code !== 0, '验证失败 → 非零退出');
+    ok(existsSync(join(install9, 'data', 'wallet.json'))
+      && readFileSync(join(install9, 'data', 'wallet.json'), 'utf8') === '{"balance":42}',
+      'data\\wallet.json 未被删除（修前此文件连同新目录一起被 Remove-Item -Recurse 抹掉）');
+    ok(installedVersion(install9) === '9.0.0-test'
+      && !existsSync(join(p9, 'TokenMonitor.new')) && !existsSync(join(p9, 'TokenMonitor.old')),
+      '回滚到旧版本 9.0.0-test 且没有残留 .new/.old');
+    ok(!existsSync(join(p9, 'TokenMonitor-data')), '数据不在过渡目录里（已归位，不留 TokenMonitor-data）');
+  }
 } finally {
   rmSync(base, { recursive: true, force: true });
 }

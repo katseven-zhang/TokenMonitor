@@ -22,6 +22,10 @@
 
   All roots can be overridden for automated dry-runs inside temp directories;
   tests pass -SkipScheduledTask so they never touch the real Task Scheduler.
+  The scheduled-task step can also be rehearsed instead of skipped: point
+  -SchtasksExe at a stand-in command inside a temp sandbox, which is how the
+  task-delete branch gets tested at all (see #100 - it used to abort the whole
+  uninstall on any machine where the task did not exist).
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\uninstall-windows.ps1
@@ -36,7 +40,10 @@ param(
   # Second confirmation for -PurgeData (skips the interactive DELETE prompt).
   [switch]$ConfirmPurge,
   # Skip the Task Scheduler step (used by automated dry-runs).
-  [switch]$SkipScheduledTask
+  [switch]$SkipScheduledTask,
+  # schtasks.exe override, ONLY for sandboxed rehearsals of the task step
+  # (tests pass a stand-in command under %TEMP%). Never point it elsewhere.
+  [string]$SchtasksExe = 'schtasks.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -94,9 +101,31 @@ try {
     Info 'scheduled task step skipped (-SkipScheduledTask)'
   } else {
     $taskName = 'TokenMonitor-Server'
-    $null = & schTasks.exe /Delete /TN $taskName /F 2>&1
-    if ($LASTEXITCODE -eq 0) { Info "removed scheduled task $taskName" }
-    else { Info "scheduled task $taskName not present (nothing to remove)" }
+    # #100(a): under $ErrorActionPreference='Stop', PowerShell 5.1 turns every
+    # redirected native-stderr line into an ErrorRecord and throws
+    # NativeCommandError. A machine with no such task is exactly that case
+    # (schtasks writes "ERROR: The system cannot find the file specified." to
+    # stderr and exits 1), so the old `... 2>&1` aborted the entire uninstall on
+    # step 1 - before any shortcut or data move - on every default install.
+    # Reproduced on PS 5.1.26100: with 2>&1 the script never reaches the next
+    # line; with the preference downgraded for the call only, it does.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $taskOut = (@(& $SchtasksExe /Delete /TN $taskName /F 2>&1 | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    $taskCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($taskCode -eq 0) {
+      Info "removed scheduled task $taskName"
+    } elseif ($taskOut -match 'cannot find the file specified|cannot find the task') {
+      Info "scheduled task $taskName not present (nothing to remove)"
+    } else {
+      # #86 lesson, same conflation avoided here: exit code 1 also means access
+      # denied, a stopped Task Scheduler service or a policy-protected task.
+      # Saying "not present" would leave the logon task alive behind a deleted
+      # install; aborting here leaves the install untouched and reversible.
+      $hint = 'nothing has been deleted yet (this is step 1 of the uninstall) - repair the Task Scheduler, or remove the task by hand, then run the uninstaller again'
+      Fail ("removing scheduled task {0} failed (exit {1}): {2}. {3}" -f $taskName, $taskCode, $taskOut, $hint)
+    }
   }
 
   # --- 2. shortcuts -----------------------------------------------------------

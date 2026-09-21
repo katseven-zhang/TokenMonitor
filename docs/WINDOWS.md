@@ -105,6 +105,7 @@ node bin\tokenmonitor.js status    # 确认后台在线；如已停止则重新 
 ```
 
 - 基于安装器的覆盖升级（先验证候选、失败可回滚、保留 `data\`）：✅ 已集成（#13，`558380a` + 修复 `50fab85`；布局 v2 由 #25 重构）。按用户级安装到 `%LOCALAPPDATA%\Programs\TokenMonitor`，无需管理员；脚本见 [../scripts/install-windows.ps1](../scripts/install-windows.ps1)、[../scripts/uninstall-windows.ps1](../scripts/uninstall-windows.ps1)，说明见 [../windows/installer/README.md](../windows/installer/README.md)；测试 [../test/windows/installer.test.mjs](../test/windows/installer.test.mjs)。
+- **升级失败时的数据边界（#100）**：`data\` 只有在**新安装验证通过之后**才放回安装目录，验证失败时它仍留在 `TokenMonitor-data`；安装脚本里每一处递归删除都走同一个守卫函数，删除前先把树内的 `data\` 移到保留目录，两边都存在时直接拒绝删除。修前的顺序是"先放回 data → 再验证 → 失败就把整个新目录 `Remove-Item -Recurse`"，一次验证失败会连同用户数据一起删掉，README 承诺的"数据永不进入删除范围"当时是不成立的。
 - 固定目录覆盖式运行包构建（`dist/windows-x64`）：✅ 已集成（#12 `c5db723`；布局 v2 由 #25 重构）。见 [../scripts/build-windows.ps1](../scripts/build-windows.ps1)；构建前只清理该精确目录，产物带 manifest（逐文件字节/sha256）。
 
 ### 运行包布局（v2，#25）
@@ -131,6 +132,20 @@ node bin\tokenmonitor.js uninstall-agent        # 只删除 TokenMonitor-Server 
 # 移除绿色版：删除解压目录即可（data\ 在目录内，一并移走）
 Remove-Item "$env:USERPROFILE\.tokenmonitor" -Recurse -Force
 ```
+
+- **卸载第 1 步（删任务）在默认机器上曾经会中止整段卸载（#100）**：该步把 schtasks 的
+  stderr 用 `2>&1` 并入管道，而脚本顶部是 `$ErrorActionPreference='Stop'`；PowerShell 5.1
+  会把每一行被重定向的原生 stderr 变成 ErrorRecord 并抛出 `NativeCommandError`。默认机器上
+  根本没有这条任务，schtasks 恰好往 stderr 写
+  `ERROR: The system cannot find the file specified.` 并以退出码 1 结束，于是卸载在第 1 步
+  就退出，快捷方式、安装目录、数据整理全都没做。现在调用期间临时把首选项降为 `Continue`，
+  调用后再恢复。
+- 该步只对"任务确实不存在"的两种 schtasks 措辞放行；拒绝访问、Task Scheduler 服务未运行、
+  任务被组策略锁住这些同样以退出码 1 结束的**真失败会带着原文中止**，且中止发生在任何删除
+  动作之前，机器状态未变，修好调度器再跑一次即可。
+- 演练入口：`-SchtasksExe <命令路径>` 只给自动化测试用，把该步指向 `%TEMP%` 里的替身命令，
+  因此这一段破坏性代码在本机可被完整验证而**不会触碰真实任务计划**；`-SkipScheduledTask`
+  仍然是完全跳过。
 
 备份（建议先停止后台进程，获得一致快照；目标路径含空格/中文同样加引号）：
 

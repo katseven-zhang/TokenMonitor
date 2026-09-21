@@ -14,7 +14,11 @@
   Upgrade safety: the candidate is staged and validated (node --version and
   tokenmonitor --version both run) BEFORE the existing install is replaced;
   the old install is kept as a rollback copy until the new one verifies, and
-  is restored automatically if verification fails.
+  is restored automatically if verification fails.  User data is moved to
+  <InstallRoot>\TokenMonitor-data and only ever moves back AFTER the new
+  install has verified, so it is never inside a directory that is about to be
+  recursively deleted; every recursive delete goes through one guarded helper
+  that stashes a data\ folder out of the tree first (#100).
 
   Every root can be overridden (-InstallRoot/-StartMenuRoot/-DesktopRoot),
   which is how automated dry-runs run entirely inside temp directories
@@ -113,6 +117,33 @@ function Move-DataBack {
     Move-Item -LiteralPath $dataKeep -Destination (Join-Path $installDir 'data')
   }
 }
+# The single guarantee the installer README makes: 数据永不进入删除范围. Any tree
+# about to be recursively deleted is first searched for a data\ folder and that
+# folder is moved out to the preserved location. If the preserved location is
+# already occupied the delete is refused outright instead of silently clobbering
+# or discarding either copy (#100b: the upgrade-rollback path used to run
+# Remove-Item -Recurse over the new install directory *after* the restored user
+# data had been moved back into it, destroying the data on a failed upgrade).
+function Stash-UserData([string]$FromDir) {
+  $src = Join-Path $FromDir 'data'
+  if (-not (Test-Path -LiteralPath $src)) { return }
+  if (Test-Path -LiteralPath $dataKeep) {
+    Fail ("both {0} and {1} exist: refusing to delete {2} because it would destroy user data - resolve one of them and retry" -f $src, $dataKeep, $FromDir)
+  }
+  Move-Item -LiteralPath $src -Destination $dataKeep
+  Log "user data moved out of delete scope: $src -> $dataKeep"
+  Info "user data moved out of the delete scope: $dataKeep"
+}
+function Remove-InstallTree([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $full = (Resolve-Path -LiteralPath $Path).Path
+  $leaf = Split-Path -Leaf $full
+  if ($leaf -cne 'TokenMonitor' -and $leaf -cne 'TokenMonitor.new' -and $leaf -cne 'TokenMonitor.old') {
+    Fail "refusing to delete unexpected path: $full"
+  }
+  Stash-UserData -FromDir $full
+  Remove-Item -LiteralPath $full -Recurse -Force
+}
 
 # Detect a running backend before any destructive operation (#31):
 # data	okenmonitor-<port>.lock carries the backend PID. A corrupted or
@@ -158,32 +189,41 @@ try {
     Rename-Item -LiteralPath $installDir -NewName 'TokenMonitor.old'
     $backup = Join-Path $InstallRoot 'TokenMonitor.old'
     $backupActive = $true
+    $newActive = $false
     try {
       Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-      if ($dataAside) { Move-DataBack }
+      $newActive = $true
+      # #100(b): data stays in the preserved folder until the new install has
+      # verified. Moving it back before verification put it inside the very
+      # directory the rollback then deleted with Remove-Item -Recurse.
       $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
       if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }
-      Remove-Item -LiteralPath $backup -Recurse -Force
-      $backupActive = $false
-      Info "upgrade verified: $newVersion at $installDir (old version removed)"
-      Log "upgrade $candVersion verified; old copy removed"
+      Move-DataBack
+      Info "upgrade verified: $newVersion at $installDir"
+      Log "upgrade $candVersion verified"
     } catch {
-      if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
+      if ($newActive) { Remove-InstallTree -Path $installDir }
       if ($backupActive -and (Test-Path -LiteralPath $backup)) {
         Rename-Item -LiteralPath $backup -NewName 'TokenMonitor'
-        Move-DataBack
+        $backupActive = $false
         Info 'post-verification failed; rolled back to the previous install'
         Log 'upgrade failed; rolled back'
-      } elseif ($dataAside) {
-        Move-DataBack
       }
+      if ($dataAside) { Move-DataBack }
       throw
+    }
+    # A verified upgrade is never voided by the rollback copy's cleanup: by now
+    # the new install works and the data is back in place, so a locked .old tree
+    # (a still-running launcher holds its exe) is reported, not fatal.
+    if (Test-Path -LiteralPath $backup) {
+      try { Remove-Item -LiteralPath $backup -Recurse -Force; $backupActive = $false }
+      catch { Info "warning: rollback copy left at $backup (verified upgrade kept); it holds no user data and can be deleted later" }
     }
   } else {
     Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
     $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
     if ($LASTEXITCODE -ne 0) {
-      Remove-Item -LiteralPath $installDir -Recurse -Force
+      Remove-InstallTree -Path $installDir
       Fail 'post-install verification failed; broken first install removed'
     }
     Info "installed version: $newVersion at $installDir"
@@ -216,7 +256,7 @@ try {
   exit 0
 } catch {
   if (Test-Path -LiteralPath $staging) {
-    try { Remove-Item -LiteralPath $staging -Recurse -Force } catch {}
+    try { Remove-InstallTree -Path $staging } catch {}
   }
   [Console]::Error.WriteLine(("[install] ERROR " + $_.Exception.Message))
   exit 1
