@@ -1,6 +1,6 @@
 import { useCurrency } from '../lib/currency';
 import {
-  buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
+  withBaseMessages, buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
   parseToolContentBlocks, parseUserInputAnswers, processExitCode, processSignal, splitWebSearchResults, summarizeOutput,
   type ConversationBlock, type DisplayTokenUsageItem, type NestedActivity, type ReplayItem, type TimelineEntry, type TokenUsageItem, type ToolActivity, type UserInputQuestion, type WebSearchResult,
 } from "@/lib/session-conversation";
@@ -1181,12 +1181,12 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
 
     void fetchSessionDetail(activePath, query)
-      .then((data) => {
-        if (!cancelled) {
-          setDetail(data);
-          setExpandedTurns(new Set(data.turns.map((turn, index) => `${turn.turnId}-${index}`)));
-          setActiveTurnKey(data.turns.length > 0 ? `${data.turns[0].turnId}-0` : null);
-        }
+      .then((response) => {
+        if (cancelled) return;
+        const data = withBaseMessages(response);
+        setDetail(data);
+        setExpandedTurns(new Set(data.turns.map((turn, index) => `${turn.turnId}-${index}`)));
+        setActiveTurnKey(data.turns.length > 0 ? `${data.turns[0].turnId}-0` : null);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));

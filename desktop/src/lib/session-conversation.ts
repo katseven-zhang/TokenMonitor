@@ -1,5 +1,24 @@
 import type { SessionReplayDetail } from "./api";
 
+// The backend keeps base instructions once per session and each turn records how
+// many of them applied. Expanding here costs a list of pointers per turn instead
+// of a copy of the whole prompt, which is what used to bloat both the Rust struct
+// and every replay response.
+export function withBaseMessages<T extends SessionReplayDetail>(detail: T): T {
+  return {
+    ...detail,
+    turns: detail.turns.map((turn) => turn.baseMessageCount === 0
+      ? turn
+      : {
+        ...turn,
+        systemMessages: [
+          ...detail.baseMessages.slice(0, turn.baseMessageCount),
+          ...turn.systemMessages,
+        ],
+      }),
+  };
+}
+
 const EXEC_TOOL_NAMES = new Set(["exec", "exec_command"]);
 
 export type ReplayItem = SessionReplayDetail["turns"][number]["items"][number];

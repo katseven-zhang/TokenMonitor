@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, type ReplayItem } from "./session-conversation";
+import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, withBaseMessages, type ReplayItem } from "./session-conversation";
 import type { SessionReplayDetail } from "./api";
 
+function detailWith(turns: SessionReplayDetail["turns"], baseMessages: SessionReplayDetail["baseMessages"]): SessionReplayDetail {
+  return {
+    path: "/tmp/session.jsonl", sessionId: "session", threadName: null, modifiedAtMs: 0, sizeBytes: 1,
+    rawLineCount: 1, baseMessages, turns,
+  } as unknown as SessionReplayDetail;
+}
+
 function replayTurn(items: ReplayItem[]): SessionReplayDetail["turns"][number] {
-  return { turnId: "1", startedAt: null, completedAt: null, durationMs: null, systemMessages: [], userMessages: [], assistantMessages: [], reasoningSummaries: [], toolCalls: [], patchResults: [], tokenEvents: [], errors: [], items };
+  return { turnId: "1", startedAt: null, completedAt: null, durationMs: null, baseMessageCount: 0, systemMessages: [], userMessages: [], assistantMessages: [], reasoningSummaries: [], toolCalls: [], patchResults: [], tokenEvents: [], errors: [], items };
 }
 function command(cmd: string, overrides: Partial<Extract<ReplayItem, { kind: "toolCall" }>> = {}): ReplayItem {
   return { kind: "toolCall", callId: cmd, name: "exec_command", arguments: JSON.stringify({ cmd }), output: JSON.stringify({ exit_code: 0, output: "result" }), stderr: null, startedAt: null, completedAt: "2026-09-09", durationMs: 100, status: "completed", isError: false, ...overrides };
@@ -176,6 +183,25 @@ describe("conversation projection", () => {
       "system:Use the repository instructions.",
       "system:Second rule.",
     ]);
+  });
+
+  it("expands the session-level base instructions into each turn's own range", () => {
+    const base = [
+      { timestamp: null, kind: "base_instructions", text: "Rule A." },
+      { timestamp: null, kind: "base_instructions", text: "Rule B." },
+    ];
+    const detail = detailWith([
+      { ...replayTurn([]), baseMessageCount: 1, systemMessages: [{ timestamp: null, kind: "message", text: "Live note." }] },
+      { ...replayTurn([]), baseMessageCount: 2, systemMessages: [] },
+      { ...replayTurn([]), baseMessageCount: 0, systemMessages: [] },
+    ], base);
+
+    const expanded = withBaseMessages(detail);
+    expect(expanded.turns[0].systemMessages.map((message) => message.text)).toEqual(["Rule A.", "Live note."]);
+    expect(expanded.turns[1].systemMessages.map((message) => message.text)).toEqual(["Rule A.", "Rule B."]);
+    expect(expanded.turns[2].systemMessages).toEqual([]);
+    // The prompt text is referenced, not re-copied per turn.
+    expect(expanded.turns[1].systemMessages[0]).toBe(base[0]);
   });
 
   it("recognizes literal RTK read, search and list commands", () => {

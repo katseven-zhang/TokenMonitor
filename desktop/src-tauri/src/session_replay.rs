@@ -206,6 +206,7 @@ fn parse_session_detail_with_agents(
         modified_at_ms: record.modified_at_ms,
         size_bytes: record.size_bytes,
         raw_line_count: raw_jsonl.lines().count(),
+        base_messages: state.system_messages.clone(),
         agents,
         summary,
         turns,
@@ -494,8 +495,14 @@ impl ReplayParseState {
             _ if is_system_message(event_type, event) => {
                 if let Some(text) = extract_message_text(event) {
                     let role = string_field(event, "role").unwrap_or_else(|| "system".to_string());
+                    // A live message that repeats a base instruction is already
+                    // visible through the turn's base range, so it must not appear a
+                    // second time.
+                    let repeats_base = self.system_messages.iter().any(|message| message.text == text);
                     let turn = self.turn_mut(&turn_id);
-                    if push_unique_message(
+                    if repeats_base {
+                        append_message_raw_jsonl_line(turn, &role, &text, line_number);
+                    } else if push_unique_message(
                         &mut turn.system_messages,
                         SessionReplayMessage {
                             timestamp: timestamp.clone(),
@@ -1025,12 +1032,11 @@ impl ReplayParseState {
         if !self.turns.contains_key(turn_id) {
             self.turn_order.push(turn_id.to_string());
             let mut turn = empty_turn(turn_id);
-            // One snapshot per turn. Base instructions used to be copied twice —
-            // once as messages and again as timeline items — which for a 500-turn
-            // session meant tens of megabytes of duplicated prompt text in the
-            // struct *and* in every replay response; the reader composes them from
-            // `system_messages`.
-            turn.system_messages = self.system_messages.clone();
+            // Only the count is recorded: the prompt text lives once per session in
+            // `base_messages`. Cloning it into every turn — and previously mirroring
+            // it into timeline items too — cost tens of megabytes on long sessions
+            // and inflated every replay response by the same amount.
+            turn.base_message_count = self.system_messages.len();
             self.turns.insert(turn_id.to_string(), turn);
         }
         self.turns.get_mut(turn_id).expect("turn exists")
@@ -1060,6 +1066,7 @@ fn empty_turn(turn_id: &str) -> SessionReplayTurn {
         completed_at: None,
         duration_ms: None,
         system_messages: Vec::new(),
+        base_message_count: 0,
         user_messages: Vec::new(),
         assistant_messages: Vec::new(),
         reasoning_summaries: Vec::new(),
@@ -2207,10 +2214,14 @@ mod tests {
 
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(
-            detail.turns[0].system_messages[0].text,
+            detail.base_messages[0].text,
             "Use the repository instructions."
         );
-        assert_eq!(detail.turns[1].system_messages[0].kind, "base_instructions");
+        // Each turn points at the session-level prompt instead of owning a copy.
+        assert_eq!(detail.turns[0].base_message_count, 1);
+        assert_eq!(detail.turns[1].base_message_count, 1);
+        assert!(detail.turns[0].system_messages.is_empty());
+        assert!(detail.turns[1].system_messages.is_empty());
         // Each turn keeps one snapshot; the timeline no longer carries a second
         // copy of the same prompt text, which the reader composes from
         // `system_messages` instead.
@@ -2226,11 +2237,14 @@ mod tests {
                 .count(),
             0
         );
-        assert!(detail.turns.iter().all(|turn| turn.system_messages.len() == 1));
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.base_message_count == 1));
     }
 
     #[test]
-    fn base_instructions_are_carried_once_per_turn_not_twice() {
+    fn base_instructions_are_stored_once_per_session_not_per_turn() {
         let base = "r".repeat(8 * 1024);
         let mut lines = vec![session_meta_with_base_instructions(
             "2026-06-01T00:00:00.000Z",
@@ -2251,10 +2265,15 @@ mod tests {
 
         assert_eq!(detail.turns.len(), 200);
         assert!(detail.turns.iter().all(|turn| turn.items.is_empty()));
-        // One snapshot per turn costs ~1.68 MB; the removed item mirror doubled the
-        // response on top of that.
+        assert_eq!(detail.base_messages.len(), 1);
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.base_message_count == 1));
+        // The 8 KB prompt appears exactly once. Carrying it per turn cost ~1.68 MB
+        // in the struct and in the response, and mirroring it as items doubled that.
         assert!(
-            bytes < 2_000_000,
+            bytes < 200_000,
             "replay response carried {bytes} bytes for 200 turns"
         );
     }
@@ -2411,6 +2430,8 @@ mod tests {
         let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
         let turn = &detail.turns[0];
 
+        // A live developer message stays on its own turn; only the session-level
+        // base instructions are shared.
         assert_eq!(turn.system_messages[0].text, "Follow AGENTS.md");
         assert_eq!(turn.reasoning_summaries[0].text, "I should inspect first.");
         assert_eq!(turn.tool_calls[0].name, "exec_command");

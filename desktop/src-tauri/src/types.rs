@@ -557,6 +557,10 @@ pub struct SessionReplayTurn {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub duration_ms: Option<i64>,
+    /// How many entries of `SessionReplayDetail::base_messages` were already known
+    /// when this turn started. The prompt text is stored once per session instead of
+    /// being cloned into every turn; readers expand it back per turn.
+    pub base_message_count: usize,
     pub system_messages: Vec<SessionReplayMessage>,
     pub user_messages: Vec<SessionReplayMessage>,
     pub assistant_messages: Vec<SessionReplayMessage>,
@@ -597,6 +601,9 @@ pub struct SessionReplayDetail {
     /// Total JSONL lines in the source file. The transcript itself is deliberately
     /// not part of this response — see `fetch_session_raw_page`, which pages it.
     pub raw_line_count: usize,
+    /// Session-level base instructions, stored once. Each turn records how many of
+    /// these were already known when it started.
+    pub base_messages: Vec<SessionReplayMessage>,
     pub agents: Vec<SessionReplayAgent>,
     pub summary: SessionReplaySummary,
     pub turns: Vec<SessionReplayTurn>,

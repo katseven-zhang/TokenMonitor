@@ -299,6 +299,8 @@ export type SessionReplayDetail = {
   modifiedAtMs: number;
   sizeBytes: number;
   rawLineCount: number;
+  /** Base instructions, stored once per session instead of once per turn. */
+  baseMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
   agents: Array<{
     path: string;
     sessionId: string;
@@ -342,6 +344,8 @@ export type SessionReplayDetail = {
     startedAt: string | null;
     completedAt: string | null;
     durationMs: number | null;
+    /** How many entries of the session's `baseMessages` applied when this turn started. */
+    baseMessageCount: number;
     systemMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
     userMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
     assistantMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
