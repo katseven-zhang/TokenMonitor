@@ -907,3 +907,134 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests_dashboard_quota_dedupe {
+    use super::*;
+    use crate::model::{Parsed, Quota};
+
+    /// #112：面板的「最新配额」列表必须与 quota_history 一样先按内容去重。
+    /// 夹具：同一次观测（agent+session+ts+payload 全同）在 100 个归档副本路径上
+    /// 各有一行，另有一个更早的**不同 agent** 观测。修前 `LIMIT 100` 作用在去重
+    /// 之前 —— 100 个副本把名额占满，另一个 agent 的最新配额被挤出结果集；
+    /// 现在 DISTINCT 先行的语义下，结果应当恰好是 2 条、两个 agent 都在。
+    #[test]
+    fn archive_copies_do_not_squeeze_other_agents_out_of_the_quota_board() {
+        let root = std::env::temp_dir().join(format!("tm-quotadedup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let prices = Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        let mut writer = db::open(&root).unwrap();
+        let same = serde_json::json!({"usedPercent": 42});
+        for i in 0..100 {
+            db::replace_file(
+                &mut writer,
+                &format!("archive/p{i}.jsonl"),
+                "codex",
+                1,
+                1,
+                &Parsed {
+                    quotas: vec![Quota {
+                        agent: "codex".into(),
+                        session: "s".into(),
+                        ts: 150_000,
+                        payload: same.clone(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        db::replace_file(
+            &mut writer,
+            "archive/other.jsonl",
+            "claude-code",
+            1,
+            1,
+            &Parsed {
+                quotas: vec![Quota {
+                    agent: "claude-code".into(),
+                    session: "s2".into(),
+                    ts: 140_000,
+                    payload: serde_json::json!({"usedPercent": 7}),
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let reader = db::open(&root).unwrap();
+        let q = Query {
+            start: 0,
+            end: 200_000,
+            agent: None,
+            model: None,
+            project: None,
+            session: None,
+            search: String::new(),
+            time_zone: None,
+            offset_minutes: 0,
+        };
+        let board = dashboard(&reader, &q, &prices).unwrap();
+        let quotas = board["quotas"].as_array().expect("quotas 必须是数组");
+        assert_eq!(
+            quotas.len(),
+            2,
+            "100 个同观测副本只能算一条观测（修前 LIMIT 100 全被副本占满）"
+        );
+        let agents: Vec<&str> = quotas.iter().map(|r| r["agent"].as_str().unwrap()).collect();
+        assert!(
+            agents.contains(&"claude-code"),
+            "更早的另一 agent 观测不得被副本挤出结果集：{agents:?}"
+        );
+        assert_eq!(quotas[0]["agent"], "codex", "最新的那条排在最前");
+        assert_eq!(quotas[0]["payload"]["usedPercent"], 42);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 去重不能把**不同**观测并成一条：同一 session 同一 ts 但载荷不同（配额真的
+    /// 变了）必须两条都在。修前不会误并（没有 DISTINCT），所以这条是防"改过头"的守卫。
+    #[test]
+    fn distinct_payloads_of_the_same_instant_are_not_merged() {
+        let root = std::env::temp_dir().join(format!("tm-quotadedup2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let prices = Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        let mut writer = db::open(&root).unwrap();
+        for (i, used) in [10, 11].iter().enumerate() {
+            db::replace_file(
+                &mut writer,
+                &format!("a{i}.jsonl"),
+                "codex",
+                1,
+                1,
+                &Parsed {
+                    quotas: vec![Quota {
+                        agent: "codex".into(),
+                        session: "s".into(),
+                        ts: 150_000,
+                        payload: serde_json::json!({"usedPercent": used}),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let reader = db::open(&root).unwrap();
+        let q = Query {
+            start: 0,
+            end: 200_000,
+            agent: None,
+            model: None,
+            project: None,
+            session: None,
+            search: String::new(),
+            time_zone: None,
+            offset_minutes: 0,
+        };
+        let quotas = dashboard(&reader, &q, &prices).unwrap()["quotas"]
+            .as_array()
+            .cloned()
+            .unwrap();
+        assert_eq!(quotas.len(), 2, "载荷不同就是两次观测，不得被 DISTINCT 吞掉");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
