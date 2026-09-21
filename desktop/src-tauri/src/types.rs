@@ -9,8 +9,6 @@ pub struct ModelUsage {
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
     pub total_tokens: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_fallback: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

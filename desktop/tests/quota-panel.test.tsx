@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { QuotaPanel } from '../src/components/quota-panel';
-import type { Dashboard } from '../src/lib/api';
+import type { QuotaPanelData } from '../src/components/quota-panel';
 
 const reset = Date.parse('2026-09-20T12:00:00Z');
 const observation = {
@@ -10,7 +10,7 @@ const observation = {
 };
 // The panel reads only these two dashboard fields; the query's other projections
 // are deliberately absent so this test cannot accidentally depend on usage totals.
-const data = { quotas: [observation], quotaHistory: { total: 1, items: [observation] } } as Dashboard;
+const data: QuotaPanelData = { quotas: [observation], quotaHistory: { total: 1, items: [observation] } };
 
 afterEach(() => vi.restoreAllMocks());
 

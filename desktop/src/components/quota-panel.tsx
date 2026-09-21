@@ -3,7 +3,8 @@ import type { Dashboard } from '../lib/api';
 import { quotaWindows } from '../lib/quota-observations';
 
 const time = (value:number) => new Date(value).toLocaleString('zh-CN',{hour12:false});
-export function QuotaPanel({data}:{data:Dashboard}) {
+export type QuotaPanelData=Pick<Dashboard,'quotas'|'quotaHistory'>;
+export function QuotaPanel({data}:{data:QuotaPanelData}) {
   const latest = data.quotas.find(row=>row.agent==='codex');
   const [now,setNow] = useState(Date.now());
   const [windowFilter,setWindowFilter] = useState('all');

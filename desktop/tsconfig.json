@@ -14,6 +14,9 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
+    // `noUncheckedIndexedAccess` is deliberately off: `tsc --noEmit --noUncheckedIndexedAccess`
+    // reports 81 errors across 9 files (40 in test fixtures, 33 in application code
+    // concentrated in the replay panel), so it is its own change and not a config cleanup.
     "jsx": "react-jsx",
     "types": ["node", "vitest/globals"],
     "baseUrl": ".",
@@ -21,5 +24,5 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src", "src-tauri", "vite.config.ts", "tailwind.config.ts", "vitest.config.ts"]
+  "include": ["src", "tests", "vite.config.ts", "tailwind.config.ts"]
 }
