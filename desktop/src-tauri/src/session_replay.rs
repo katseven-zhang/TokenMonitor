@@ -1,12 +1,12 @@
 use crate::{
     db::{
-        query_session_hierarchy_records, query_session_rollup_record, SessionHierarchyRecord,
-        SessionRollupRecord,
+        load_prices, query_session_cost_usd, query_session_hierarchy_records,
+        query_session_rollup_record, SessionHierarchyRecord, SessionRollupRecord,
     },
     types::{
         DailyUsageRow, ModelUsage, SessionReplayAgent, SessionReplayDetail, SessionReplayItem,
-        SessionReplayMessage, SessionReplayPatchResult, SessionReplaySummary,
-        SessionReplayTokenEvent, SessionReplayToolCall, SessionReplayTurn,
+        SessionReplayMessage, SessionReplayPatchResult, SessionReplayRawPage,
+        SessionReplaySummary, SessionReplayTokenEvent, SessionReplayToolCall, SessionReplayTurn,
     },
 };
 use chrono::{DateTime, Utc};
@@ -15,9 +15,15 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
+
+use crate::pricing::Prices;
+
+/// A Codex rollout writes `session_meta` at its head, so the hierarchy scan never
+/// needs the whole file.
+const SESSION_META_HEAD_BYTES: u64 = 256 * 1024;
 
 const LEGACY_FALLBACK_MODEL: &str = "unknown";
 const UNGROUPED_TURN_ID: &str = "Ungrouped";
@@ -58,14 +64,72 @@ struct ReplayParseState {
 }
 
 pub fn fetch_session_detail(db: &Connection, path: &str) -> Result<SessionReplayDetail, String> {
-    let record = query_session_rollup_record(db, path)?.ok_or_else(|| {
+    // One price table per open replay. Previously every session file in the
+    // hierarchy re-read and re-parsed prices.json.
+    let prices = load_prices(db);
+    let record = query_session_rollup_record(db, path, prices.as_ref())?.ok_or_else(|| {
         // Stable code first so the UI can translate it; the Chinese text keeps the
         // message readable everywhere else it is shown raw.
         "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
     })?;
     let raw_jsonl = fs::read_to_string(&record.path).map_err(|error| error.to_string())?;
-    let agents = build_agent_hierarchy(db, path)?;
+    let agents = build_agent_hierarchy(db, path, prices.as_ref())?;
     Ok(parse_session_detail_with_agents(record, raw_jsonl, agents))
+}
+
+/// Largest raw page the backend will serve at once, so a viewer cannot ask for a
+/// whole multi-gigabyte transcript in one response.
+const RAW_PAGE_MAX_LINES: usize = 2_000;
+
+/// Paged raw JSONL. The default replay response no longer carries the transcript
+/// (a 100 MB session was duplicated into the IPC payload and then into the DOM);
+/// the viewer asks for slices and the backend refuses to serve a file that changed
+/// since the replay was opened.
+pub fn fetch_session_raw_page(
+    db: &Connection,
+    path: &str,
+    start: usize,
+    limit: usize,
+    expected_size_bytes: i64,
+) -> Result<SessionReplayRawPage, String> {
+    let limit = limit.clamp(1, RAW_PAGE_MAX_LINES);
+    let (indexed_mtime, indexed_size) = db
+        .query_row(
+            "SELECT mtime,size FROM source_files WHERE path=?1 AND agent='codex'",
+            [path],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| {
+            "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
+        })?;
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let size_bytes = metadata.len() as i64;
+    // Size, not mtime, is the guard: filesystem timestamp granularity and the
+    // scanner's own recorded value disagree often enough to produce false
+    // "changed" errors, while a transcript that grew, shrank or rotated always
+    // moves its size.
+    let stale = size_bytes != indexed_size
+        || (expected_size_bytes >= 0 && size_bytes != expected_size_bytes);
+    if stale {
+        return Err("E_SESSION_CHANGED: 会话文件自打开回放后已变化，请重新打开回放".to_string());
+    }
+
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut lines = Vec::with_capacity(limit);
+    let mut total_lines = 0usize;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        if index >= start && lines.len() < limit {
+            lines.push(line.map_err(|error| error.to_string())?);
+        }
+        total_lines = index + 1;
+    }
+    Ok(SessionReplayRawPage {
+        lines,
+        start,
+        total_lines,
+        modified_at_ms: indexed_mtime,
+        size_bytes: indexed_size,
+    })
 }
 
 #[cfg(test)]
@@ -140,7 +204,7 @@ fn parse_session_detail_with_agents(
         thread_name: record.prompt_title.filter(|title| !title.is_empty()),
         modified_at_ms: record.modified_at_ms,
         size_bytes: record.size_bytes,
-        raw_jsonl,
+        raw_line_count: raw_jsonl.lines().count(),
         agents,
         summary,
         turns,
@@ -150,6 +214,7 @@ fn parse_session_detail_with_agents(
 fn build_agent_hierarchy(
     db: &Connection,
     selected_path: &str,
+    prices: Option<&Prices>,
 ) -> Result<Vec<SessionReplayAgent>, String> {
     let mut agents = load_session_agents(db)?;
     let Some(selected) = agents.iter().find(|agent| agent.path == selected_path) else {
@@ -221,6 +286,10 @@ fn build_agent_hierarchy(
     for agent in &agents {
         visit_agent(&agent.session_id, &agents, &mut ordered_ids, &mut ordered);
     }
+    // Pricing is bounded by the family actually shown, not by every session stored.
+    for agent in &mut ordered {
+        agent.cost_usd = query_session_cost_usd(db, &agent.path, prices);
+    }
     Ok(ordered)
 }
 
@@ -233,7 +302,10 @@ pub fn load_session_agents(db: &Connection) -> Result<Vec<SessionReplayAgent>, S
 
 fn read_session_agent(record: SessionHierarchyRecord) -> Option<SessionReplayAgent> {
     let file = File::open(&record.path).ok()?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in BufReader::new(file.take(SESSION_META_HEAD_BYTES))
+        .lines()
+        .map_while(Result::ok)
+    {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1926,7 +1998,7 @@ mod tests {
             .unwrap()
             .contains(r#"\"exit_code\":1"#));
         assert!(!tool.is_error);
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, raw.lines().count());
     }
 
     #[test]
@@ -2051,7 +2123,7 @@ mod tests {
 
         let detail = parse_session_detail(record("/tmp/session.jsonl"), raw.clone());
 
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, raw.lines().count());
         assert_eq!(detail.summary.turn_count, 2);
         assert_eq!(detail.summary.message_count, 3);
         assert_eq!(detail.turns[0].turn_id, "turn-1");
@@ -2879,7 +2951,146 @@ mod tests {
 
         let detail = fetch_session_detail(&db, &session_path.to_string_lossy()).unwrap();
         assert_eq!(detail.path, session_path.to_string_lossy());
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, 1);
+        // The transcript no longer rides along with the replay response, so a large
+        // session cannot double its own memory through IPC.
+        assert!(serde_json::to_value(&detail)
+            .unwrap()
+            .get("rawJsonl")
+            .is_none());
+
+        let page = fetch_session_raw_page(
+            &db,
+            &session_path.to_string_lossy(),
+            0,
+            500,
+            detail.size_bytes,
+        )
+        .unwrap();
+        assert_eq!(page.lines.len(), 1);
+        assert_eq!(page.lines[0], raw);
+        assert_eq!(page.total_lines, 1);
+
+        // A file that changed after the replay was opened is refused rather than
+        // served with line numbers that no longer match what the reader sees.
+        fs::write(&session_path, format!("{raw}\nappended\n")).unwrap();
+        let error = fetch_session_raw_page(
+            &db,
+            &session_path.to_string_lossy(),
+            0,
+            500,
+            detail.size_bytes,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("E_SESSION_CHANGED"));
+    }
+
+    #[test]
+    fn a_fifty_megabyte_session_replays_without_shipping_its_transcript() {
+        let temp_dir = tempfile_dir();
+        let mut db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
+        let path = temp_dir.join("huge.jsonl");
+        // 50 MB of transcript that renders almost nothing: the point under test is
+        // that the raw file no longer rides along in the replay response.
+        let filler = "x".repeat(1024);
+        let line = serde_json::json!({
+            "timestamp": "2026-06-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": { "type": "raw_model_chunk", "data": filler },
+        })
+        .to_string();
+        let target_bytes = 50 * 1024 * 1024usize;
+        let mut written = String::new();
+        let mut line_count = 0usize;
+        while written.len() < target_bytes {
+            written.push_str(&line);
+            written.push('\n');
+            line_count += 1;
+        }
+        let size_bytes = written.len() as i64;
+        fs::write(&path, written).unwrap();
+        upsert_session_file_rollups(
+            &mut db,
+            &[SessionFileRollup {
+                path: path.to_string_lossy().to_string(),
+                modified_at_ms: 1,
+                size_bytes,
+                rows: vec![],
+                prompt_title: Some("Huge session".to_string()),
+                quota_usage: None,
+            }],
+            "2026-06-01T00:00:00.000Z",
+        )
+        .unwrap();
+
+        let detail = fetch_session_detail(&db, &path.to_string_lossy()).unwrap();
+        let response_bytes = serde_json::to_vec(&detail).unwrap().len();
+        assert!(line_count > 40_000);
+        assert_eq!(detail.raw_line_count, line_count);
+        assert!(
+            response_bytes < 1024 * 1024,
+            "replay response carried {response_bytes} bytes for a {size_bytes}-byte session"
+        );
+
+        let page = fetch_session_raw_page(&db, &path.to_string_lossy(), 0, 2_000, size_bytes).unwrap();
+        assert_eq!(page.lines.len(), 2_000);
+        assert_eq!(page.total_lines, line_count);
+        assert!(serde_json::to_vec(&page).unwrap().len() < 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn opening_one_replay_prices_and_deserializes_only_that_session() {
+        let temp_dir = tempfile_dir();
+        let mut db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
+        let records = (0..200usize)
+            .map(|index| {
+                let path = temp_dir.join(format!("session-{index}.jsonl"));
+                fs::write(
+                    &path,
+                    format!(
+                        "{}\n",
+                        turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app")
+                    ),
+                )
+                .unwrap();
+                SessionFileRollup {
+                    path: path.to_string_lossy().to_string(),
+                    modified_at_ms: 123 + index as i64,
+                    size_bytes: 64,
+                    rows: (0..3)
+                        .map(|day| DailyUsageRow {
+                            date: format!("2026-06-0{}", day + 1),
+                            input_tokens: 100,
+                            cached_input_tokens: 10,
+                            output_tokens: 20,
+                            reasoning_output_tokens: 5,
+                            total_tokens: 135,
+                            cost_usd: 0.5,
+                            models: BTreeMap::new(),
+                            projects: BTreeMap::new(),
+                            updated_at: String::new(),
+                        })
+                        .collect(),
+                    prompt_title: Some(format!("Session {index}")),
+                    quota_usage: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        upsert_session_file_rollups(&mut db, &records, "2026-06-01T00:00:00.000Z").unwrap();
+
+        let selected = records[7].path.clone();
+        let prices_before = crate::db::prices_parse_count();
+        let parses_before = crate::db::event_deserialize_count();
+        let detail = fetch_session_detail(&db, &selected).unwrap();
+        let prices_parsed = crate::db::prices_parse_count() - prices_before;
+        let events_parsed = crate::db::event_deserialize_count() - parses_before;
+
+        // 200 sessions sit in the cache and only one is opened: the price table is
+        // parsed once instead of per file, and no unrelated event is deserialized.
+        assert_eq!(prices_parsed, 1);
+        assert_eq!(events_parsed, 3);
+        assert!(detail.summary.total_tokens > 0);
+        assert_eq!(detail.agents.len(), 0);
     }
 
     #[test]

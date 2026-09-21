@@ -8,7 +8,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { AlertTriangle, Bot, Check, ChevronDown, ChevronRight, Clipboard, Clock3, Coins, Database, FileDiff, FileJson, FolderOpen, GitBranch, Info, List, Loader2, MessageSquare, Terminal, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { fetchSessionDetail, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
+import { fetchSessionDetail, fetchSessionRawPage, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
 import { formatNumber, formatPercent } from "@/lib/formatters";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
 import { SessionQuotaUsageView } from "./session-quota-usage";
@@ -25,6 +25,10 @@ const LONG_TEXT_THRESHOLD = 2000;
 const TEXT_PREVIEW_LENGTH = 1200;
 const RAW_PREVIEW_LINES = 12;
 const RAW_PREVIEW_LINE_LENGTH = 240;
+// The transcript is paged in after the replay opens and capped, so a 100 MB
+// session can no longer be copied whole into the IPC payload and then the DOM.
+const RAW_PAGE_LINES = 2_000;
+const RAW_RENDER_CAP_LINES = 20_000;
 const COLLAPSED_PREVIEW_LINE_LENGTH = 240;
 const COLLAPSED_AGENT_LIMIT = 3;
 const DISCLOSURE_BUTTON_CLASS = "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -1132,6 +1136,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const [copiedProjectPath, setCopiedProjectPath] = useState<string | null>(null);
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
   const [showFullRaw, setShowFullRaw] = useState(false);
+  const [rawJsonlLines, setRawJsonlLines] = useState<string[]>([]);
   const [showDetails, setShowDetails] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState(0);
@@ -1167,6 +1172,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     setCopiedProjectPath(null);
     setExpandedTurns(new Set());
     setShowFullRaw(false);
+    setRawJsonlLines([]);
     setShowDetails(false);
     setIsScrolled(false);
     setCollapsedHeight(0);
@@ -1244,8 +1250,28 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   });
   const threadName = detail ? detail.threadName : t("sessions.detail.loading_replay");
   const displayedSessionId = cleanSessionId(detail?.sessionId ?? session.sessionId);
-  const rawPreview = detail ? buildRawPreview(detail.rawJsonl) : "";
-  const rawJsonlLines = useMemo(() => detail?.rawJsonl.split("\n") ?? [], [detail?.rawJsonl]);
+  useEffect(() => {
+    if (!detail) return;
+    let cancelled = false;
+    void (async () => {
+      const collected: string[] = [];
+      const target = Math.min(detail.rawLineCount, RAW_RENDER_CAP_LINES);
+      while (collected.length < target) {
+        const page = await fetchSessionRawPage(detail.path, collected.length, RAW_PAGE_LINES, detail.sizeBytes);
+        if (cancelled) return;
+        if (page.lines.length === 0) break;
+        collected.push(...page.lines.slice(0, target - collected.length));
+        setRawJsonlLines([...collected]);
+      }
+    })().catch(() => {
+      if (!cancelled) setRawJsonlLines([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [detail]);
+  const rawPreview = buildRawPreview(rawJsonlLines.join("\n"));
+  const rawIsTruncated = detail ? detail.rawLineCount > rawJsonlLines.length : false;
   const conversation = useMemo(() => detail ? buildSessionConversation(detail.turns) : [], [detail]);
   const patchCounts = useMemo(() => detail?.turns.map(countTurnPatches) ?? [], [detail]);
 
@@ -1257,7 +1283,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
 
   async function copyRawJsonl() {
     if (!detail) return;
-    await navigator.clipboard?.writeText(detail.rawJsonl);
+    await navigator.clipboard?.writeText(rawJsonlLines.join("\n"));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
@@ -1552,12 +1578,20 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                   <div className="text-xs text-muted-foreground">
                     {t("sessions.detail.raw_metadata", {
                       size: formatBytes(detail.sizeBytes),
-                      lines: formatNumber(detail.rawJsonl ? detail.rawJsonl.split("\n").length : 0),
+                      lines: formatNumber(detail.rawLineCount),
                     })}
+                    {rawIsTruncated ? (
+                      <span className="ml-2">
+                        {t("sessions.detail.raw_truncated", {
+                          loaded: formatNumber(rawJsonlLines.length),
+                          total: formatNumber(detail.rawLineCount),
+                        })}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {!showFullRaw && detail.rawJsonl !== rawPreview ? (
+                  {!showFullRaw && rawJsonlLines.length > RAW_PREVIEW_LINES ? (
                     <Button type="button" variant="secondary" size="sm" onClick={() => setShowFullRaw(true)}>
                       {t("sessions.detail.show_full_raw")}
                     </Button>
@@ -1573,7 +1607,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                 </div>
               </div>
               <pre className="min-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-surface p-4 font-mono text-xs leading-relaxed text-foreground">
-                {showFullRaw ? detail.rawJsonl : rawPreview}
+                {showFullRaw ? rawJsonlLines.join("\n") : rawPreview}
               </pre>
             </div>
           )}

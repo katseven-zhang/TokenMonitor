@@ -590,10 +590,22 @@ pub struct SessionReplayDetail {
     pub thread_name: Option<String>,
     pub modified_at_ms: i64,
     pub size_bytes: i64,
-    pub raw_jsonl: String,
+    /// Total JSONL lines in the source file. The transcript itself is deliberately
+    /// not part of this response — see `fetch_session_raw_page`, which pages it.
+    pub raw_line_count: usize,
     pub agents: Vec<SessionReplayAgent>,
     pub summary: SessionReplaySummary,
     pub turns: Vec<SessionReplayTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReplayRawPage {
+    pub lines: Vec<String>,
+    pub start: usize,
+    pub total_lines: usize,
+    pub modified_at_ms: i64,
+    pub size_bytes: i64,
 }
 
 #[cfg(test)]

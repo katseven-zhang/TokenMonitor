@@ -282,6 +282,14 @@ export type ProjectReference = {
 };
 
 
+export type SessionReplayRawPage = {
+  lines: string[];
+  start: number;
+  totalLines: number;
+  modifiedAtMs: number;
+  sizeBytes: number;
+};
+
 export type SessionReplayDetail = {
   range?: { start:number; end:number };
   rangeTotals?: { totalTokens:number; costUsd:number|null; unpricedEvents:number; events:number };
@@ -290,7 +298,7 @@ export type SessionReplayDetail = {
   threadName: string | null;
   modifiedAtMs: number;
   sizeBytes: number;
-  rawJsonl: string;
+  rawLineCount: number;
   agents: Array<{
     path: string;
     sessionId: string;

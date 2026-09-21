@@ -49,6 +49,14 @@ pub fn query_local(root: &Path, method: &str, args: &Value) -> Result<Value, Str
             args["limit"].as_u64().unwrap_or(100) as usize,
         ),
         "replay" => replay(&db, root, args),
+        "replay_raw" => crate::session_replay::fetch_session_raw_page(
+            &db,
+            args["path"].as_str().ok_or("缺少会话路径")?,
+            args["start"].as_u64().unwrap_or(0) as usize,
+            args["limit"].as_u64().unwrap_or(500) as usize,
+            args["expectedSizeBytes"].as_i64().unwrap_or(-1),
+        )
+        .and_then(|page| serde_json::to_value(page).map_err(|e| e.to_string())),
         "export" => export(&db, root, args),
         _ => Err(format!("未知只读方法: {method}")),
     }
