@@ -8,7 +8,11 @@ $outputRoot = Join-Path $repositoryRoot 'dist\desktop-windows-x64'
 $archivePath = Join-Path $repositoryRoot 'dist\TokenMonitor-desktop-windows-x64.zip'
 $exePath = Join-Path $desktopRoot 'src-tauri\target\release\TokenMonitor.exe'
 
-$inputs = @('src','src-tauri\src','src-tauri\icons','src-tauri\capabilities','config','src-tauri\tauri.conf.json','src-tauri\Cargo.toml','src-tauri\Cargo.lock','src-tauri\build.rs','package.json','package-lock.json','vite.config.ts','tailwind.config.ts','postcss.config.cjs','index.html')
+# #74：指纹必须覆盖所有会改变产物的输入。`tsconfig.json` 以前不在表里——改它
+# （strict、target、paths 等）会改变 vite/tsc 的产物，但 `-SkipBuild` 的 stamp 校验
+# 认为源码没动，于是把旧 exe 当成新配置的成果打包。test/run.mjs 的 [28] 段守住
+# "表里每个路径真实存在"，改名/漏项不会再静默缩小指纹。
+$inputs = @('src','src-tauri\src','src-tauri\icons','src-tauri\capabilities','config','src-tauri\tauri.conf.json','src-tauri\Cargo.toml','src-tauri\Cargo.lock','src-tauri\build.rs','package.json','package-lock.json','tsconfig.json','vite.config.ts','tailwind.config.ts','postcss.config.cjs','index.html')
 function Get-PackageFingerprint([string[]]$Paths) {
     $fingerprint = [Text.StringBuilder]::new()
     foreach ($inputPath in $Paths) {

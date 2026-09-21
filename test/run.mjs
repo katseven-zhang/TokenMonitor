@@ -2377,6 +2377,98 @@ console.log('\n[27] CI workflow 卫生（#102）：超时 / 最小权限 / SHA �
   }
 }
 
+/* ---------- [28] 构建输入与文档卫生守卫（#74） ---------- */
+console.log('\n[28] 仓库卫生（#74）：文档不含本机路径 / 桌面打包指纹覆盖每个产物输入');
+{
+  /*
+   * #74 的两条缺陷都在这里断言，因为它们都属于"坏了没人会看见"这一类：
+   *  - 打包指纹的输入表漏一项（tsconfig.json），改编译配置就不会让 -SkipBuild 的
+   *    构建戳失效，旧 exe 会被当成新配置的产物打包并发出去；表里的路径被改名后
+   *    PowerShell 的 Get-ChildItem 只会静默少算，不会报错。
+   *  - 文档里的本机绝对路径既泄露隐私，又让读者分不清"通用步骤"和"作者机器的偶然
+   *    事实"；根 .gitignore 的更新曾经长期停在未提交状态，靠人手规避外部下载目录。
+   * 示例路径（教学用的假 D 盘目录）允许存在，但必须逐条登记理由，且登记的东西
+   * 真的还在文件里——允许清单只能变短，不能变成一堆无人核对的历史包袱。
+   */
+  const MACHINE_PATH = /(?:^|[^A-Za-z0-9])[A-Za-z]:[\\/]|\/Users\/|\/home\/[a-z]/;
+  const DOC_PATH_EXAMPLES = [
+    { file: 'docs/WINDOWS.md', needle: 'D:\\我的工具\\Token Monitor', why: '演示"路径含空格与中文也不炸"的占位目录，不是真实机器路径；该文件由 packaging 分支（#89/#101/#68）维护' },
+    { file: 'docs/WINDOWS.md', needle: 'D:\\备份路径\\tokenmonitor-backup', why: '同上：备份目标目录的占位示例' },
+  ];
+
+  /** 仓库文档清单：以 `git ls-files` 为准（本机私有 md 不该判红），git 不可用时退回固定枚举。 */
+  function trackedDocs() {
+    const r = spawnSync('git', ['ls-files', '-z', '*.md'], { cwd: ROOT, encoding: 'utf8' });
+    if (r.status === 0) {
+      return { mode: 'git', files: r.stdout.split('\0').filter(Boolean).sort() };
+    }
+    const flat = (d) => (existsSync(join(ROOT, d)) ? readdirSync(join(ROOT, d)) : []);
+    return {
+      mode: 'fs-fallback',
+      files: ['README.md', 'CONTRIBUTING.md', 'AGENTS.md', 'IMPLEMENTATION_PLAN.md', 'desktop/README.md', 'windows/installer/README.md']
+        .filter((f) => existsSync(join(ROOT, f)))
+        .concat(flat('docs').filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`))
+        .sort(),
+    };
+  }
+
+  const docs = trackedDocs();
+  ok('#74 扫到了仓库文档（守卫不空转）', docs.files.length >= 15, `${docs.files.length} 篇 / ${docs.mode}`);
+  let unregistered = 0;
+  for (const f of docs.files) {
+    const allowed = DOC_PATH_EXAMPLES.filter((e) => e.file === f).map((e) => e.needle);
+    const lines = readFileSync(join(ROOT, f), 'utf8').split(/\r?\n/);
+    lines.forEach((ln, i) => {
+      if (!MACHINE_PATH.test(ln) || allowed.some((a) => ln.includes(a))) return;
+      unregistered++;
+      console.error(`      ${f}:${i + 1}: ${ln.trim().slice(0, 90)}`);
+    });
+  }
+  ok('#74 跟踪的文档里没有未登记的本机路径', unregistered === 0, `${unregistered} 处`);
+  for (const e of DOC_PATH_EXAMPLES) {
+    ok(`#74 示例路径登记未过期：${e.file} 仍含 ${e.needle}`,
+      existsSync(join(ROOT, e.file)) && readFileSync(join(ROOT, e.file), 'utf8').includes(e.needle), e.why);
+  }
+  ok('#74 登记的示例路径确实只登记了"示例"（含真实用户目录的一律不收）',
+    DOC_PATH_EXAMPLES.every((e) => !/[A-Za-z]:[\\/](Users|home)[\\/]|\/Users\/|\/home\//i.test(e.needle)));
+
+  /* ---- 桌面打包指纹的输入表 ---- */
+  const BUILD_PS1 = 'desktop/scripts/build-windows.ps1';
+  const ps1 = readFileSync(join(ROOT, BUILD_PS1), 'utf8');
+  const tableLines = ps1.match(/^\$inputs = @\([^)]*\)/gm) || [];
+  ok('#74 打包指纹输入表存在且只有一处定义', tableLines.length === 1, String(tableLines.length));
+  const inputs = (tableLines[0] || '').replace(/^\$inputs = @\(/, '').replace(/\)$/, '')
+    .split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  ok('#74 输入表解析出了条目（不是空转的正则）', inputs.length >= 10, inputs.join(','));
+  // 每一项都会改变前端/原生产物或它们的依赖闭包；tsconfig.json 是 #74 报出的漏项
+  for (const required of ['src', 'src-tauri\\src', 'src-tauri\\icons', 'src-tauri\\capabilities', 'config',
+    'src-tauri\\tauri.conf.json', 'src-tauri\\Cargo.toml', 'src-tauri\\Cargo.lock', 'src-tauri\\build.rs',
+    'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'tailwind.config.ts',
+    'postcss.config.cjs', 'index.html']) {
+    ok(`#74 打包指纹覆盖产物输入 ${required}`, inputs.includes(required), `表里只有：${inputs.join(',')}`);
+  }
+  // 改名/删除会让 Get-ChildItem 静默少算一项，所以表里每一项都必须真实存在
+  for (const p of inputs) {
+    ok(`#74 打包指纹的 ${p} 指向真实文件/目录`, existsSync(join(ROOT, 'desktop', ...p.split('\\'))), p);
+  }
+  ok('#74 打包前与打包后各比一次指纹（缺一次就守不住"构建期被改"）',
+    (ps1.match(/Get-PackageFingerprint \(\$inputs \+ 'dist'\)/g) || []).length >= 2
+    && (ps1.match(/Get-PackageFingerprint \$inputs/g) || []).length >= 2);
+
+  /* ---- 负例自检：证明这一节的门会红 ---- */
+  {
+    const noTsconfig = ['src', 'package.json', 'vite.config.ts'];
+    ok('#74 自检·输入表漏 tsconfig.json 时判红', !noTsconfig.includes('tsconfig.json'));
+    ok('#74 自检·输入表里的路径被改名时判红', !existsSync(join(ROOT, 'desktop', 'tsconfig.json.bak')));
+    ok('#74 自检·真实机器路径判红（示例路径的占位写法不判红）',
+      MACHINE_PATH.test('& "D:\\some\\real\\path" serve') && !MACHINE_PATH.test('& "<占位>/Token Monitor" serve'));
+    ok('#74 自检·普通文本里的 `Note:` / `http://` 不误判为盘符路径',
+      !MACHINE_PATH.test('Note: see http://127.0.0.1:8787 for details'));
+    ok('#74 自检·文档守卫真的读过文档（读了 0 行就会在这里红）',
+      docs.files.length > 0 && readFileSync(join(ROOT, docs.files[0]), 'utf8').split(/\r?\n/).length > 3);
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

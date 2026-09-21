@@ -22,3 +22,4 @@ dist/
 # 下载的外部源码，不纳入主仓库
 /codex-lb-main/
 /claude-codex-usage-dashboard-main/
+/codex-usage-desktop-main/
