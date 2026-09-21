@@ -200,11 +200,17 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 同一份日志在两个 UI 里必须给出同一组数字。桌面端（`desktop/src-tauri/src/collectors.rs`）
 与 Node 端（`src/collectors/*.js`）是两份独立实现，历史上漂了十处。逐条给结论：
 **要么两边改到同一条规则，要么把差异写在这里**——"没文档的悄悄分叉"本身就是缺陷。
+下面 1-10 是任务里点名的十处，11-13 是同一轮里顺带改到、以及**与本仓库另一条分支
+互相矛盾**的三处口径（同样三选一：对齐 / 记为有意差异 / 说明为何不改），
+本表因此对全部十三项给出可核对的结论。
 共享夹具的两侧对应关系：`test/run.mjs` 的 [28] 段 ↔
 `collectors.rs` 的 `project_model_and_tool_identity_match_node_on_one_fixture` 与
 `tool_record_gate_and_line_identity_and_malformed_ts`；
 `tests/sources.rs` 的 `antigravity_decoder_branches_and_project_match_node` ↔
-`test/sources/antigravity/antigravity.test.mjs`。
+`test/sources/antigravity/antigravity.test.mjs`；
+`test/fixtures/codex-parity/rollout.jsonl` ↔
+`compare_local_golden_is_what_the_desktop_collector_produces`（Rust 侧逐字段钉黄金）+
+`node desktop/scripts/compare-local.mjs --fixture`（Node 侧现场跑 `collectCodexFile`）。
 
 | # | 漂移 | 结论 |
 |---|---|---|
@@ -217,7 +223,10 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 | 7 | antigravity 输出/时间/零用量三分支 + steps 读失败 | **已对齐**（`read_antigravity` 与 `decodeGenerationRow` 同式）：output 三分支——`f3>0` 用 `f3`，否则 `f10` 在场用 `f10+f9`，否则只剩 `f9`（旧写法用"字段在不在"判断，于是 `f3=0` 在桌面端记 0 输出）；时间**行内值优先**、缺失才回退同 idx 的 steps 时间（旧写法取 max，steps 一行覆盖多次生成，会把事件推到比真实完成时刻更晚的位置）；零用量判据 `input/output/cacheRead 全 0 → 丢` 补到桌面端。**steps 读失败两侧走不同通道但保证同一件事**：Node 端扣住水位不越过未采样的生成（#95），桌面端整份结果判失败、保留缓存里已有的行（`collect_file` 不会用读不全的结果替换缓存）——都是"读不到时间的那些生成不会永久丢失"，故不算漂移 |
 | 8 | workbuddy：Node 端把 `cache_write`/`reasoning` 写死 0，且不归一秒级时间戳 | **已对齐（补 Node 端）**：`cache_creation_input_tokens`/`cache_write_input_tokens` 走与 codex **同一处** `tokens.js::cacheWriteOf`（#75 统一规则：只出一种用一种、两种相等照用、两种不等拒读记 0；桌面端 workbuddy 分支调用的 `openai()` 里就是同一条 `cache_write_of`）、`reasoning_output_tokens` 读出来、缓存命中同样认 `cached_input_tokens` 别名；请求数关卡统一到 `total <= 0`（此前只带缓存写入的一轮在 Node 端被丢、桌面端记）。秒级 `timestamp` 归一为毫秒（此前落到 1970-01-21，Node 面板的"今日/本周"里根本没有它）。workbuddy `version` 1→2 |
 | 9 | grok：Node 端有进行中轮次的上下文水位快照（`saveQuota('grok:live')`），桌面端没有 | **有意保留，不在本轮补齐**：桌面端 GUI 没有任何消费这个水位的界面（`web/app.js` 的"Grok 进行中"卡片只存在于 Node 版面板里），要"对齐"就得连 UI 一起做，那不是采集口径修复而是新功能。桌面端的 `quota` 表与 `Parsed.quotas` 通道是通的（codex rate_limits 就走这条路），需要时按 `_meta.totalTokens → Quota{agent:"grok:live"}` 加即可。这一行的意义是让下一个读代码的人知道这是**已知缺口**而不是漏看 |
-| 10 | `scanner.rs` 的 `seen` 去重一律 `to_lowercase()` | **已改成按平台**：Windows 路径大小写不敏感，不归一会把同一份日志采两遍（`raw_events` 主键含 path，两份都留下）；POSIX 恰好相反，`/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，一律 lowercase 会让后者被当成重复**静默跳过**——少一份用量且零错误。抽成 `dedup_key()`，`to_lowercase()` 只编进 Windows 构建 |
+| 10 | `scanner.rs` 的 `seen` 去重一律 `to_lowercase()` | **已改成按平台**：Windows 路径大小写不敏感，不归一会把同一份日志采两遍（`raw_events` 主键含 path，两份都留下）；POSIX 恰好相反，`/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，一律 lowercase 会让后者被当成重复**静默跳过**——少一份用量且零错误。抽成 `dedup_key()`（`scanner.rs:65-72`），`to_lowercase()` 只编进 Windows 构建，非 Windows 构建原样返回 |
+| 11 | 会话回放（`session_replay.rs::normalize_raw_usage`）读不到 `cache_write`：三处读者各抄一份字段名，回放那一份两种写法都不读（#75 第 3 项点名的"至多一个正确"） | **已对齐（规则只留一份）**：三个读者调同一个实现——事件缓存 `collectors.rs::openai()`、legacy `codex.js` 经 `src/collectors/tokens.js::cacheWriteOf`、回放 `normalize_raw_usage` 直接调 `collectors::cache_write_of`；没有第四份抄本，`spelling_changed`（累计序列换了写法）也只在两处按同一条判据实现。**回放的 `ModelUsage` 没有独立 cacheWrite 列，缓存写入只并进 `total_tokens`——判定：可接受，不改类型**。理由：`raw_usage.total_tokens = input + cache_write + output`（`session_replay.rs:1734/1761` 两个构造点都是这个式子），而 `input` 是上游原值（OpenAI 口径已含缓存命中），所以它和事件缓存那条 `Tokens::total() = 新输入 + 缓存命中 + cache_write + 输出` **恒等同一个数**；回放面板也不按列计价（`cost_usd` 取自日报行 `session_replay.rs:262/1061`，不由 `ModelUsage` 现算），并进 total 只少一个展示位、不产生数字分歧。给 `ModelUsage` 加字段要连动前端与日报 `models` 的键值结构，那是展示层需求而不是口径修复。**触发重开的条件写在这里**：回放一旦要单列缓存写入、或改成按列计价，这一格立即失效 |
+| 12 | **跨分支矛盾**：`codex/fix-desktop-data`@6b91d98 的十源平价探针（`desktop/scripts/compare-local.mjs` 的 `DIVERGENCES.codex`）把 codex 记成量化分歧 **−1 事件 / −120 tokens / −80 cached**，理由是"Node 侧每条会话第一次 `token_count` 只建累计基线不产事件（`codex.js:149`）"；而 #75 第 1 项声称首样本已对齐 | **那条登记已经过期，删掉它——两端现在都产这一条事件，差值恒为 0**。`codex.js:149` 那一行（`if (!st.cum) { st.cum = cur; return; }`）在 `f6ed418` 里已经不是首样本的处理了：现在 Node 在"无基线/累计回落/换写法"三种情况下都改读 `info.last_token_usage` 并 `insertEvent`（键 `codex:{file}:{ts 之前}:baseline:{ts}`），与桌面端 `collectors.rs` 的 `previous.is_none() \|\| reset \|\| spelling_changed` 分支同式同落库。**谁是对的**：#75（本分支）——探针的差值是在 #75 之前的 Node 形状上量出来的，两个结论不是互相推翻，是同一件事的前后两版。**数字为什么正好是 −1/−120/−80**：那份夹具只有两条采样（`last_token_usage` = input 100 含 cached 80、output 20 → 拆列 20+80+0+20 = **120**、cached **80**；第二条累计值没变 = 重复通知，两端都不落），修前这边 0 条、桌面 1 条。**怎么保证不再回来**：同一份四条记录被两端各自钉住——Rust `collectors.rs::codex_first_sample_no_longer_diverges_from_node_parity_probe`（1 事件 / 120 / 80 / 新输入 20）与 Node `test/run.mjs` 的"跨分支对账"块（同三个数），加上既有的 `compare_local_golden_is_what_the_desktop_collector_produces` + `node desktop/scripts/compare-local.mjs --fixture`（6 事件 / 2358000 / 1250000，`equal:true`，负对照会变红）。合并那条分支时 `DIVERGENCES.codex` 必须删除：它自己的注释就写着"哪天 Node 修了首事件，这条登记就会红，逼着删掉它"——现在就是那天 |
+| 13 | 非法时间字符串：一端读不出来就静默 `continue`，面板一切正常、只是少数据（"静默归零"的姊妹形态） | **已对齐到"带用量的行读不到时间就计 malformed"**：`collectors.rs:305-324` 在 `timestamp()` 三路取值全失败时判断该行是否携带用量（`message.usage` / codex `token_count` / grok `params.update.usage` / dsh `data.usage` / dsh 旧结构 `data.chunk.usage` 五种形态），带用量才 `malformed_lines += 1`，来源健康因此停在 warning；结构性没有时间的行（`session_meta`/`turn_context`/`type:"session"`）**不**算坏行——那是它们本来的样子，报坏就是噪声。秒级时间戳的归一与阈值两端共用（Node `tokens.js:39` 的 `toMs()` 用 1e11 边界，桌面 `collectors.rs:7-21` 的 `timestamp()` 同一条；dsh/workbuddy 都改走它），秒值不会再落到 1970-01-21 从"今日/本周"里消失。**回归**：桌面侧 `collectors.rs::tool_record_gate_and_line_identity_and_malformed_ts` 用 `"timestamp":"not-a-time"` 钉 `malformed_lines == 1`；Node 侧对应 `test/run.mjs` 的 workbuddy 秒级归一断言 |
 
 **两处结构性差异，属"做不到也不该做"，登记为有意保留**：
 
