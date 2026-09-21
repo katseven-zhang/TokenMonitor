@@ -537,6 +537,12 @@ try {
         '$fns = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $names -contains $a.Name }, $true))',
         'if ($fns.Count -ne 3) { throw (\'whitelist functions not found: \' + $fns.Count) }',
         'Invoke-Expression ((@($fns) | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine)',
+        // 光定义没人调用等于没修：抽出真函数之后还要钉住第 6 步真的调用它，并且没有
+        // 换一种写法（robocopy 之类）重新开一个整目录复制的后门。
+        '$cmdNames = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })',
+        'Write-Output (\'CALLSITE_COPY=\' + @($cmdNames | Where-Object { $_ -eq \'Copy-TrackedSourceTree\' }).Count)',
+        'Write-Output (\'CALLSITE_SETS=\' + @($cmdNames | Where-Object { $_ -eq \'Get-PackagedFileSets\' }).Count)',
+        'Write-Output (\'CALLSITE_ROBOCOPY=\' + @($cmdNames | Where-Object { $_ -ieq \'robocopy\' }).Count)',
         '$repoFull = $Sandbox',
         '$PACKAGED_DIRS = @(\'bin\',\'src\',\'web\')',
         '$runtime = Join-Path $Sandbox \'out\'',
@@ -599,6 +605,8 @@ try {
       const buildSrc2 = readFileSync(join(repo, 'scripts', 'build-windows.ps1'), 'utf8');
       ok(!/Copy-Item -Path \(Join-Path \$repoFull \$dir\) -Destination \(Join-Path \$runtime \$dir\) -Recurse/.test(buildSrc2),
         '#101 bin/src/web 不再整目录 Copy-Item -Recurse', buildSrc2.slice(0, 200));
+      ok(/CALLSITE_COPY=1/.test(rI.out) && /CALLSITE_SETS=1/.test(rI.out) && /CALLSITE_ROBOCOPY=0/.test(rI.out),
+        '#101 第 6 步真的调用白名单函数（只定义不调用、或另开 robocopy 后门都会红）', rI.out.slice(-500));
     }
 
     // (j) 源码验证复制的真函数演练：从 verify-windows-source.ps1 抽出
@@ -625,7 +633,15 @@ try {
         'Set-Content -LiteralPath (Join-Path $src \'desktop\\node_modules\\pkg\\index.js\') -Value \'dep\'',
         'Set-Content -LiteralPath (Join-Path $src \'desktop\\dist\\assets\\bundle.js\') -Value \'built\'',
         'Set-Content -LiteralPath (Join-Path $src \'.git\\HEAD\') -Value \'ref: refs/heads/main\'',
-        '$excluded = @(\'node_modules\', \'.git\', \'target\', \'dist\')',
+        // 演练必须用脚本里真正那份排除集，不能用测试自己抄一份字面量：抄来的字面量
+        // 只证明"函数会过滤"，脚本把 target 从排除集里删掉时测试照样全绿（实测过）。
+        '$asm = @($ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.AssignmentStatementAst] -and $a.Left.Extent.Text -eq \'$ExcludedNames\' }, $true))',
+        'if ($asm.Count -ne 1) { throw \'verify-windows-source.ps1 must define $ExcludedNames exactly once\' }',
+        '$excluded = @(Invoke-Expression $asm[0].Right.Extent.Text)',
+        'Write-Output (\'LIST_TARGET=\' + ($excluded -contains \'target\'))',
+        'Write-Output (\'LIST_DIST=\' + ($excluded -contains \'dist\'))',
+        'Write-Output (\'LIST_NM=\' + ($excluded -contains \'node_modules\'))',
+        'Write-Output (\'LIST_GIT=\' + ($excluded -contains \'.git\'))',
         '$work = Join-Path $Sandbox \'work\'',
         'New-Item -ItemType Directory -Path $work -Force | Out-Null',
         '$n = Copy-VerifySourceTree -SourceRoot $src -TargetRoot $work -Excluded $excluded',
@@ -647,6 +663,8 @@ try {
         '#14 验证用源码复制照常带走真实源文件', rJ.out.slice(-500));
       ok(/TARGET_LEAK=False/.test(rJ.out) && /NM_LEAK=False/.test(rJ.out) && /DIST_LEAK=False/.test(rJ.out) && /GIT_LEAK=False/.test(rJ.out),
         '#14 嵌套的 target/dist/node_modules/.git 一律不复制（GB 级构建树 + MAX_PATH）', rJ.out.slice(-500));
+      ok(/LIST_TARGET=True/.test(rJ.out) && /LIST_DIST=True/.test(rJ.out) && /LIST_NM=True/.test(rJ.out) && /LIST_GIT=True/.test(rJ.out),
+        '#14 脚本自己的排除集里 target/dist/node_modules/.git 一个都不能少（少一个即红）', rJ.out.slice(-500));
       ok(/OLD_TARGET_LEAK=True/.test(rJ.out) && /OLD_NM_LEAK=True/.test(rJ.out),
         '#14 负对照成立：Copy-Item -Exclude 就算补上 target 也挡不住嵌套构建目录（所以才必须自己走目录树）', rJ.out.slice(-500));
       const verifySrc = readFileSync(join(repo, 'scripts', 'verify-windows-source.ps1'), 'utf8');
