@@ -237,6 +237,35 @@ console.log('\n[logging] 自动脱敏与受控轮转');
 }
 
 // ==========================================
+// 5b. #96：Error 参数与裸 key= 形态
+// ==========================================
+console.log('\n[logging] #96 Error 不再是 "{}"，key= 形态必须脱敏');
+{
+  const logDir = join(TEMP_BASE, 'logs-96');
+  const logger = new RuntimeLogger({ logDir, filename: 'p96.log', consoleOutput: false });
+  logger.error(new Error('collector 抛出的真实故障'));
+  logger.error({ file: 'x.jsonl', cause: new RangeError('嵌套的故障') });
+  logger.warn('scan key=SECRETVALUE123 done {"key":"SECRETVALUE456"}');
+  const written = readFileSync(join(logDir, 'p96.log'), 'utf8');
+
+  // Error 的 message/stack 都是不可枚举属性：JSON.stringify(err) 得到 "{}"，
+  // 于是 log.error(err) 这条最常见写法把每次真实故障都记成一对空花括号。
+  ok('Error 参数落出类型与消息', written.includes('Error: collector 抛出的真实故障'));
+  ok('日志里不再出现 "{}"', !written.includes('{}'));
+  ok('结构化参数里嵌套的 Error 同样落出消息', written.includes('RangeError: 嵌套的故障'));
+  ok('裸 key= 与 JSON "key" 都被脱敏',
+    !written.includes('SECRETVALUE123') && !written.includes('SECRETVALUE456')
+    && written.includes('key=[REDACTED]'));
+  ok('短序号不被误伤（key=1 原样）',
+    sanitizeLogMessage('seq key=1 done').includes('key=1'));
+  ok('词尾非 key 的字段不误伤（monkey 的值保留）',
+    sanitizeLogMessage('{"monkey": "banana123"}').includes('banana123'));
+  ok('既有规则不回归：api_key 与 token 系仍脱敏',
+    !sanitizeLogMessage('api_key=ABCDEFGH12345').includes('ABCDEFGH12345')
+    && !sanitizeLogMessage('"access_token":"ABCDEFGHIJKL"').includes('ABCDEFGHIJKL'));
+}
+
+// ==========================================
 // 6. RuntimeManager 受控关闭生命周期
 // ==========================================
 console.log('\n[runtime lifecycle] RuntimeManager 资源接管与受控停止');

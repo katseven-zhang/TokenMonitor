@@ -268,6 +268,35 @@ export function diagnosePortConflict(port, address = '127.0.0.1', { exec = spawn
 }
 
 /**
+ * 一条日志参数的文本形态（#96）。
+ *
+ * Error 的 message/stack 都是**不可枚举**属性，`JSON.stringify(new Error('x'))` 得到
+ * 的是 `{}` —— 于是 `log.error(err)` 这条最常见写法把每次真实故障都记成一对空花括号，
+ * 日志里既看不出错误类型也看不出消息，事后无从排查。嵌套在对象里的 Error 同理
+ * （replacer 也走这条规则）。
+ */
+function errorText(err) {
+  const name = typeof err.name === 'string' && err.name ? err.name : 'Error';
+  const message = typeof err.message === 'string' ? err.message : '';
+  const head = message ? `${name}: ${message}` : name;
+  // stack 首行已经含 "Name: message"，重复拼接会让日志翻一倍
+  const stack = typeof err.stack === 'string' && err.stack && !err.stack.includes(head)
+    ? `\n${err.stack}` : '';
+  return head + stack;
+}
+
+function logArgText(a) {
+  if (typeof a === 'string') return a;
+  if (a instanceof Error) return errorText(a);
+  try {
+    const json = JSON.stringify(a, (_k, v) => (v instanceof Error ? errorText(v) : v));
+    return json === undefined ? String(a) : json;
+  } catch {
+    return String(a);
+  }
+}
+
+/**
  * 敏感信息脱敏：
  * 自动脱敏 Authorization、Bearer、API Key、Room/Credential Token 以及会话/消息正文
  */
@@ -276,10 +305,10 @@ export function sanitizeLogMessage(input) {
   if (typeof input === 'string') {
     str = input;
   } else if (input instanceof Error) {
-    str = input.stack || input.message || String(input);
+    str = errorText(input);
   } else {
     try {
-      str = JSON.stringify(input);
+      str = JSON.stringify(input, (_k, v) => (v instanceof Error ? errorText(v) : v));
     } catch {
       str = String(input);
     }
@@ -304,6 +333,12 @@ export function sanitizeLogMessage(input) {
     .replace(/\b(key-[a-zA-Z0-9_-]{8,})\b/gi, 'key-[REDACTED]')
     // api_key="..." or apiKey: "..."
     .replace(/((?:api[_-]?key|secret[_-]?key|app[_-]?secret)\s*[:=]\s*["']?)([^"'\r\n,\s}]+)/gi, '$1[REDACTED]')
+    // 裸 key 形式（#96）：`?key=...`、`key: ...`、`"key": "..."` —— 此前只认带前缀的
+    // api_key/secret_key/app_secret 与 token 系字段，网关 URL 与厂商查询串上的
+    // `key=<凭据>` 会原样进日志。值满 8 位才处理，避免把 `key=1` 这类序号也吞掉；
+    // 前面加非单词字符判定，`monkey:`/`apiKey:` 这类词尾不是本规则的目标
+    // （后者由上一条 api[_-]?key 负责）。
+    .replace(/(?<![A-Za-z0-9_])(["']?key["']?\s*[:=]\s*["']?)([A-Za-z0-9_\-./+]{8,})/gi, '$1[REDACTED]')
     // 会话正文 / 提示词 / 消息内容脱敏
     .replace(/(["']?(?:session_body|conversation_text|message_content|user_message|assistant_response|prompt|body|content)["']?\s*:\s*)"(?:[^"\\]|\\.)*"/gi, '$1"[REDACTED]"');
 }
@@ -329,7 +364,7 @@ export class RuntimeLogger {
   }
 
   write(level, ...args) {
-    const raw = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    const raw = args.map(logArgText).join(' ');
     const sanitized = sanitizeLogMessage(raw);
     const ts = new Date().toISOString();
     const entry = `[${ts}] [${level.toUpperCase()}] ${sanitized}\n`;

@@ -19,8 +19,25 @@ pub fn timestamp(v: &Value) -> Option<i64> {
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|t| t.timestamp_millis())
 }
+/// #96：用量字段既可能是数字，也可能是**数字形态的字符串**（网关回填 usage 的常见写法）。
+/// 这里必须把它读成数字，而不是当"不是 i64"落成 0：Node 端 `collectors/tokens.js
+/// tokenCount()` 取的是 123，两端不一致就是同一份日志两个 UI 数字不同。
+/// 非数字文本（"12a"）、null/bool、负数一律 0，与原 `as_i64().unwrap_or(0).max(0)` 一致。
+fn json_int(v: &Value) -> i64 {
+    let n = match v {
+        Value::Number(x) => x.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    match n {
+        // 非有限值、负数、超出 i64 的量级都按 0：真实 token 数远到不了这个量级，
+        // 而"读不出来"绝不能变成一个大数（Node 端 tokens.js 同理，非有限值一律 0）。
+        Some(x) if x.is_finite() && x >= 0.0 && x <= i64::MAX as f64 => (x.floor() as i64).max(0),
+        _ => 0,
+    }
+}
 fn number(v: &Value, key: &str) -> i64 {
-    v.get(key).and_then(Value::as_i64).unwrap_or(0).max(0)
+    json_int(v.get(key).unwrap_or(&Value::Null))
 }
 fn string(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -92,6 +109,10 @@ fn tool(
     }
 }
 pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
+    // #96：文件开头的 UTF-8 BOM 会让首条记录解析失败。Pi 的 project 只写在首行
+    // （type=session 的 cwd），失败一次就再也补不回来——与 Node 端 collectors/lines.js
+    // 在同一条通道上剥掉的正是这一个字节序标记（BOM 是合法 UTF-8，from_utf8 不会拦它）。
+    let text = text.trim_start_matches('\u{feff}');
     let mut out = Parsed::default();
     let mut model = "unknown".to_string();
     let mut project = String::new();
@@ -412,7 +433,11 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                 }
                 let u = &upd["usage"];
                 let by_model = u["modelUsage"].as_object();
+                // #96：`modelUsage: {}` 是"没有逐模型拆分"，不是"这一轮没有用量"。
+                // 空对象必须与字段缺失同义，否则 unwrap_or_else 的回落分支永远进不去，
+                // 整轮用量凭空消失（Node 端 grok.js 同一处、同一条修复）。
                 let models: Vec<(String, &Value)> = by_model
+                    .filter(|m| !m.is_empty())
                     .map(|m| m.iter().map(|(k, v)| (k.clone(), v)).collect())
                     .unwrap_or_else(|| vec![("grok".into(), u)]);
                 for (m, u) in models {
@@ -1103,6 +1128,64 @@ mod tests {
             all.iter().map(|e| e.tokens.reasoning).sum::<i64>(),
             37000,
             "reasoning 不参与 total，但必须同一条上带着"
+        );
+    }
+
+    /// #96 双端共享夹具：用量字段是**数字形态的字符串**时，两端必须读出同一个整数。
+    /// Node 端同一份记录与同一组期望写在 `test/run.mjs` 的 [27] 段。
+    /// 修前两端各错一头：JS 侧 `"123" + 0 + 0 + 456` 做的是拼接（→ 12300456，四个数量级），
+    /// Rust 侧 `Value::as_i64` 对字符串一律给 0（→ 这条用量凭空消失）。
+    /// 同一处还钉住 grok `modelUsage:{}`（空对象=没有逐模型拆分，不是这一轮没有用量）
+    /// 与 Pi 首行 BOM（project 只写在首行，读不到就永久为 null）。
+    #[test]
+    fn stringly_typed_usage_and_empty_model_usage_match_node() {
+        const CLAUDE_96: &str = r#"{"timestamp":"2026-09-21T00:00:00Z","type":"assistant","sessionId":"p96","requestId":"r1","message":{"id":"m1","model":"GLM-96","usage":{"input_tokens":"123","cache_read_input_tokens":"4500","cache_creation_input_tokens":"60","output_tokens":"456","output_tokens_details":{"thinking_tokens":"70"}}}}
+{"timestamp":"2026-09-21T00:00:01Z","type":"assistant","sessionId":"p96","requestId":"r2","message":{"id":"m2","model":"glm-96","usage":{"input_tokens":"123","cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":456}}}"#;
+        let p = parse_jsonl("claude-code", "p96.jsonl", CLAUDE_96);
+        let totals: Vec<i64> = p.events.iter().map(|e| e.tokens.total()).collect();
+        assert_eq!(totals, vec![5139, 579], "{:?}", p.events);
+        assert_eq!(
+            (p.events[0].tokens.input, p.events[0].tokens.cached, p.events[0].tokens.cache_write, p.events[0].tokens.output, p.events[0].tokens.reasoning),
+            (123, 4500, 60, 456, 70)
+        );
+
+        // Pi：首行 BOM 不能把 type=session 打成坏行（否则 project 永久为空）
+        const PI_96: &str = "\u{feff}{\"type\":\"session\",\"version\":3,\"id\":\"p96pi\",\"timestamp\":\"2026-09-21T00:00:00Z\",\"cwd\":\"/work/项目-96\"}\n{\"type\":\"message\",\"id\":\"pi-1\",\"timestamp\":\"2026-09-21T00:01:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"glm-96\",\"usage\":{\"input\":\"240\",\"cacheRead\":\"1000\",\"cacheWrite\":\"30\",\"output\":\"170\",\"reasoning\":\"40\"}}}";
+        let pi = parse_jsonl("pi", "p96pi.jsonl", PI_96);
+        assert_eq!(pi.malformed_lines, 0, "BOM 行不是坏行");
+        assert_eq!(pi.events.len(), 1, "{:?}", pi.events);
+        assert_eq!(pi.events[0].tokens.total(), 1440);
+        assert!(!pi.events[0].project.is_empty(), "首行必须被消费掉");
+
+        // Grok：字符串用量 + 空 modelUsage + 缺 modelUsage
+        const GROK_96: &str = r#"{"timestamp":1789900000,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t1","usage":{"inputTokens":"2000","cachedReadTokens":"1500","cacheCreationTokens":"100","outputTokens":"80","modelUsage":{"glm-96":{"inputTokens":"2000","cachedReadTokens":"1500","cacheCreationTokens":"100","outputTokens":"80"}}}}}}
+{"timestamp":1789900060,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t2","usage":{"inputTokens":500,"cachedReadTokens":100,"cacheCreationTokens":0,"outputTokens":30,"modelUsage":{}}}}}
+{"timestamp":1789900120,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t3","usage":{"inputTokens":700,"cachedReadTokens":0,"cacheCreationTokens":20,"outputTokens":60}}}}
+{"timestamp":1789900180,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t4","usage":{"inputTokens":0,"cachedReadTokens":0,"outputTokens":0,"modelUsage":{}}}}}"#;
+        let grok = parse_jsonl("grok", "updates.jsonl", GROK_96);
+        let gt: Vec<i64> = grok.events.iter().map(|e| e.tokens.total()).collect();
+        assert_eq!(gt, vec![2180, 530, 780], "空 modelUsage 的一轮不能整条丢掉：{:?}", grok.events);
+        assert_eq!(grok.events[1].model, "grok", "回落轮次没有模型名");
+
+        // dsh / WorkBuddy 同一条规则
+        const DSH_96: &str = r#"{"type":"session","seq":1,"time":1789900000000,"cwd":"/work/项目-96"}
+{"type":"assistant/message","seq":9,"time":1789900060000,"data":{"message":{"source":{"model":"glm-96"}},"usage":{"inputTokens":"400","cacheReadTokens":"1000","cacheWriteTokens":"30","outputTokens":"50","reasoningTokens":"10"}}}"#;
+        let dsh = parse_jsonl("dsh", "session.v3.jsonl.zstd", DSH_96);
+        assert_eq!(dsh.events.len(), 1, "{:?}", dsh.events);
+        assert_eq!(dsh.events[0].tokens.total(), 1480);
+        assert_eq!(dsh.events[0].tokens.reasoning, 10);
+
+        const WB_96: &str = r#"{"timestamp":1789900000000,"id":"wb-96","sessionId":"p96wb","providerData":{"model":"glm-96","traceId":"tr-96"},"message":{"usage":{"input_tokens":"500","cache_read_input_tokens":"300","output_tokens":"50"}}}"#;
+        let wb = parse_jsonl("workbuddy", "p96wb.jsonl", WB_96);
+        assert_eq!(wb.events.len(), 1, "{:?}", wb.events);
+        assert_eq!(wb.events[0].tokens.total(), 550);
+        assert_eq!((wb.events[0].tokens.input, wb.events[0].tokens.cached), (200, 300), "input 含缓存，拆列后总数不变");
+
+        // number() 的边界：非数字文本/null/bool/负数一律 0，与原 as_i64 兜底同式
+        let v: Value = json!({"a":"12a","b":null,"c":true,"d":-5,"e":" 456 ","f":12.7});
+        assert_eq!(
+            (number(&v, "a"), number(&v, "b"), number(&v, "c"), number(&v, "d"), number(&v, "e"), number(&v, "f")),
+            (0, 0, 0, 0, 456, 12)
         );
     }
 }

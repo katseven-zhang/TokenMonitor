@@ -1,6 +1,7 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 /**
  * Grok Build 采集器：~/.grok/sessions/<项目目录(URL编码)>/<会话id>/updates.jsonl。
@@ -70,14 +71,17 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
     }
     if (upd.sessionUpdate === 'turn_completed' && upd.usage) {
       const u = upd.usage;
-      const models = u.modelUsage && typeof u.modelUsage === 'object'
-        ? Object.entries(u.modelUsage)
-        : [[null, u]];
+      // #96：`modelUsage: {}`（网关在降级轮次里就是这么写的）会让 Object.entries 得到
+      // 空数组，于是 for 循环一次都不执行——整轮的用量凭空消失，且不报错。空对象必须
+      // 与"没有该字段"同义：回落到轮次级的汇总 usage。
+      const entries = u.modelUsage && typeof u.modelUsage === 'object'
+        ? Object.entries(u.modelUsage) : [];
+      const models = entries.length ? entries : [[null, u]];
       for (const [model, m] of models) {
-        const input = m.inputTokens || 0;
-        const cached = Math.min(m.cachedReadTokens || 0, input);
-        const cacheW = m.cacheCreationTokens || 0;
-        const output = m.outputTokens || 0;
+        const input = tokenCount(m.inputTokens);
+        const cached = Math.min(tokenCount(m.cachedReadTokens), input);
+        const cacheW = tokenCount(m.cacheCreationTokens);
+        const output = tokenCount(m.outputTokens);
         const total = input + cacheW + output;
         if (total <= 0) continue;
         inserted += store.insertEvent({
@@ -90,7 +94,7 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
           cached_input: cached,
           cache_write: cacheW,
           output_tokens: output,
-          reasoning_tokens: m.reasoningTokens || 0,
+          reasoning_tokens: tokenCount(m.reasoningTokens),
           total_tokens: total,
           dedup_key: `grok:${p.sessionId}:${upd.prompt_id}:${model ?? 'x'}`,
         });

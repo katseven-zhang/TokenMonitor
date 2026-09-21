@@ -1,6 +1,7 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 /**
  * Pi 采集器：`~/.pi/agent/sessions/<编码cwd>/<ISO时间>_<会话uuid>.jsonl`。
@@ -67,10 +68,11 @@ export async function collectPiFile(store, { tool, path, fileId, offset, state, 
     const key = rec.id ?? msg.responseId;
     if (!key) return;
 
-    const input = u.input || 0;
-    const cached = u.cacheRead || 0;
-    const cacheWrite = u.cacheWrite || 0;
-    const output = u.output || 0;
+    // #96：字符串形态的用量字段必须先转整数再相加，否则 total 是拼接出来的天文数字
+    const input = tokenCount(u.input);
+    const cached = tokenCount(u.cacheRead);
+    const cacheWrite = tokenCount(u.cacheWrite);
+    const output = tokenCount(u.output);
     const total = input + cached + cacheWrite + output;
     if (total <= 0) return;
 
@@ -84,7 +86,7 @@ export async function collectPiFile(store, { tool, path, fileId, offset, state, 
       cached_input: cached,
       cache_write: cacheWrite,
       output_tokens: output,
-      reasoning_tokens: u.reasoning || 0,
+      reasoning_tokens: tokenCount(u.reasoning),
       total_tokens: total,
       dedup_key: `${tool}:${sessionId}:${key}`,
     });

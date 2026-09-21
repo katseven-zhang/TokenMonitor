@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { win32 } from 'node:path';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 function isLockError(err) {
   const m = String(err?.message || err);
@@ -77,10 +78,10 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
       const ts = Number(d.time?.created) || Number(m.time_created) || 0;
       if (!ts) continue;
 
-      const input = t.input || 0;
-      const cached = t.cache?.read || 0;
-      const cacheWrite = t.cache?.write || 0;
-      const output = t.output || 0;
+      const input = tokenCount(t.input);
+      const cached = tokenCount(t.cache?.read);
+      const cacheWrite = tokenCount(t.cache?.write);
+      const output = tokenCount(t.output);
       const total = input + cached + cacheWrite + output;
       if (total <= 0) continue;
 
@@ -95,7 +96,7 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
         cached_input: cached,
         cache_write: cacheWrite,
         output_tokens: output,
-        reasoning_tokens: t.reasoning || 0,
+        reasoning_tokens: tokenCount(t.reasoning),
         total_tokens: total,
         dedup_key: `${tool}:${m.id}`,
       });

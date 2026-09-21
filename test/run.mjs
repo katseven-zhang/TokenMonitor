@@ -2265,6 +2265,230 @@ console.log('\n[26] 模型名归一（#78：跨来源同一模型只一行 + 全
   rmSync(base, { recursive: true, force: true });
 }
 
+/* ---------- [27] #96 用量数值化 / 丢轮 / 日志脱敏 ---------- */
+console.log('\n[27] #96 采集器数值化与平台卫生（字符串用量不得拼成天文数字 / 空 modelUsage 不丢轮 / BOM 不丢 project / Error 与 key= 进日志）');
+/* 桌面端对偶：desktop/src-tauri/src/collectors.rs::number()（同一条取值规则）与
+ * desktop/src-tauri/tests/sources.rs::#96 段（同一份夹具、同一组期望数字）。
+ * 历史库里的坏行由 src/store.js migrate() 的恒等式重算修复（Node 端无整库重建，
+ * 桌面端用 COLLECTOR_REVISION 重建）。 */
+{
+  const { tokenCount } = await import(pathToFileURL(join(ROOT, 'src/collectors/tokens.js')).href);
+  const { collectClaudeFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/claude.js')).href);
+  const { collectPiFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/pi.js')).href);
+  const { collectGrokFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/grok.js')).href);
+  const { collectWorkbuddyFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/workbuddy.js')).href);
+  const { collectDshFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/dsh.js')).href);
+  const { collectZcodeDb } = await import(pathToFileURL(join(ROOT, 'src/collectors/zcode.js')).href);
+  const { collectOpencodeDb } = await import(pathToFileURL(join(ROOT, 'src/collectors/opencode.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const { sanitizeLogMessage, RuntimeLogger } = await import(pathToFileURL(join(ROOT, 'src/platform/runtime.js')).href);
+
+  /* ---- 规则本身：字符串必须被读成数字 ---- */
+  for (const [raw, want] of [
+    ['123', 123], [123, 123], ['12.7', 12], [-5, -5], [' 456 ', 456],
+    [null, 0], [undefined, 0], ['', 0], ['12a', 0], [{}, 0], [[], 0],
+    [Number.POSITIVE_INFINITY, 0], [Number.NaN, 0],
+  ]) ok(`#96 tokenCount(${JSON.stringify(raw)}) → ${want}`, tokenCount(raw) === want, String(tokenCount(raw)));
+
+  const base = mkdtempSync(join(tmpdir(), 'parity96-'));
+  const store = new Store(join(base, 't96.db'));
+  const col = (tool) => store.db.prepare(
+    'SELECT input_tokens i, cached_input c, cache_write w, output_tokens o, reasoning_tokens r,'
+    + ' total_tokens t, typeof(total_tokens) tt, project p FROM events WHERE tool = ? ORDER BY id').all(tool);
+  const write = (name, text) => { const p = join(base, name); writeFileSync(p, text); return p; };
+
+  /* ---- claude：四段求和；审计原例 "123" + 0 + 0 + 456 ---- */
+  {
+    const f = write('parity96-claude.jsonl', [
+      '{"timestamp":"2026-09-21T00:00:00Z","type":"assistant","sessionId":"p96","requestId":"r1","message":{"id":"m1","model":"GLM-96","usage":{"input_tokens":"123","cache_read_input_tokens":"4500","cache_creation_input_tokens":"60","output_tokens":"456","output_tokens_details":{"thinking_tokens":"70"}}}}',
+      '{"timestamp":"2026-09-21T00:00:01Z","type":"assistant","sessionId":"p96","requestId":"r2","message":{"id":"m2","model":"glm-96","usage":{"input_tokens":"123","cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":456}}}',
+    ].join('\n') + '\n');
+    await collectClaudeFile(store, { tool: 'claude-code', path: f, fileId: 'p96', offset: 0 });
+    const rows = col('claude-code');
+    // 修前：第二条形如 "123" + 0 + 0 + 456 → "12300456"，落库亲和性再变成一千二百三十万
+    ok('#96 claude 全字符串用量 123+4500+60+456 = 5139（修前拼成 123450060456）',
+      rows[0]?.t === 5139 && rows[0].i === 123 && rows[0].c === 4500 && rows[0].w === 60
+      && rows[0].o === 456 && rows[0].r === 70, JSON.stringify(rows[0]));
+    ok('#96 claude 审计原例 "123" + 0 + 0 + 456 = 579（修前 "12300456"）',
+      rows[1]?.t === 579, JSON.stringify(rows[1]));
+    ok('#96 total 落库是整数而不是文本', rows.every((x) => x.tt === 'integer'),
+      rows.map((x) => x.tt).join(','));
+  }
+
+  /* ---- pi：字符串用量 + 首行 BOM ---- */
+  {
+    const session = '{"type":"session","version":3,"id":"p96pi","timestamp":"2026-09-21T00:00:00Z","cwd":"/work/项目-96"}';
+    const usage = '{"type":"message","id":"pi-1","timestamp":"2026-09-21T00:01:00Z","message":{"role":"assistant","model":"glm-96","usage":{"input":"240","cacheRead":"1000","cacheWrite":"30","output":"170","reasoning":"40"}}}';
+    const bom = write('2026-09-21T00-00-00_p96pi-bom.jsonl', '﻿' + session + '\n' + usage + '\n');
+    const r = await collectPiFile(store, { tool: 'pi', path: bom, fileId: '2026-09-21T00-00-00_p96pi-bom.jsonl', offset: 0, state: null, version: 2 });
+    const rows = col('pi');
+    ok('#96 pi 字符串用量 240+1000+30+170 = 1440', rows[0]?.t === 1440
+      && rows[0].i === 240 && rows[0].c === 1000 && rows[0].w === 30 && rows[0].o === 170
+      && rows[0].r === 40, JSON.stringify(rows[0]));
+    ok('#96 pi 首行带 BOM 时 project 不再丢失（修前 session 记录整行解析失败 → null）',
+      r.inserted === 1 && rows[0]?.p === '项目-96', JSON.stringify(rows[0]));
+    // 增量续写：游标已越过首行，project 必须由 state 带过来（既有契约，防 BOM 修复改坏它）
+    const plain = write('2026-09-21T00-00-00_p96pi.jsonl', session + '\n' + usage + '\n');
+    const st1 = await collectPiFile(store, { tool: 'pi', path: plain, fileId: 'p96pi', offset: 0, state: null, version: 2 });
+    ok('#96 pi 无 BOM 时同样读到 project（state 带过后续轮次）',
+      st1.state.project === '项目-96', JSON.stringify(st1.state));
+  }
+
+  /* ---- grok：字符串用量 + `modelUsage:{}` 不丢轮 ---- */
+  {
+    const dir = join(base, 'sessions', encodeURIComponent('D:\\work\\项目-96'), 'p96grok');
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, 'updates.jsonl');
+    writeFileSync(f, [
+      '{"timestamp":1789900000,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t1","usage":{"inputTokens":"2000","cachedReadTokens":"1500","cacheCreationTokens":"100","outputTokens":"80","modelUsage":{"glm-96":{"inputTokens":"2000","cachedReadTokens":"1500","cacheCreationTokens":"100","outputTokens":"80"}}}}}}',
+      // 降级轮次：逐模型拆分是个空对象，轮次级 usage 才是真数据（修前整轮直接消失）
+      '{"timestamp":1789900060,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t2","usage":{"inputTokens":500,"cachedReadTokens":100,"cacheCreationTokens":0,"outputTokens":30,"modelUsage":{}}}}}',
+      // 连 modelUsage 都没有的一轮（旧版网关）
+      '{"timestamp":1789900120,"params":{"sessionId":"p96grok","update":{"sessionUpdate":"turn_completed","prompt_id":"t3","usage":{"inputTokens":700,"cachedReadTokens":0,"cacheCreationTokens":20,"outputTokens":60}}}}',
+    ].join('\n') + '\n');
+    await collectGrokFile(store, { tool: 'grok', path: f, fileId: 'p96grok', offset: 0 });
+    const rows = col('grok');
+    ok('#96 grok 三轮全部入库（修前空 modelUsage 那轮整条丢失）', rows.length === 3, JSON.stringify(rows));
+    ok('#96 grok 字符串用量 = 2000+100+80 = 2180', rows[0]?.t === 2180
+      && rows[0].i === 500 && rows[0].c === 1500 && rows[0].w === 100 && rows[0].o === 80,
+      JSON.stringify(rows[0]));
+    ok('#96 grok 空 modelUsage 回落轮次汇总 = 500+0+30 = 530', rows[1]?.t === 530, JSON.stringify(rows[1]));
+    ok('#96 grok 无 modelUsage 时仍按轮次汇总 = 700+20+60 = 780', rows[2]?.t === 780, JSON.stringify(rows[2]));
+  }
+
+  /* ---- workbuddy：字符串用量（input 含缓存，拆两列） ---- */
+  {
+    const dir = join(base, 'wb', '--x-WorkBuddy-项目-96');
+    mkdirSync(dir, { recursive: true });
+    const f = join(dir, 'p96wb.jsonl');
+    writeFileSync(f, '{"timestamp":1789900000000,"id":"wb-96","sessionId":"p96wb","providerData":{"model":"glm-96","traceId":"tr-96"},"message":{"usage":{"input_tokens":"500","cache_read_input_tokens":"300","output_tokens":"50"}}}\n');
+    await collectWorkbuddyFile(store, { tool: 'workbuddy', path: f, fileId: 'p96wb', offset: 0 });
+    const rows = col('workbuddy');
+    ok('#96 workbuddy 字符串用量 500+50 = 550，缓存拆列后仍是 200+300+50',
+      rows[0]?.t === 550 && rows[0].i === 200 && rows[0].c === 300 && rows[0].o === 50,
+      JSON.stringify(rows[0]));
+  }
+
+  /* ---- dsh：v3 记录里的字符串用量（zstd 夹具，无 zstd 时与 [3] 同样跳过） ---- */
+  {
+    const zlib = require('node:zlib');
+    if (typeof zlib.zstdCompressSync === 'function') {
+      const dir = join(base, 'dsh', '--work-项目-96--', 'p96dsh');
+      mkdirSync(dir, { recursive: true });
+      const lines = [
+        '{"type":"session","seq":1,"time":1789900000000,"cwd":"/work/项目-96"}',
+        '{"type":"assistant/message","seq":9,"time":1789900060000,"data":{"message":{"source":{"model":"glm-96"}},"usage":{"inputTokens":"400","cacheReadTokens":"1000","cacheWriteTokens":"30","outputTokens":"50","reasoningTokens":"10"}}}',
+      ];
+      writeFileSync(join(dir, 'session.v3.jsonl.zstd'),
+        Buffer.concat(lines.map((l) => zlib.zstdCompressSync(Buffer.from(l + '\n')))));
+      await collectDshFile(store, { path: join(dir, 'session.v3.jsonl.zstd'), fileId: 'p96dsh' });
+      const rows = col('dsh');
+      ok('#96 dsh 字符串用量 400+1000+30+50 = 1480', rows[0]?.t === 1480
+        && rows[0].i === 400 && rows[0].c === 1000 && rows[0].w === 30 && rows[0].o === 50
+        && rows[0].r === 10, JSON.stringify(rows[0]));
+    } else {
+      console.log('  – dsh 断言跳过（本机 Node 无 zstdCompressSync，与 [3] 同一处理）');
+    }
+  }
+
+  /* ---- opencode / zcode：sqlite 源里存成文本的数字 ---- */
+  {
+    const db = new DatabaseSync(join(base, 'oc-96.db'));
+    db.exec("CREATE TABLE session(id TEXT, directory TEXT); CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part(id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+    db.exec("INSERT INTO session VALUES('oc-s','/work/项目-96')");
+    db.prepare('INSERT INTO message VALUES(?,?,?,?,?)').run(
+      'oc-96', 'oc-s', 1789900000000, 1789900000000,
+      '{"role":"assistant","modelID":"glm-96","time":{"created":1789900000000},"tokens":{"input":"100","output":"200","reasoning":"30","cache":{"read":"300","write":"100"}}}');
+    db.close();
+    await collectOpencodeDb(store, { tool: 'opencode', path: join(base, 'oc-96.db'), state: null, version: 2 });
+    const rows = col('opencode');
+    ok('#96 opencode 字符串用量 100+300+100+200 = 700', rows[0]?.t === 700
+      && rows[0].i === 100 && rows[0].c === 300 && rows[0].w === 100 && rows[0].o === 200,
+      JSON.stringify(rows[0]));
+
+    const z = new DatabaseSync(join(base, 'zc-96.db'));
+    // 用量列**不带类型声明** = BLOB 亲和性，写进去的文本原样读出（声明成 INTEGER 的列
+    // 会被亲和性转换，构造不出这个形态）。真库 model_usage 声明为 INTEGER，所以这是防御性
+    // 一档：Node 端相加前转整数；桌面端 rusqlite 在这种列上读不出整数、会记 malformed 行，
+    // 所以这一条只进 Node 侧断言，不进双端共享夹具。
+    z.exec(`CREATE TABLE model_usage (id TEXT PRIMARY KEY, session_id TEXT, provider_id TEXT, model_id TEXT,
+      started_at INTEGER, input_tokens, output_tokens, reasoning_tokens,
+      cache_creation_input_tokens, cache_read_input_tokens, computed_total_tokens)`);
+    z.exec('CREATE TABLE tool_usage (session_id TEXT, tool_name TEXT, started_at INTEGER)');
+    z.exec('CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT)');
+    z.exec("INSERT INTO session VALUES('z-s','/work/项目-96')");
+    z.exec("INSERT INTO model_usage VALUES('z-96','z-s','p','glm-96',1789900000000,'800','60','0','0','700','860')");
+    z.close();
+    await collectZcodeDb(store, { path: join(base, 'zc-96.db'), state: null, version: 2 });
+    const zrows = col('zcode');
+    ok('#96 zcode 文本列 800+0+60 = 860（修前拼成 800060）',
+      zrows[0]?.t === 860 && zrows[0].i === 100 && zrows[0].c === 700 && zrows[0].o === 60,
+      JSON.stringify(zrows[0]));
+  }
+
+  /* ---- 存量坏行的修复通道：dedup 命中时 INSERT OR IGNORE 不会更新旧行 ---- */
+  {
+    const legacy = new Store(join(base, 'legacy96.db'));
+    legacy.db.exec(`INSERT INTO events (ts, tool, model, session_id, project, input_tokens, cached_input,
+      cache_write, output_tokens, reasoning_tokens, total_tokens, dedup_key)
+      VALUES (1789900000000,'claude-code','glm-96','s',NULL,123,0,0,456,0,12300456,'legacy-96-bad'),
+             (1789900000000,'claude-code','glm-96','s','已归属',1,2,3,4,0,10,'legacy-96-ok')`);
+    legacy.close();
+    const healed = new Store(join(base, 'legacy96.db'));
+    const bad = healed.db.prepare("SELECT total_tokens t, typeof(total_tokens) tt FROM events WHERE dedup_key='legacy-96-bad'").get();
+    const good = healed.db.prepare("SELECT total_tokens t, project p FROM events WHERE dedup_key='legacy-96-ok'").get();
+    ok('#96 打开库时按落库恒等式重算被拼坏的 total（12300456 → 579）',
+      bad.t === 579 && bad.tt === 'integer', JSON.stringify(bad));
+    ok('#96 恒等式成立的行一字不改（重算幂等，不覆盖已有 project）',
+      good.t === 10 && good.p === '已归属', JSON.stringify(good));
+    // project 补登：只填 NULL，绝不覆盖已有归属
+    healed.insertEvent({ ts: 1789900000000, tool: 'claude-code', model: 'glm-96', session_id: 's',
+      project: '项目-96', input_tokens: 123, cached_input: 0, cache_write: 0, output_tokens: 456,
+      reasoning_tokens: 0, total_tokens: 579, dedup_key: 'legacy-96-bad' });
+    healed.insertEvent({ ts: 1789900000000, tool: 'claude-code', model: 'glm-96', session_id: 's',
+      project: '别的目录', input_tokens: 1, cached_input: 2, cache_write: 3, output_tokens: 4,
+      reasoning_tokens: 0, total_tokens: 10, dedup_key: 'legacy-96-ok' });
+    const p = healed.db.prepare('SELECT dedup_key k, project p FROM events ORDER BY dedup_key').all();
+    ok('#96 去重命中时补登缺失的 project（已有归属不被覆盖）',
+      p[0].p === '项目-96' && p[1].p === '已归属', JSON.stringify(p));
+    ok('#96 补登不增加事件数', healed.db.prepare('SELECT COUNT(*) c FROM events').get().c === 2);
+    healed.close();
+  }
+
+  store.close();
+  rmSync(base, { recursive: true, force: true });
+
+  /* ---- 日志：Error 不再渲染成 "{}"，key= 形态要脱敏 ---- */
+  {
+    ok('#96 Error 直接进 sanitize 时带出类型与消息',
+      /^TypeError: boom(?:\n|$)/.test(sanitizeLogMessage(new TypeError('boom'))),
+      sanitizeLogMessage(new TypeError('boom')));
+    ok('#96 嵌套在对象里的 Error 也不再是 "{}"',
+      sanitizeLogMessage({ source: 'scan', err: new RangeError('bad offset') }).includes('RangeError: bad offset'),
+      sanitizeLogMessage({ source: 'scan', err: new RangeError('bad offset') }));
+    const logDir = mkdtempSync(join(tmpdir(), 'log96-'));
+    const logger = new RuntimeLogger({ logDir, filename: 't.log', consoleOutput: false });
+    logger.error(new Error('collector 抛出的真实故障'));
+    logger.error({ file: 'x.jsonl', cause: new Error('nested 故障') });
+    const written = readFileSync(join(logDir, 't.log'), 'utf8');
+    rmSync(logDir, { recursive: true, force: true });
+    ok('#96 RuntimeLogger 不再把 Error 参数写成 "{}"（JSON.stringify 的不可枚举属性）',
+      written.includes('Error: collector 抛出的真实故障') && !/^\] \{\}$|\{\}/m.test(written), written);
+    ok('#96 结构化参数里的 Error 同样落出消息', written.includes('nested 故障'), written);
+    ok('#96 裸 key= 形态被脱敏（查询串 / JSON / 冒号三种写法）',
+      !sanitizeLogMessage('GET /v1/chat?key=SECRETVALUE123').includes('SECRETVALUE123')
+      && !sanitizeLogMessage('{"key":"SECRETVALUE123"}').includes('SECRETVALUE123')
+      && !sanitizeLogMessage('key: SECRETVALUE123').includes('SECRETVALUE123'));
+    ok('#96 key= 规则不吃短序号（key=1 保留）与无关词尾（monkey: 保留）',
+      sanitizeLogMessage('seq key=1 done').includes('key=1')
+      && sanitizeLogMessage('{"monkey": "banana123"}').includes('banana123'));
+    ok('#96 既有脱敏规则不回归（Bearer / api_key / sk-）',
+      sanitizeLogMessage('Authorization: Bearer eyJhbGciOi').includes('Bearer [REDACTED]')
+      && !sanitizeLogMessage('api_key=ABCDEFGH12345').includes('ABCDEFGH12345')
+      && !sanitizeLogMessage('sk-proj-1234567890').includes('1234567890'));
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

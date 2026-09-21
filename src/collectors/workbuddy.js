@@ -1,6 +1,7 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 /**
  * WorkBuddy 采集器：~/.WorkBuddy/projects/<dir>/<session>.jsonl（Electron 版 transcript）。
@@ -47,9 +48,10 @@ export async function collectWorkbuddyFile(store, { tool, path, fileId, offset }
 
     const u = rec?.message?.usage;
     if (!u || !rec.id || !Number.isFinite(rec.timestamp)) return;
-    const inputRaw = u.input_tokens || 0;
-    const cached = Math.min(u.cache_read_input_tokens || 0, inputRaw);
-    const output = u.output_tokens || 0;
+    // #96：数字形态的字符串先转整数再相加（tokens.js）
+    const inputRaw = tokenCount(u.input_tokens);
+    const cached = Math.min(tokenCount(u.cache_read_input_tokens), inputRaw);
+    const output = tokenCount(u.output_tokens);
     if (inputRaw + output <= 0) return;
 
     const pd = rec.providerData || {};

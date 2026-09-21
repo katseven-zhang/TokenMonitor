@@ -106,6 +106,24 @@ function migrate(db) {
       try { updRates.run(n, r.model); } catch { /* 归一后与既有键冲突：保留旧行，下次学习覆盖 */ }
     }
   }
+  /**
+   * #96 修复字符串拼接出来的 total。
+   *
+   * 采集器此前会在用量字段是"数字形态的字符串"时把加法做成拼接
+   * （`"123" + 0 + 0 + 456` → `"12300456"`），而 total_tokens 是 INTEGER 列，
+   * SQLite 的亲和性又把这串文本落成整数 1230 万 —— 一次 579 token 的调用被记成
+   * 四个数量级之外的数字。修好采集侧之后坏行不会自己变好：dedup_key 没变，重扫走
+   * INSERT OR IGNORE，补登那条只在 output 更大时触发。
+   *
+   * 所以按 docs/ARCHITECTURE.md 的落库恒等式 `total = input + cached + cache_write
+   * + output`（全部十个采集器都满足，reasoning 不进 total）重算一次。恒等式成立的行
+   * 不满足 WHERE，一条都不会被改写，所以这条修复是幂等的、每次启动跑一遍代价是一趟扫描。
+   * 桌面端的对偶手段是 COLLECTOR_REVISION 整库重建。
+   */
+  db.exec(`UPDATE events
+           SET total_tokens = input_tokens + cached_input + cache_write + output_tokens
+           WHERE total_tokens IS NOT NULL
+             AND total_tokens <> input_tokens + cached_input + cache_write + output_tokens`);
 }
 
 function openDatabaseWithRetry(dbPath, maxRetries = 10, delayMs = 100) {
@@ -160,6 +178,12 @@ export class Store {
         input_tokens = ?, cached_input = ?, cache_write = ?,
         output_tokens = ?, reasoning_tokens = ?, total_tokens = ?
       WHERE dedup_key = ? AND output_tokens < ?`);
+    // #96 同一条补登通道用于 project：Pi 的 project 只写在文件首行的 session 记录里，
+    // 首行带 BOM 时解析失败 → 之后每条事件都带 project=null，重扫时 dedup_key 命中、
+    // 用量列又不需要补，于是永远修不好。存量行为 NULL 且这一行读到了归属才填，
+    // 绝不覆盖已有 project（同一会话可能被别的目录续写）。
+    this._backfillProject = this.db.prepare(
+      'UPDATE events SET project = ? WHERE dedup_key = ? AND project IS NULL');
     this._insertToolCall = this.db.prepare(`
       INSERT OR IGNORE INTO tool_calls (ts, tool, name, session_id, dedup_key)
       VALUES (?, ?, ?, ?, ?)`);
@@ -206,6 +230,8 @@ export class Store {
       e.output_tokens || 0, e.reasoning_tokens || 0, e.total_tokens || 0,
       e.dedup_key, e.output_tokens || 0
     );
+    // 事件数不变，只是把已有行补全；project 缺过就一并填上（见 _backfillProject 注释）
+    if (e.project) this._backfillProject.run(e.project, e.dedup_key);
     return 0; // 事件数不变，只是把已有行补全
   }
 

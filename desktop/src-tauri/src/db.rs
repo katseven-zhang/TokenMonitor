@@ -79,7 +79,9 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     //    #79 dsh 旧结构定键带上 turn/step（此前同 seq 的后一条整条顶掉前一条）。
     // 6: #78 事件模型名按"去空白 + 小写"归一——不归一时同一模型按来源/大小写被拆成
     //    多行，且价格表（全小写键）再也匹配不上，只能靠手工往 aliases 补大小写变体。
-    const COLLECTOR_REVISION: &str = "6";
+    // 7: #96 用量字段是数字形态的字符串时按整数读出（此前字符串一律记 0，这条用量消失），
+    //    grok 的 `modelUsage:{}` 不再丢掉整轮，Pi 首行 BOM 不再丢掉 project。
+    const COLLECTOR_REVISION: &str = "7";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",

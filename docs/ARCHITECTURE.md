@@ -31,6 +31,17 @@ menubar/                 macOS 菜单栏 App（Swift/AppKit，需 .app bundle）
 `reasoning_tokens` 只作信息列，**任何源都不得把它再加进 total**——Pi 与 OpenCode 的 reasoning
 都已含在 output 内，重复相加会凭空多算。
 
+**相加之前必须逐项转整数**（#96）。上游 JSON 里的用量字段可能是数字，也可能是数字形态的
+字符串（网关回填 usage 的常见写法），而 JS 的 `+` 遇到字符串做的是拼接：
+`"123" + 0 + 0 + 456 → "12300456"`。`total_tokens` 是 INTEGER 列，SQLite 的亲和性又会把这串
+文本落成整数，于是一次 579 token 的调用被记成 1230 万——不报错、不计坏行，面板上一切正常。
+规则落在 `src/collectors/tokens.js tokenCount()`（claude/ccmr、dsh、grok、pi、opencode、
+workbuddy、zcode 七个采集器共用；codex 的 `num()` 与 antigravity 的 `asNumber()` 早就是这个
+语义），桌面端对应 `collectors.rs::number()`（此前它对字符串一律给 0，等于另一端少记），双端共享夹具见
+`test/run.mjs` 的 [27] 段与 `collectors.rs::stringly_typed_usage_and_empty_model_usage_match_node`。
+存量坏行：桌面端由 `COLLECTOR_REVISION` 整库重建，Node 端没有整库重建通道（`dedup_key` 没变时
+重扫只会 `INSERT OR IGNORE`），因此 `store.js migrate()` 按上面那条恒等式重算一次不满足恒等式的行。
+
 ## 数据源格式笔记
 
 ### Claude Code / ccmr（同一解析器）
@@ -132,7 +143,7 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 - 桌面：`desktop/src-tauri/src/model.rs normalize_model()`，`collectors.rs` 五个产事件的位置
   （JSONL / zcode / opencode / antigravity）全部走它；价表侧 `pricing.rs::parse` 对 models 与
   aliases 的键同样归一（配置写成 `"GLM-5.3-Flash"` 也能命中，不再需要手工补大小写别名），
-  历史缓存由 `db.rs COLLECTOR_REVISION = 6` 整库重建
+  历史缓存由 `db.rs COLLECTOR_REVISION = 7` 整库重建
 - **两处刻意不同**：① 模型名缺失时 Node 落 `NULL`（列可空），桌面落哨兵 `unknown`
   （`Event.model` 是 `String`、列 `NOT NULL`），两边各自只有一行，不参与任何黄金数；
   ② 别名路由（`deepseek-flash` 一类"这个 id 该按哪个键计费"）不在词法规则里——Node 那张表

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { win32 } from 'node:path';
 import * as fzstd from 'fzstd';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 /**
  * dsh（DeepSeek Harness）采集器：~/.dsh/sessions 下 zstd 压缩的会话快照。
@@ -52,10 +53,11 @@ export async function collectDshFile(store, { path, fileId }) {
 
   const record = (rec, u, dedupKey, recModel) => {
     if (!u || !Number.isFinite(rec.time)) return;
-    const input = u.inputTokens || 0;
-    const cached = u.cacheReadTokens || 0;
-    const cacheWrite = u.cacheWriteTokens || 0;
-    const output = u.outputTokens || 0;
+    // #96：先转整数再相加——字符串形态的用量字段会让 total 变成拼接结果（tokens.js）
+    const input = tokenCount(u.inputTokens);
+    const cached = tokenCount(u.cacheReadTokens);
+    const cacheWrite = tokenCount(u.cacheWriteTokens);
+    const output = tokenCount(u.outputTokens);
     const total = input + cached + cacheWrite + output;
     if (total <= 0) return;
     inserted += store.insertEvent({
@@ -68,7 +70,7 @@ export async function collectDshFile(store, { path, fileId }) {
       cached_input: cached,
       cache_write: cacheWrite,
       output_tokens: output,
-      reasoning_tokens: u.reasoningTokens || 0,
+      reasoning_tokens: tokenCount(u.reasoningTokens),
       total_tokens: total,
       dedup_key: dedupKey,
     });
