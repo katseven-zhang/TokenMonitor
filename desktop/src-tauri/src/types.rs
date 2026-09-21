@@ -468,6 +468,10 @@ pub struct SessionReplayToolCall {
     pub completed_at: Option<String>,
     pub duration_ms: Option<i64>,
     pub is_error: bool,
+    /// Continuation chunks waiting for the single join at the end of parsing.
+    /// Never serialized: readers only ever see the merged `output`.
+    #[serde(skip, default)]
+    pub output_parts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

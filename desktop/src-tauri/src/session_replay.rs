@@ -168,6 +168,7 @@ fn parse_session_detail_with_agents(
         .collect::<Vec<_>>();
 
     for turn in &mut turns {
+        finalize_tool_outputs(turn);
         turn.duration_ms =
             duration_between(turn.started_at.as_deref(), turn.completed_at.as_deref());
     }
@@ -589,6 +590,7 @@ impl ReplayParseState {
                     completed_at: None,
                     duration_ms: None,
                     is_error: false,
+                    output_parts: Vec::new(),
                 };
                 let turn = self.turn_mut(&turn_id);
                 turn.tool_calls.push(tool.clone());
@@ -897,7 +899,12 @@ impl ReplayParseState {
                 } else {
                     output
                 };
-                tool.output = merge_process_output(tool.output.take(), output);
+                if let Some(output) = output {
+                    // Continuation output used to be re-merged into the whole
+                    // accumulated string on every event, which made a long-running
+                    // command quadratic; the chunks are joined once after parsing.
+                    tool.output_parts.push(output);
+                }
                 tool.stderr = stderr;
                 tool.status = status.clone();
                 tool.completed_at = if status.as_deref() == Some("running") {
@@ -924,6 +931,8 @@ impl ReplayParseState {
                     .find(|item| matches!(item, SessionReplayItem::ToolCall { tool, .. } if tool.call_id.as_ref() == Some(call_id)))
                 {
                     *item_tool = tool.clone();
+                    // The canonical tool entry keeps the pending chunks.
+                    item_tool.output_parts.clear();
                     raw_jsonl_line_numbers.push(line_number);
                 }
                 if let Some((cell_id, tool_ref)) = registered_cell {
@@ -973,6 +982,7 @@ impl ReplayParseState {
             completed_at: timestamp,
             duration_ms: None,
             is_error,
+            output_parts: Vec::new(),
         };
         turn.tool_calls.push(tool.clone());
         turn.items.push(SessionReplayItem::ToolCall {
@@ -1809,6 +1819,59 @@ fn merge_process_output(existing: Option<String>, new: Option<String>) -> Option
     }
 }
 
+/// Join a tool's accumulated output chunks once, after parsing finishes. Merging
+/// every continuation event into the growing string made a long-running command
+/// quadratic; this keeps `merge_process_output`'s rule that a chunk identical to
+/// what already accumulated adds nothing, and only compares content when the
+/// lengths already match.
+fn fold_output_parts(base: Option<String>, parts: Vec<String>) -> Option<String> {
+    let mut pieces: Vec<String> = Vec::with_capacity(parts.len() + 1);
+    let mut joined_len = 0usize;
+    if let Some(base) = base {
+        joined_len = base.len();
+        pieces.push(base);
+    }
+    for part in parts {
+        if joined_len == part.len() && pieces.join("\n") == part {
+            continue;
+        }
+        joined_len = if joined_len == 0 {
+            part.len()
+        } else {
+            joined_len + part.len() + 1
+        };
+        pieces.push(part);
+    }
+    (!pieces.is_empty()).then(|| pieces.join("\n"))
+}
+
+fn finalize_tool_outputs(turn: &mut SessionReplayTurn) {
+    let mut merged: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for tool in &mut turn.tool_calls {
+        if tool.output_parts.is_empty() {
+            continue;
+        }
+        tool.output = fold_output_parts(tool.output.take(), std::mem::take(&mut tool.output_parts));
+        if let Some(call_id) = tool.call_id.as_ref() {
+            merged.insert(call_id.clone(), tool.output.clone());
+        }
+    }
+    if merged.is_empty() {
+        return;
+    }
+    for item in &mut turn.items {
+        if let SessionReplayItem::ToolCall { tool, .. } = item {
+            if let Some(output) = tool
+                .call_id
+                .as_ref()
+                .and_then(|call_id| merged.get(call_id))
+            {
+                tool.output = output.clone();
+            }
+        }
+    }
+}
+
 fn merge_payload_info(payload: &Value, info: &Value) -> Value {
     let mut merged = payload.as_object().cloned().unwrap_or_default();
     merged.insert("info".to_string(), info.clone());
@@ -2549,6 +2612,60 @@ mod tests {
         // an event this parser does not know.
         assert!(detail.turns[0].reasoning_summaries.is_empty());
         assert_eq!(detail.summary.unrecognized_event_count, 1);
+    }
+
+    #[test]
+    fn parses_five_thousand_tool_events_without_quadratic_output_merging() {
+        let mut lines = vec![turn_context(
+            "2026-06-01T00:00:00.000Z",
+            "turn-1",
+            "gpt-5",
+            "/repo/app",
+        )];
+        for index in 0..2_500 {
+            lines.push(response_item(
+                "2026-06-01T00:00:01.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": format!("call-{index}"),
+                    "name": "exec",
+                    "input": format!("const r = await tools.exec_command({{\"cmd\":\"step {index}\"}}); text(r.output);"),
+                }),
+            ));
+            lines.push(response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": format!("call-{index}"),
+                    "output": format!("Script completed\nWall time 0.1 seconds\nOutput:\nchunk {index}"),
+                }),
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), lines.join("\n"));
+        let elapsed = started.elapsed();
+
+        assert_eq!(detail.turns[0].tool_calls.len(), 2_500);
+        assert!(detail.turns[0]
+            .tool_calls
+            .iter()
+            .all(|tool| tool.output.as_deref().is_some_and(|output| output.ends_with("chunk 0") || output.contains("chunk"))));
+        assert_eq!(
+            detail
+                .turns
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .filter(|item| matches!(item, SessionReplayItem::ToolCall { .. }))
+                .count(),
+            2_500
+        );
+        let budget = if cfg!(debug_assertions) { 20 } else { 2 };
+        assert!(
+            elapsed.as_secs() < budget,
+            "parsed 5 000 tool events in {elapsed:?}, budget {budget}s (debug={})",
+            cfg!(debug_assertions)
+        );
     }
 
     #[test]
