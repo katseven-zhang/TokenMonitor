@@ -4,8 +4,11 @@
  * Observable, GUI-free evidence: the published self-contained exe runs from a
  * temp path containing spaces AND Chinese characters, enforces single
  * instance (second copy exits immediately, first keeps running), and exits
- * cleanly when killed. If the artifact has not been built yet, the suite
- * skips with a note (CI green without the .NET SDK).
+ * cleanly when killed. A missing artifact is a HARD failure (exit 1), not a
+ * skip - the tray is native Rust Win32 since #32 and needs no .NET SDK, so
+ * "CI green without the SDK" is no longer an available excuse. Skipping is
+ * only possible by explicitly exporting SKIP_TRAY_ARTIFACT=1, and
+ * test/run.mjs #67 asserts that no CI job does that.
  *
  * Run: TOKENMONITOR_OFFLINE=1 node test/windows/tray.test.mjs
  */

@@ -100,6 +100,30 @@ assistant 消息就是如此），扫描一旦落在两次写入之间，占位�
 - 会改行的表按 `time_updated` 增量，并留回看窗口兜住多写入方的乱序提交
 - fixture 要覆盖"先扫到占位行、再更新"的两轮扫描，单轮 fixture 抓不到这类问题
 
+## 测试怎么被跑起来（#67）：加文件不用改 runner，但也不能指望"放进目录就算数"
+
+`npm test` 跑的是手写的 [test/run.mjs](test/run.mjs)，它**过去**不扫描目录，所以历史上出现过一个
+真实事故面：`test/windows/` 下 13 个套件（本机 426 条断言）和 `test/source-registry.test.mjs`
+都不在任何 runner 里——CI 全绿，而 source-registry 那条一直红着没人看见。现在 `[26]` 段做了三件事：
+
+| 档 | 覆盖什么 | 怎么跑 |
+|---|---|---|
+| A | `test/*.test.mjs`、`test/sources/**` | 全平台由 `npm test` 直接执行 |
+| B | `test/windows/**`（不依赖构建产物） | Windows 上由 `npm test` 执行；Linux/macOS 上由 windows-latest 的 `npm test` job 执行 |
+| C | `test/windows/gui.test.mjs`、`tray.test.mjs` | **不由 `npm test` 跑**：它们启动真 exe 且靠命名互斥量保证单实例，机器上只要有一个实例没退（含上一轮漏下的）就会假红。由 `windows.yml` 里"先 `build.ps1` 构建产物、再执行该套件"的专属 job 独占跑；本机要验就照 [docs/WINDOWS.md](docs/WINDOWS.md) 的证据表单跑 |
+
+对贡献者的三条硬规则：
+- **新增 `test/**/*.test.mjs` 会自动被接线**，不需要改 run.mjs；反过来说，放一个不进任何档的文件也过不了守卫。
+- **一个套件必须自己报出断言**：`[26]` 对每个被跑的文件断言 `exit 0` **且** `✓` 计数 ≥10 **且** `✗` 计数 =0。
+  把断言删空、或者写一个只 `console.log` 不做判定的文件，都会红。红的时候 runner 会把子套件的 `✗` 行原样打出来。
+- **不得新增"没有产物就当通过"的路径**：`SKIP_GUI_ARTIFACT` / `SKIP_TRAY_ARTIFACT` 只允许本地临时放行，
+  C 档守卫会拦住任何把它们写进 workflow 的 job；同样禁止给测试 job 加 `continue-on-error: true`。
+  这些守卫本身也带负例自检（`#67 自检·…`），证明它们真的会红。
+
+CI 侧：`test.yml`（三平台 × 两 Node 版本的 `npm test` + 安装冒烟 + import 冒烟）、
+`windows.yml`（Windows 源码烟测 / `npm test` / gui 构建+行为 / tray 构建+行为）、
+`desktop.yml`（桌面版，含 `workflow_dispatch` 的三个故障探针，用来证明门能红）。
+
 ## 其他约定
 
 - 零依赖原则：后端只用 Node 内置模块（`node:sqlite`/`node:http`/`node:fs`）；前端零构建（vanilla JS + ECharts UMD）

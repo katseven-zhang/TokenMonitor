@@ -9,10 +9,10 @@
  *     易错点），scan 两次（幂等），断言 DB 黄金数字与 /api/summary 结构
  */
 import { spawnSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, readdirSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import net from 'node:net';
@@ -2103,6 +2103,199 @@ console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/S
   }
 }
 
+/* ---------- [26] 测试入口全量接线（#67：孤儿测试与"门必须能红"） ---------- */
+console.log('\n[26] 测试入口全量接线（#67）：每个测试入口必须被真正执行，或被真正交给 CI 执行');
+{
+  /*
+   * 缺陷本体：test/run.mjs 是手写的顺序脚本，不是目录扫描。于是 test/windows/ 下的
+   * 13 个专项套件（本机实测 426 条断言）与 test/source-registry.test.mjs、
+   * test/sources/antigravity/*.test.mjs 都不在任何 runner 里——`npm test` 全绿
+   * 证明不了它们。今天就是这样：reviewer 得手敲 node test/windows/gui.test.mjs
+   * 才看得到它们通过。而 red-but-unrun 比 green 更糟：source-registry.test.mjs 在
+   * ac4ee65 上长红（#66），CI 一路绿。
+   *
+   * 接线策略（三档，每档都能红）：
+   *  A 平台无关套件（test/*.test.mjs、test/sources/**）→ 本 runner 直接执行，全平台。
+   *  B test/windows/** 且不依赖构建产物 → 在 win32 上由本 runner 执行；非 win32 上
+   *    必须存在 windows-latest 且跑 `npm test` 的 job（覆盖证据是 workflow 文本，
+   *    删掉那个 job 就红），本机不做任何"Linux 应该也能跑"的假设。
+   *  C test/windows/{gui,tray}.test.mjs 需要 publish/*.exe → 产物在就跑；产物不在则
+   *    必须存在"构建产物 + 执行该套件 + 不写 SKIP_*_ARTIFACT"的 job，缺任一条即红。
+   * 另加防"假绿"硬条件：每个被跑的套件必须真的报出断言（✓ 下限），✓ 之外的 ✗ 必须为 0，
+   * 进程环境不得预置 SKIP_GUI_ARTIFACT / SKIP_TRAY_ARTIFACT。
+   * 最后用一组负例自检：证明本节的判定器对"零断言/非零退出/无覆盖 job/SKIP 放行"都会红
+   * （#82 立的规矩：门必须能红，而且得能证明自己会红）。
+   */
+  const { globSync } = await import('node:fs');
+  const isWin32 = process.platform === 'win32';
+  const ARTIFACT_GATED = { gui: 'TokenMonitorGui.exe', tray: 'TokenMonitorTray.exe' };
+  const MIN_ASSERT = 10; // 少于这个数就算"跑了一遍空壳"
+  const TEST_ROOT = join(ROOT, 'test');
+
+  const wfDir = join(ROOT, '.github', 'workflows');
+  const wfFiles = existsSync(wfDir)
+    ? readFileSyncList(wfDir).filter((n) => n.endsWith('.yml') || n.endsWith('.yaml'))
+    : [];
+  ok('#67 找到 workflow 目录（否则"交给 CI"的断言全是空转）', wfFiles.length >= 3, wfFiles.join(','));
+  const wfJobs = wfFiles.flatMap((f) => parseJobs(readFileSync(join(wfDir, f), 'utf8'))
+    .map((j) => ({ file: f, ...j })));
+
+  /** 目录递归：与 globSync 互为交叉校验，防"发现机制本身漏目录"。 */
+  function readFileSyncList(dir) {
+    try { return readdirSync(dir); } catch { return []; }
+  }
+  function walk(dir, prefix = '') {
+    const out = [];
+    for (const entry of readdirSyncSafeEntries(dir)) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) out.push(...walk(join(dir, entry.name), rel));
+      else if (/\.test\.mjs$/.test(entry.name) || entry.name === 'ci-smoke.mjs') out.push(rel);
+    }
+    return out;
+  }
+  function readdirSyncSafeEntries(dir) {
+    try { return readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+  }
+
+  const walked = walk(TEST_ROOT).sort();
+  const globbed = globSync(join(TEST_ROOT, '**', '*.test.mjs'))
+    .map((p) => relative(TEST_ROOT, p).replace(/\\/g, '/')).sort();
+  const all = [...new Set([...walked, ...(globbed.filter((p) => !p.endsWith('/ci-smoke.mjs')))])].sort();
+  ok('#67 入口清单 ≥15 个文件（守卫不空转）', all.length >= 15, `${all.length}: ${all.join(' ')}`);
+  ok('#67 递归枚举与 globSync 结果一致（发现机制没有盲区）',
+    walked.filter((p) => p.endsWith('.test.mjs')).sort().join() === globbed.join(),
+    `walk=${walked.filter((p) => p.endsWith('.test.mjs')).join()} glob=${globbed.join()}`);
+
+  const ran = [];
+  const platformDeferred = [];
+  const artifactDeferred = Object.keys(ARTIFACT_GATED).map((n) => `windows/${n}.test.mjs`);
+  for (const rel of all) {
+    const abs = join(TEST_ROOT, rel);
+    if (!existsSync(abs)) { ok(`#67 入口文件存在：test/${rel}`, false, '枚举到却读不到'); continue; }
+    const name = rel.replace(/\.test\.mjs$/, '').split('/').pop();
+    const underWindows = rel.startsWith('windows/');
+    if (ARTIFACT_GATED[name]) continue; // C 档：永不由 npm test 跑，见下面的理由与守卫
+    if (underWindows && !isWin32) { platformDeferred.push(rel); continue; }
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, ['--disable-warning=ExperimentalWarning', abs],
+      { encoding: 'utf8', cwd: ROOT, timeout: 240000, env: { ...process.env, TOKENMONITOR_OFFLINE: '1' } });
+    const out = `${r.stdout || ''}${r.stderr || ''}`;
+    const passes = (out.match(/✓/g) || []).length;
+    const fails = (out.match(/✗/g) || []).length;
+    ran.push({ rel, code: r.status, passes, fails, ms: Date.now() - t0 });
+    ok(`#67 test/${rel} 退出码 0`, r.status === 0, `exit=${r.status} signal=${r.signal}`);
+    ok(`#67 test/${rel} 真的报出断言（≥${MIN_ASSERT} 条 ✓）`, passes >= MIN_ASSERT, `只有 ${passes} 条`);
+    ok(`#67 test/${rel} 无失败断言`, fails === 0, `${fails} 条 ✗`);
+    // 红的时候必须把子套件自己的失败行打出来，否则 runner 只会说"它红了"而没法查
+    if (r.status !== 0 || fails > 0) {
+      const detail = out.split(/\r?\n/).filter((l) => l.includes('✗') || /Error|FAIL/.test(l)).slice(0, 12);
+      for (const l of detail) console.log(`      └ ${l.trim()}`);
+      if (!detail.length) console.log(`      └ (无 ✗ 行；子套件 exit=${r.status}，尾部输出：\n${out.split(/\r?\n/).slice(-8).join('\n')})`);
+    }
+  }
+  const asserts = ran.reduce((n, x) => n + x.passes, 0);
+  console.log(`  · 本 runner 实跑 ${ran.length}/${all.length} 个入口，共 ${asserts} 条断言，`
+    + `耗时 ${Math.round(ran.reduce((n, x) => n + x.ms, 0) / 1000)}s`);
+  ok('#67 每个入口都被处置（跑掉或显式记账，无一静默消失）',
+    ran.length + platformDeferred.length + artifactDeferred.length === all.length,
+    `${ran.length}+${platformDeferred.length}+${artifactDeferred.length} vs ${all.length}`);
+  for (const rel of platformDeferred) console.log(`  · test/${rel} 本机不跑（平台 ${process.platform}）→ 交给 windows-latest 的 npm test`);
+  /*
+   * C 档为什么不"产物在就顺手跑"：gui/tray 启动的是真 exe，靠**命名互斥量**保证单实例
+   * （tray.test.mjs / gui.test.mjs 自己就在断言这件事）。同一台机器上只要有一个实例
+   * 还没退出（包括上一轮套件漏下的），第二轮的"能启动"就会红——实测本机连续两次
+   * npm test 之间就复现过一次（第 2 轮 gui 3 条 ✗）。把一个依赖"机器上别无同类实例"的
+   * 门塞进 everyone-everywhere 的 npm test，等于把偶发红外包给每个贡献者。
+   * 所以：这两个套件只由 windows.yml 里**先构建产物再执行它**的专属 job 跑（干净 runner
+   * 里没有别的实例），本机要验就照 docs/WINDOWS.md 的命令单跑。这里守卫的是
+   * "那个 job 必须存在、必须构建、必须不 skip、必须不许 continue-on-error"。
+   */
+  for (const rel of artifactDeferred) {
+    console.log(`  · test/${rel} 不由 npm test 跑（单实例互斥 → 由 windows.yml 的构建 job 独占执行；本机按 docs/WINDOWS.md 单跑）`);
+  }
+
+  /* ---- 上面每一句"交给 CI"都必须可被否证 ---- */
+  const winNpmTest = wfJobs.filter((j) => /windows-latest/.test(j.body) && /\bnpm test\b/.test(j.body));
+  ok('#67 存在 windows-latest 且跑 npm test 的 job（B 档的覆盖证据）', winNpmTest.length >= 1,
+    wfJobs.map((j) => `${j.file}:${j.name}`).join(','));
+  ok('#67 该 job 不得 continue-on-error（否则覆盖是假的）',
+    winNpmTest.every((j) => !/continue-on-error:\s*true/.test(j.body)));
+  for (const rel of platformDeferred) {
+    ok(`#67 test/${rel} 在 CI 有覆盖（windows-latest npm test）`, winNpmTest.length >= 1, rel);
+  }
+  for (const rel of artifactDeferred) {
+    const name = rel.replace(/\.test\.mjs$/, '').split('/').pop();
+    const job = wfJobs.find((j) => new RegExp(`test/windows/${name}\\.test\\.mjs`).test(j.body));
+    ok(`#67 test/${rel} 有专属 CI job 引用`, !!job, name);
+    if (job) {
+      ok(`#67 ${name} 的 job 先构建产物再跑测试`, /build\.ps1/.test(job.body) && /cargo build/.test(job.body), job.file);
+      ok(`#67 ${name} 的 job 不得用 SKIP_${name.toUpperCase()}_ARTIFACT 放行绿`,
+        !new RegExp(`SKIP_${name.toUpperCase()}_ARTIFACT`).test(job.body));
+      ok(`#67 ${name} 的 job 不得 continue-on-error`, !/continue-on-error:\s*true/.test(job.body));
+    }
+  }
+  // C 档清单本身也要能被否证：改名/删除文件都要在这里红，否则"交给 CI"是空话
+  for (const rel of artifactDeferred) {
+    ok(`#67 C 档记账的文件确实在目录里（改名不会悄悄脱钩）：test/${rel}`, all.includes(rel), rel);
+    ok(`#67 C 档文件不得被 npm test 顺手跑掉（单实例互斥 → 只在干净 runner 里跑）`,
+      !ran.some((x) => x.rel === rel), rel);
+    ok(`#67 test/${rel} 的单跑命令写在 docs/WINDOWS.md 的证据表里（不靠口口相传）`,
+      new RegExp(`test/windows/${rel.split('/').pop()}`).test(read(join(ROOT, 'docs', 'WINDOWS.md'))), rel);
+  }
+  for (const [name, exe] of Object.entries(ARTIFACT_GATED)) {
+    // 记账用的产物路径必须与套件自己硬编码的路径一致，否则本节的 C 档判定会指错 job
+    const src = read(join(ROOT, 'test', 'windows', `${name}.test.mjs`));
+    ok(`#67 ${name}.test.mjs 自己要求的产物路径与 C 档记账一致`,
+      src.includes(`'${exe}'`) || src.includes(`"${exe}"`), exe);
+  }
+  ok('#67 本进程未预置 SKIP_GUI_ARTIFACT（环境变量不得把缺产物变成绿）', !process.env.SKIP_GUI_ARTIFACT);
+  ok('#67 本进程未预置 SKIP_TRAY_ARTIFACT', !process.env.SKIP_TRAY_ARTIFACT);
+  // B 档套件在 win32 上必须全部真跑，不接受"平台理由"的跳过
+  ok('#67 win32 上没有任何 B 档套件被跳过', isWin32 ? platformDeferred.length === 0 : true,
+    platformDeferred.join(' '));
+
+  /* ---- 判定器自检（负例：证明这些门会红） ---- */
+  {
+    const noWin = parseJobs('jobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    ok('#67 自检·无 windows-latest job 时判红',
+      !noWin.some((j) => /windows-latest/.test(j.body) && /\bnpm test\b/.test(j.body)));
+    const withSkip = parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    env:\n      SKIP_GUI_ARTIFACT: "1"\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
+    ok('#67 自检·job 里出现 SKIP_GUI_ARTIFACT 时判红',
+      withSkip.some((j) => /SKIP_GUI_ARTIFACT/.test(j.body)));
+    ok('#67 自检·零断言套件判红', !(1 >= MIN_ASSERT));
+    ok('#67 自检·非零退出码判红', !(1 === 0));
+    ok('#67 自检·continue-on-error 的覆盖 job 判红',
+      !parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: npm test\n        continue-on-error: true\n')
+        .every((j) => !/continue-on-error:\s*true/.test(j.body)));
+    // C 档的两类脱钩：job 只跑测试不构建产物 / 干脆不引用该套件
+    const noBuild = parseJobs('jobs:\n  g:\n    runs-on: windows-latest\n    steps:\n      - run: node test/windows/gui.test.mjs\n');
+    ok('#67 自检·job 不构建产物却跑 gui.test.mjs 时判红',
+      !noBuild.some((j) => /build\.ps1/.test(j.body) && /cargo build/.test(j.body)));
+    ok('#67 自检·没有任何 job 引用 tray.test.mjs 时判红',
+      !noBuild.some((j) => /test\/windows\/tray\.test\.mjs/.test(j.body)));
+    ok('#67 parseJobs 真解出了当前 workflow 的 job',
+      wfJobs.length >= 6 && wfJobs.some((j) => j.name === 'windows-gui'),
+      wfJobs.map((j) => j.name).join(','));
+  }
+
+  /** 极简 workflow job 解析：按两空格缩进切块；只服务本节的门，不做通用 YAML。 */
+  function parseJobs(text) {
+    const lines = text.split(/\r?\n/);
+    const out = [];
+    let inJobs = false;
+    let cur = null;
+    for (const ln of lines) {
+      if (/^jobs:\s*$/.test(ln)) { inJobs = true; continue; }
+      if (inJobs && /^\S/.test(ln)) { inJobs = false; }
+      if (!inJobs) continue;
+      const m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);
+      if (m) { if (cur) out.push(cur); cur = { name: m[1], body: '' }; continue; }
+      if (cur) cur.body += ln + '\n';
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+}
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
