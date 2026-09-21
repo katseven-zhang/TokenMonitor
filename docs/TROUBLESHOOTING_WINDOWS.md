@@ -51,10 +51,13 @@ tasklist /FI "PID eq <上一步的PID>"
 
 ```powershell
 schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 任务是否存在、上次运行结果
-node bin\tokenmonitor.js install-agent --force           # 覆盖式重建任务
+node bin\tokenmonitor.js install-agent                   # 同一条命令：直接覆盖更新
+node bin\tokenmonitor.js install-agent --force           # 冲突的另一条命令：确认替换它
 ```
 
-- **任务已存在**：直接重跑 `install-agent` 即为覆盖更新；`--force` 语义相同。
+- **任务已存在且就是本命令**（同 node 路径、同脚本、同端口）：直接重跑 `install-agent` 即为覆盖更新，不需要 `--force`。
+- **任务已存在但指向另一条命令**（换了 node、换了安装目录、改了端口，或同名任务被别的东西占用）：`install-agent` 会拒绝并打印"已注册的是哪条、这次要写的是哪条"，此时才用 `--force` 明确替换。`--force` 不再是一个不起作用的标志（#96 第 10 条）。
+- **`install-agent` 报"任务定义看起来包含密钥"**：这是安装路径自检（#96 第 5 条）。它只认凭据的**形状**（`secret=…`、`sk-…`、`Bearer …`），目录名叫 `secretpad`/`Authorization` 不会触发；真触发时错误消息点名命中的形状但不回显值，把安装目录换到别处即可。
 - **node 路径变化**（升级/移动 Node 安装位置后）：重新执行 `install-agent`，动作里的 node 绝对路径会更新。
 - **登录未触发**：任务为当前用户登录触发（LogonTrigger），注销重登或 `schtasks /Run /TN "TokenMonitor-Server"` 手动启动验证。
 - 卸载时提示任务不存在属正常（幂等卸载，见 [../src/platform/windows-service.js](../src/platform/windows-service.js)；测试 [../test/windows/service.test.mjs](../test/windows/service.test.mjs)）。
