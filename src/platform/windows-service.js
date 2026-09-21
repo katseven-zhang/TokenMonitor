@@ -98,6 +98,12 @@ export function installWindowsAgent({
   }
 }
 
+/**
+ * schtasks 在"该任务名不存在"时打印的是这一句。其它失败——拒绝访问、Task Scheduler
+ * 服务未运行、任务被组策略锁住——同样以退出码 1 结束，不能一并当成"本就没有"。
+ */
+const TASK_ABSENT = /cannot find the file specified|cannot find the task/i;
+
 export function uninstallWindowsAgent({
   log = console.log,
   run = defaultRun,
@@ -105,13 +111,14 @@ export function uninstallWindowsAgent({
   try {
     log(run('schtasks.exe', ['/Delete', '/TN', WINDOWS_TASK_NAME, '/F']) || `removed ${WINDOWS_TASK_NAME}`);
   } catch (err) {
-    const msg = String(err?.stderr || err?.message || err);
-    if (/cannot find|cannot find the file|ERROR: The system cannot find/i.test(msg)
-      || /The specified task name/.test(msg)
-      || err.status === 1) {
+    const detail = String(err?.stderr || err?.stdout || err?.message || err).trim();
+    if (TASK_ABSENT.test(detail)) {
       log(`task ${WINDOWS_TASK_NAME} was not present`);
       return;
     }
-    throw err;
+    // #86：修前判据里有 `err.status === 1` 和一条宽泛的 /cannot find/，等于把
+    // "退出码 1 的一切失败"都说成"任务本就不存在"并静默返回 0——用户以为卸载干净了，
+    // 下次登录服务照样起来，且再也看不到原因。真失败必须带着 schtasks 的原文抛出。
+    throw new Error(`Failed to remove ${WINDOWS_TASK_NAME} (current-user Task Scheduler): ${detail}`);
   }
 }
