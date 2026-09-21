@@ -1,5 +1,6 @@
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
+import { applyDocumentLanguage } from "./lib/document-language";
 import en from "./locales/en.json";
 import zh from "./locales/zh.json";
 import ja from "./locales/ja.json";
@@ -26,6 +27,8 @@ const getInitialLanguage = (): string => {
   return "en";
 };
 
+i18n.on("languageChanged", applyDocumentLanguage);
+
 void i18n
   .use(initReactI18next)
   .init({
@@ -39,6 +42,9 @@ void i18n
     interpolation: {
       escapeValue: false, // React already protects against XSS
     },
+  })
+  .then(() => {
+    applyDocumentLanguage(i18n.language);
   });
 
 export default i18n;

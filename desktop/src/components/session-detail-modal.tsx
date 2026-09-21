@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { fetchSessionDetail, fetchSessionRawPage, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
 import { formatNumber, formatPercent } from "@/lib/formatters";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
+import { writeClipboard } from "@/lib/clipboard";
 import { SessionQuotaUsageView } from "./session-quota-usage";
 
 type SessionDetailModalProps = {
@@ -29,6 +30,8 @@ const RAW_PREVIEW_LINE_LENGTH = 240;
 // session can no longer be copied whole into the IPC payload and then the DOM.
 const RAW_PAGE_LINES = 2_000;
 const RAW_RENDER_CAP_LINES = 20_000;
+// How long a copy confirmation or a copy failure stays on screen.
+const COPY_FEEDBACK_MS = 1_400;
 const COLLAPSED_PREVIEW_LINE_LENGTH = 240;
 const COLLAPSED_AGENT_LIMIT = 3;
 const DISCLOSURE_BUTTON_CLASS = "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -1131,9 +1134,11 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const detail = loadedDetail?.path === activePath ? loadedDetail : null;
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("timeline");
-  const [copied, setCopied] = useState(false);
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   const [copiedProjectPath, setCopiedProjectPath] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [rawLoadFailed, setRawLoadFailed] = useState(false);
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
   const [showFullRaw, setShowFullRaw] = useState(false);
   const [rawJsonlLines, setRawJsonlLines] = useState<string[]>([]);
@@ -1168,6 +1173,9 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     setDetail(null);
     setError(null);
     setActiveTab("timeline");
+    setCopiedLabel(null);
+    setCopyError(null);
+    setRawLoadFailed(false);
     setCopiedSessionId(false);
     setCopiedProjectPath(null);
     setExpandedTurns(new Set());
@@ -1248,7 +1256,9 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     path,
     displayName: path.split(/[\\/]/).filter(Boolean).pop() || path,
   });
-  const threadName = detail ? detail.threadName : t("sessions.detail.loading_replay");
+  // The header used to read "Loading replay…" forever after a failed load, even
+  // though the body had already replaced the spinner with the error.
+  const threadName = detail ? detail.threadName : error ? null : t("sessions.detail.loading_replay");
   const displayedSessionId = cleanSessionId(detail?.sessionId ?? session.sessionId);
   useEffect(() => {
     if (!detail) return;
@@ -1264,7 +1274,11 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
         setRawJsonlLines([...collected]);
       }
     })().catch(() => {
-      if (!cancelled) setRawJsonlLines([]);
+      if (cancelled) return;
+      // A failed page used to wipe the preview silently, so the tab looked like
+      // an empty transcript instead of a read error. Keep whatever arrived and
+      // say what happened.
+      setRawLoadFailed(true);
     });
     return () => {
       cancelled = true;
@@ -1275,24 +1289,50 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const conversation = useMemo(() => detail ? buildSessionConversation(detail.turns) : [], [detail]);
   const patchCounts = useMemo(() => detail?.turns.map(countTurnPatches) ?? [], [detail]);
 
+  function reportCopyFailure() {
+    const message = t("sessions.detail.copy_failed");
+    setCopyError(message);
+    window.setTimeout(() => setCopyError((current) => (current === message ? null : current)), COPY_FEEDBACK_MS);
+  }
+
   async function copySessionId() {
-    await navigator.clipboard?.writeText(displayedSessionId);
+    const outcome = await writeClipboard(displayedSessionId);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
     setCopiedSessionId(true);
-    window.setTimeout(() => setCopiedSessionId(false), 1400);
+    window.setTimeout(() => setCopiedSessionId(false), COPY_FEEDBACK_MS);
   }
 
   async function copyRawJsonl() {
     if (!detail) return;
-    await navigator.clipboard?.writeText(rawJsonlLines.join("\n"));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    const text = rawJsonlLines.join("\n");
+    // Paging caps what reaches the clipboard, so claiming the whole transcript
+    // was copied would be a lie whenever the loaded set is shorter than the file.
+    const label = rawIsTruncated
+      ? t("sessions.detail.copy_loaded_lines", { lines: formatNumber(rawJsonlLines.length) })
+      : t("sessions.detail.copied");
+    const outcome = await writeClipboard(text);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
+    setCopiedLabel(label);
+    window.setTimeout(() => setCopiedLabel((current) => (current === label ? null : current)), COPY_FEEDBACK_MS);
   }
 
   async function copyProjectPath(path: string) {
-    if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(path);
+    const outcome = await writeClipboard(path);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
     setCopiedProjectPath(path);
-    window.setTimeout(() => setCopiedProjectPath((current) => current === path ? null : current), 1400);
+    window.setTimeout(() => setCopiedProjectPath((current) => current === path ? null : current), COPY_FEEDBACK_MS);
   }
 
   function toggleTurn(key: string) {
@@ -1588,6 +1628,11 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                         })}
                       </span>
                     ) : null}
+                    {rawLoadFailed ? (
+                      <span role="alert" className="ml-2 font-semibold text-error">
+                        {t("sessions.detail.raw_load_failed")}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1598,12 +1643,15 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                   ) : null}
                   <Button variant="secondary" size="sm" onClick={() => void copyRawJsonl()}>
                     <Clipboard className="mr-2 h-4 w-4" />
-                    {copied ? t("sessions.detail.copied") : t("sessions.detail.copy")}
+                    {copiedLabel ?? t("sessions.detail.copy")}
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => void revealInFileManager(detail.path)}>
                     <FolderOpen className="mr-2 h-4 w-4" />
                     {t("sessions.detail.reveal_in_file_manager")}
                   </Button>
+                  {copyError ? (
+                    <span role="alert" className="text-xs font-semibold text-error">{copyError}</span>
+                  ) : null}
                 </div>
               </div>
               <pre className="min-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-surface p-4 font-mono text-xs leading-relaxed text-foreground">

@@ -107,7 +107,7 @@ export function SessionQuotaUsageView({ usage, detailed = false }: SessionQuotaU
                   );
                 })}
               </span>
-            ) : <span className="min-w-0 text-right font-semibold text-muted-foreground">--</span>}
+            ) : <span className="min-w-0 text-right font-semibold text-muted-foreground">{t("sessions.quota.none")}</span>}
           </div>
         ))}
       </div>
@@ -126,7 +126,7 @@ export function SessionQuotaUsageView({ usage, detailed = false }: SessionQuotaU
           <div key={group.key} className="flex items-baseline gap-2 py-0.5">
             <div className="shrink-0 font-semibold text-muted-foreground">{group.label}</div>
             {group.windows.length === 0 ? (
-              <div className="font-bold text-muted-foreground">--</div>
+              <div className="font-bold text-muted-foreground">{t("sessions.quota.none")}</div>
             ) : (
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {group.windows.map((window, index) => (

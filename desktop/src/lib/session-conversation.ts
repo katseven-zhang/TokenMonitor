@@ -1,4 +1,5 @@
 import type { SessionReplayDetail } from "./api";
+import { findLastItem } from "./es-compat";
 
 const EXEC_TOOL_NAMES = new Set(["exec", "exec_command"]);
 
@@ -39,7 +40,7 @@ function timelineEntries(items: ReplayItem[]): TimelineEntry[] {
 
   for (const item of items) {
     if (item.kind === "tokenUsage") {
-      const previousEntry = entries.findLast((entry) => isVisibleTimelineItem(entry.item));
+      const previousEntry = findLastItem(entries, (entry) => isVisibleTimelineItem(entry.item));
       const attached = previousEntry?.tokenUsage;
       if (attached && attached.model === item.model) {
         // Adjacent usage events (parallel tools, legacy fallback tails) fold into one
@@ -379,7 +380,7 @@ function resolveStringVariable(value: string, callStart: number) {
   const name = value.slice(callStart).match(/^\s*([A-Za-z_$][\w$]*)/)?.[1];
   if (!name) return null;
   const declarations = [...value.slice(0, callStart).matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*("(?:\\.|[^"\\])*")\s*;/gs)];
-  const declaration = declarations.findLast((match) => match[1] === name);
+  const declaration = findLastItem(declarations, (match) => match[1] === name);
   if (!declaration) return null;
   try {
     const parsed: unknown = JSON.parse(declaration[2]);
