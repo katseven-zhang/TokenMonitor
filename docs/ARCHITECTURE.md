@@ -121,6 +121,28 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 - ZCode 的 `model_usage` 只追加、不改行，rowid 水位够用——同为 sqlite 源也不能照抄增量策略，
   先确认那张表会不会删行、会不会原地更新
 
+## 模型名归一：同一模型在两端、跨来源都只能有一行
+
+模型标识是**大小写不敏感**的厂商 id：ZCode 记 `GLM-5.3-Flash`、WorkBuddy 记 `glm-5.3-flash`，
+是同一个模型。因此归一（去首尾空白 + 小写）必须在**采集侧、落库之前**做完——价表键全小写
+且两端的价格查找都是精确匹配，名字没归一就是静默不计费，面板里还会被拆成两行。
+
+- Node：`src/models.js normalizeModel()`，10 个采集器与 `store.js` 启动期 `migrate()`（把历史
+  大小写变体折进同一行）共用它
+- 桌面：`desktop/src-tauri/src/model.rs normalize_model()`，`collectors.rs` 五个产事件的位置
+  （JSONL / zcode / opencode / antigravity）全部走它；价表侧 `pricing.rs::parse` 对 models 与
+  aliases 的键同样归一（配置写成 `"GLM-5.3-Flash"` 也能命中，不再需要手工补大小写别名），
+  历史缓存由 `db.rs COLLECTOR_REVISION = 6` 整库重建
+- **两处刻意不同**：① 模型名缺失时 Node 落 `NULL`（列可空），桌面落哨兵 `unknown`
+  （`Event.model` 是 `String`、列 `NOT NULL`），两边各自只有一行，不参与任何黄金数；
+  ② 别名路由（`deepseek-flash` 一类"这个 id 该按哪个键计费"）不在词法规则里——Node 那张表
+  在 `models.js`，桌面那张在 `prices.json` 的 `aliases`，两端各自的价目表键不同，甚至对同一对
+  id 路由方向相反，合并任何一侧都会让另一侧不计费
+- 双端共享的黄金数（同一份记录、同一组期望）：`test/run.mjs` 的 [26] 段与
+  `desktop/src-tauri/src/collectors.rs`、`desktop/src-tauri/tests/sources.rs` 的 #78 块，
+  合并行 `glm-5.3-flash` = input 301200 / cached 1240000 / cache_write 60000 / output 140000
+  = 1741200 token
+
 ## 计价：DeepSeek 的峰谷价
 
 单价表 `~/.tokenmonitor/pricing.json` 记的是**峰时价**，`off_peak` 为谷时折扣系数（DeepSeek 为 0.5）。

@@ -77,7 +77,9 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     // while preserving cached data until each replacement transaction is ready.
     // 5: #75 Codex 首个采样/回落只认 last_token_usage，且 cache_write 认两种字段名；
     //    #79 dsh 旧结构定键带上 turn/step（此前同 seq 的后一条整条顶掉前一条）。
-    const COLLECTOR_REVISION: &str = "5";
+    // 6: #78 事件模型名按"去空白 + 小写"归一——不归一时同一模型按来源/大小写被拆成
+    //    多行，且价格表（全小写键）再也匹配不上，只能靠手工往 aliases 补大小写变体。
+    const COLLECTOR_REVISION: &str = "6";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",

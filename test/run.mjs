@@ -2169,6 +2169,102 @@ console.log('\n[25] Content-Security-Policy（#53：HTML 页面安全头；API/S
   }
 }
 
+/* ---------- [26] 模型名归一（#78：同一模型跨来源不得拆成两行，大小写变体要保住价格） ---------- */
+console.log('\n[26] 模型名归一（#78：跨来源同一模型只一行 + 全小写价表键命中）');
+/* 桌面端对偶：
+ * desktop/src-tauri/src/collectors.rs::model_name_normalization_rule_matches_node（词法表）
+ * desktop/src-tauri/src/collectors.rs::same_model_spelled_differently_across_sources_gets_one_name（解析层）
+ * desktop/src-tauri/tests/sources.rs::same_model_spelled_differently_across_sources_is_one_row（落库层）
+ * 修前桌面端只在价格查找时小写化，落库的模型名仍是原样：codex 记 GLM-5.3-Flash、
+ * claude-code 记 glm-5.3-flash 会在面板里拆成两行，且只有与价表键大小写一致的那行
+ * 拿得到成本。COLLECTOR_REVISION 升到 6 触发本地缓存重建；Node 端的对偶手段是
+ * store.js migrate() 的启动期 UPDATE（本段最后一条断言）。 */
+{
+  const { normalizeModel } = await import(pathToFileURL(join(ROOT, 'src/models.js')).href);
+  const { collectCodexFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/codex.js')).href);
+  const { collectClaudeFile } = await import(pathToFileURL(join(ROOT, 'src/collectors/claude.js')).href);
+  const { Store } = await import(pathToFileURL(join(ROOT, 'src/store.js')).href);
+  const { priceOf } = await import(pathToFileURL(join(ROOT, 'src/pricing.js')).href);
+
+  /* 同一条词法规则：去首尾空白 + 小写。
+   * 刻意不列 deepseek-flash / deepseek-v4-flash / deepseek-v4.1-flash——Node 端
+   * models.js 在归一时还走一张 ALIASES 路由表，桌面端的同类路由在 prices.json 的
+   * aliases 里，而且两端对同一对 id 的路由方向相反（各自的价目表键不同）。别名路由
+   * 不是词法规则，不进这张共享表。
+   * 空名两端不同也是既有约定：Node 落 NULL（events.model 可空），桌面落哨兵 unknown
+   * （Event.model 是 String、列 NOT NULL）；两边各自只有一行，不参与任何黄金数。 */
+  for (const [raw, want] of [
+    ['GLM-5.3-Flash', 'glm-5.3-flash'],
+    ['glm-5.3-flash', 'glm-5.3-flash'],
+    ['  GLM-5.3-FLASH  ', 'glm-5.3-flash'],
+    ['MiniMax-M2.7-HighSpeed', 'minimax-m2.7-highspeed'],
+    ['Pro/zai-org/GLM-5', 'pro/zai-org/glm-5'],
+    ['unknown', 'unknown'],
+  ]) ok(`#78 归一表 ${JSON.stringify(raw)} → ${want}`, normalizeModel(raw) === want, String(normalizeModel(raw)));
+  ok('#78 空名在 Node 端是 NULL（桌面端是 unknown，见 model.rs）', normalizeModel('   ') === null);
+
+  const CODEX_78 = [
+    '{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"GLM-5.3-Flash"}}}',
+    '{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000,"total_tokens":880000},"last_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000}}}}',
+    '{"timestamp":"2026-09-20T00:00:03Z","type":"turn_context","payload":{"model":"  GLM-5.3-FLASH  "}}',
+    '{"timestamp":"2026-09-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200000,"cached_input_tokens":900000,"cache_write_input_tokens":40000,"output_tokens":80000,"reasoning_output_tokens":30000,"total_tokens":1280000},"last_token_usage":{"input_tokens":400000,"cached_input_tokens":300000,"cache_write_input_tokens":10000,"output_tokens":30000,"reasoning_output_tokens":10000}}}}',
+  ].join('\n') + '\n';
+  const CLAUDE_78 = '{"timestamp":"2026-09-20T00:10:00Z","type":"assistant","sessionId":"claude-78","cwd":"/work/parity","requestId":"r-78","message":{"id":"msg-78","model":"glm-5.3-flash","usage":{"input_tokens":1200,"cache_read_input_tokens":340000,"cache_creation_input_tokens":20000,"output_tokens":60000,"output_tokens_details":{"thinking_tokens":7000}}}}\n';
+
+  const base = mkdtempSync(join(tmpdir(), 'model78-'));
+  const codexFile = join(base, 'rollout-2026-09-20T00-00-00-parity78.jsonl');
+  const claudeFile = join(base, 'parity78-transcript.jsonl');
+  writeFileSync(codexFile, CODEX_78);
+  writeFileSync(claudeFile, CLAUDE_78);
+  const store = new Store(join(base, 't78.db'));
+  const rc = await collectCodexFile(store, { path: codexFile, fileId: 'parity78', offset: 0, state: null, version: 3 });
+  const rk = await collectClaudeFile(store, { tool: 'claude-code', path: claudeFile, fileId: 'claude-78', offset: 0 });
+  const rows = store.db.prepare(`
+    SELECT model, COUNT(*) n, SUM(input_tokens) fi, SUM(cached_input) ci,
+           SUM(cache_write) cw, SUM(output_tokens) oi, SUM(total_tokens) tt,
+           SUM(reasoning_tokens) r
+    FROM events GROUP BY model ORDER BY model`).all();
+  ok('#78 双端黄金数：两个来源合并成 1 个模型行 glm-5.3-flash',
+    rows.length === 1 && rows[0].model === 'glm-5.3-flash', JSON.stringify(rows));
+  ok('#78 合计 301200/1240000/60000/140000 = 1741200（3 条事件）',
+    rows[0].n === 3 && rows[0].fi === 301200 && rows[0].ci === 1240000
+    && rows[0].cw === 60000 && rows[0].oi === 140000 && rows[0].tt === 1741200, JSON.stringify(rows));
+  ok('#78 reasoning 20000+10000+7000=37000 不进 total', rows[0].r === 37000
+    && rows[0].tt === rows[0].fi + rows[0].ci + rows[0].cw + rows[0].oi, JSON.stringify(rows[0]));
+  ok('#78 每个来源自己也只出一名',
+    store.db.prepare("SELECT COUNT(DISTINCT model) c FROM events WHERE tool='codex'").get().c === 1
+    && store.db.prepare("SELECT COUNT(DISTINCT model) c FROM events WHERE tool='claude-code'").get().c === 1
+    && rc.inserted === 2 && rk.inserted === 1, `${rc.inserted}/${rk.inserted}`);
+  // 价表键是全小写这一侧的产品事实，而 priceOf 的本地表查找是**精确**匹配
+  // （src/litellm.js 的兜底查找也是精确裸名匹配，大小写能不能碰上取决于厂商表当天
+  // 怎么写）。所以"名字要对"这件事只能钉在采集侧：落库名必须就是那条本地价键。
+  const TABLE = { 'glm-5.3-flash': { currency: 'USD', input_miss: 1, input_hit: 1, output: 1 } };
+  const priced = priceOf(rows[0].model, TABLE, 1);
+  ok('#78 落库名精确命中本地价表键（in/cache/out 三条单价都取到 TABLE 的值）',
+    priced !== null && priced.inCny === 1 && priced.cacheCny === 1 && priced.outCny === 1
+    && priced.offPeak === 1 && priced.cacheWCny === 0, JSON.stringify(priced));
+  ok('#78 重扫幂等（键稳定，不产生第二行）',
+    (await collectCodexFile(store, { path: codexFile, fileId: 'parity78', offset: 0, state: null, version: 3 })).inserted === 0
+    && (await collectClaudeFile(store, { tool: 'claude-code', path: claudeFile, fileId: 'claude-78', offset: 0 })).inserted === 0
+    && store.db.prepare('SELECT COUNT(*) c FROM events').get().c === 3);
+  store.close();
+  // 桌面端用 COLLECTOR_REVISION=6 整库重建，Node 端的对偶手段是启动期 migrate()
+  // 把历史大小写变体折成一行（src/store.js:96-108）
+  {
+    const legacy = new Store(join(base, 't78-legacy.db'));
+    legacy.insertEvent({ ts: 1789862402000, tool: 'codex', model: 'GLM-5.3-Flash', session_id: 's',
+      project: null, input_tokens: 1, cached_input: 0, cache_write: 0, output_tokens: 0,
+      reasoning_tokens: 0, total_tokens: 1, dedup_key: 'legacy-78' });
+    legacy.close();
+    const reopened = new Store(join(base, 't78-legacy.db'));
+    const m = reopened.db.prepare("SELECT model FROM events WHERE dedup_key='legacy-78'").get();
+    ok('#78 Node 端 migrate() 把历史大小写变体折进同一行（桌面端由 revision 6 重建等价）',
+      m.model === 'glm-5.3-flash', JSON.stringify(m));
+    reopened.close();
+  }
+  rmSync(base, { recursive: true, force: true });
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

@@ -1,5 +1,5 @@
 //! Read-only source adapters. Source-specific token semantics are normalized here, not in the UI.
-use crate::model::{Activity, Event, Parsed, Quota, Tokens};
+use crate::model::{normalize_model, Activity, Event, Parsed, Quota, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, io::Read, path::Path, time::Duration};
@@ -434,7 +434,7 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                             agent: agent.into(),
                             session: session.clone(),
                             project: project.clone(),
-                            model: m,
+                            model: normalize_model(&m),
                             ts,
                             tokens: t,
                             path: path.into(),
@@ -452,7 +452,7 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                     agent: agent.into(),
                     session: session.clone(),
                     project: project.clone(),
-                    model: model.clone(),
+                    model: normalize_model(&model),
                     ts,
                     tokens: t,
                     path: path.into(),
@@ -508,11 +508,14 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             .query_map([], |r| {
                 let input: i64 = r.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0);
                 let cached = r.get::<_, Option<i64>>(8)?.unwrap_or(0).clamp(0, input);
+                // #79：model_id 读不动（NULL/列类型漂移）只把这一列当缺失，不牵连整行；
+                // #78：与 Node 端 zcode.js 的 normalizeModel(r.model_id) 同式归一。
+                let model_id = r.get::<_, String>(2).unwrap_or_default();
                 Ok(Event {
                     id: r.get(0)?,
                     agent: agent.into(),
                     session: r.get(1)?,
-                    model: r.get(2)?,
+                    model: normalize_model(&model_id),
                     ts: r.get(3)?,
                     project: r.get(9)?,
                     tokens: Tokens {
@@ -601,7 +604,7 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                     agent: agent.into(),
                     session,
                     project,
-                    model: first(&[string(&v, "modelID")], "unknown"),
+                    model: normalize_model(&first(&[string(&v, "modelID")], "unknown")),
                     ts: timestamp(&v["time"]["created"]).unwrap_or(time),
                     tokens,
                     path: source.clone(),
@@ -777,10 +780,13 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
             },
             reasoning: num(&u, 9),
         };
-        let model = match gen.get(&19) {
-            Some(Field::Bytes(b)) => String::from_utf8_lossy(b).into(),
-            _ => "unknown".into(),
+        // 与 Node 端 antigravity.js 同式：`asText(lastOf(gen, 19)) || 'unknown'` 先兜空名，
+        // 再 normalizeModel（#78）。字段缺失/空字节都落到哨兵 unknown 后才归一。
+        let raw_model = match gen.get(&19) {
+            Some(Field::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
+            _ => String::new(),
         };
+        let model = normalize_model(if raw_model.is_empty() { "unknown" } else { &raw_model });
         if tokens.total() > 0 {
             out.events.push(Event {
                 id: format!("{session}:{idx}"),
@@ -1019,5 +1025,84 @@ mod tests {
         assert_eq!(parsed.events[0].tokens.total(), 180);
         assert_eq!(parsed.malformed_lines, 1);
         fs::remove_file(path).unwrap();
+    }
+    /// #78 双端同一条归一规则（解析层）。同一张表也写在 Node 端 `test/run.mjs` 的
+    /// [26] 段，两端任一改动都会同时变红。规则来自 Node 侧 `src/models.js`
+    /// （去首尾空白 + 小写），桌面端此前只在价格查找时归一，落库的模型名仍是原样。
+    ///
+    /// 刻意不放进这张表的名字：`deepseek-flash` / `deepseek-v4-flash` /
+    /// `deepseek-v4.1-flash`。Node 端 models.js 在归一时还会走一张 ALIASES 路由表，
+    /// 而桌面端把同类路由放在 prices.json 的 aliases 里，且两端对同一对 id 的
+    /// **路由方向相反**（Node: deepseek-flash→deepseek-v4.1-flash；
+    /// 桌面: deepseek-v4.1-flash→deepseek-flash，因为两边价目表的键不同）。
+    /// 别名路由是"哪个键有价"的产品事实，不在这条词法规则里，故共享表避开它们。
+    #[test]
+    fn model_name_normalization_rule_matches_node() {
+        for (raw, want) in [
+            ("GLM-5.3-Flash", "glm-5.3-flash"),
+            ("glm-5.3-flash", "glm-5.3-flash"),
+            ("  GLM-5.3-FLASH  ", "glm-5.3-flash"),
+            ("MiniMax-M2.7-HighSpeed", "minimax-m2.7-highspeed"),
+            ("Pro/zai-org/GLM-5", "pro/zai-org/glm-5"),
+            ("unknown", "unknown"),
+        ] {
+            assert_eq!(normalize_model(raw), want, "raw={raw:?}");
+        }
+        // 空名是"这条日志没有模型"，落进哨兵 unknown（Node 端落 NULL，见 model.rs）
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(normalize_model(blank), "unknown", "raw={blank:?}");
+        }
+    }
+    /// #78 双端黄金数（跨来源同一模型）。同一份记录与同样的期望数字写在
+    /// Node 端 `test/run.mjs` 的 [26] 段（同一变量的落库层在
+    /// `tests/sources.rs::same_model_spelled_differently_across_sources_is_one_row`），
+    /// 三处任一改动都会同时变红。
+    ///
+    /// 期望：三条事件全部记作 `glm-5.3-flash`，
+    /// codex 基线条 200000/600000/30000/50000 = 880000（#75 口径），
+    /// codex 差分校 100000/300000/10000/30000 = 440000，
+    /// claude-code 条 1200/340000/20000/60000 = 421200，
+    /// 合计 input 301200 / cached 1240000 / cache_write 60000 / output 140000 = 1741200。
+    #[test]
+    fn same_model_spelled_differently_across_sources_gets_one_name() {
+        const CODEX_78: &str = r#"{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"GLM-5.3-Flash"}}}
+{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000,"total_tokens":880000},"last_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000}}}}
+{"timestamp":"2026-09-20T00:00:03Z","type":"turn_context","payload":{"model":"  GLM-5.3-FLASH  "}}
+{"timestamp":"2026-09-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200000,"cached_input_tokens":900000,"cache_write_input_tokens":40000,"output_tokens":80000,"reasoning_output_tokens":30000,"total_tokens":1280000},"last_token_usage":{"input_tokens":400000,"cached_input_tokens":300000,"cache_write_input_tokens":10000,"output_tokens":30000,"reasoning_output_tokens":10000}}}}"#;
+        const CLAUDE_78: &str = r#"{"timestamp":"2026-09-20T00:10:00Z","type":"assistant","sessionId":"claude-78","cwd":"/work/parity","requestId":"r-78","message":{"id":"msg-78","model":"glm-5.3-flash","usage":{"input_tokens":1200,"cache_read_input_tokens":340000,"cache_creation_input_tokens":20000,"output_tokens":60000,"output_tokens_details":{"thinking_tokens":7000}}}}"#;
+        let codex = parse_jsonl("codex", "parity78.jsonl", CODEX_78);
+        let claude = parse_jsonl("claude-code", "parity78.jsonl", CLAUDE_78);
+        assert_eq!(codex.events.len(), 2, "{:?}", codex.events);
+        assert_eq!(claude.events.len(), 1, "{:?}", claude.events);
+        let all: Vec<&Event> = codex.events.iter().chain(claude.events.iter()).collect();
+        for e in &all {
+            assert_eq!(e.model, "glm-5.3-flash", "全部事件同一个模型名：{:?}", all.iter().map(|x| &x.model).collect::<Vec<_>>());
+        }
+        let components = |events: &[Event]| -> (i64, i64, i64, i64, i64) {
+            events.iter().fold((0, 0, 0, 0, 0), |acc, e| {
+                (
+                    acc.0 + e.tokens.input,
+                    acc.1 + e.tokens.cached,
+                    acc.2 + e.tokens.cache_write,
+                    acc.3 + e.tokens.output,
+                    acc.4 + e.tokens.total(),
+                )
+            })
+        };
+        assert_eq!(components(&codex.events), (300000, 900000, 40000, 80000, 1320000));
+        assert_eq!(components(&claude.events), (1200, 340000, 20000, 60000, 421200));
+        let mut merged_events = codex.events.clone();
+        merged_events.extend(claude.events.iter().cloned());
+        let merged = components(&merged_events);
+        assert_eq!(merged, (301200, 1240000, 60000, 140000, 1741200));
+        // 单条事件的 total 恒等于四列之和（CONTRIBUTING 落库公式）
+        for e in &all {
+            assert_eq!(e.tokens.total(), e.tokens.input + e.tokens.cached + e.tokens.cache_write + e.tokens.output);
+        }
+        assert_eq!(
+            all.iter().map(|e| e.tokens.reasoning).sum::<i64>(),
+            37000,
+            "reasoning 不参与 total，但必须同一条上带着"
+        );
     }
 }

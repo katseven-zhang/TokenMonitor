@@ -122,3 +122,25 @@ pub fn windows_project_key(value: &str) -> Option<String> {
 pub fn project_key(value: &str) -> String {
     windows_project_key(value).unwrap_or_else(||value.to_string())
 }
+
+/// 模型名归一（#78）：去首尾空白 + 小写。与 Node 端 `src/models.js normalizeModel()` 的
+/// 词法部分同一条规则（Node 还多做一步别名路由，见下）。同一模型在不同来源里记法不同
+/// （ZCode 记 `GLM-5.3-Flash`、WorkBuddy 记 `glm-5.3-flash`），不归一时同一个模型会被拆成
+/// 多行，价格键（全小写、两端价格查找都是精确匹配）也就再也匹配不上——此前桌面端只能靠
+/// 人工往 prices.json 的 aliases 里补 `"GLM-5.3-Flash": "glm-5.3-flash"` 这类条目，
+/// 漏一个就静默不计费。规则与两端黄金数记录在 docs/ARCHITECTURE.md「模型名归一」。
+///
+/// 与 Node 端刻意不同的两点（都是"不能相同"，不是漏掉）：
+/// 1. 空名这里回落哨兵 `"unknown"`（本项目的 `Event.model` 是 `String`、落库列 NOT NULL），
+///    Node 端返回 null 并落 NULL；两边各自只有一行，不参与任何黄金数。
+/// 2. 别名路由（`deepseek-flash` → 具体计费模型）留在 prices.json 的 aliases 里：那是
+///    "哪个键有价"的产品事实，两端价目表的键不同（同一对 id 甚至路由方向相反），
+///    在这里合并必有一侧静默不计费。
+pub fn normalize_model(value: &str) -> String {
+    let n = value.trim().to_lowercase();
+    if n.is_empty() {
+        "unknown".to_string()
+    } else {
+        n
+    }
+}

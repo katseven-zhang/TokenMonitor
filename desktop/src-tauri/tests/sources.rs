@@ -6,7 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tokenmonitor_core::{config, db, model::Query, scanner, service};
+use tokenmonitor_core::{config, db, model::Query, pricing::Prices, query, scanner, service};
 
 const TS: i64 = 1_800_000_000_000;
 struct Fixture(PathBuf);
@@ -375,4 +375,64 @@ fn dsh_same_seq_legacy_chunks_are_not_overwritten_in_the_cache() {
             "round {round}"
         );
     }
+}
+
+/// #78（落库层）：两个来源把同一个模型写成不同大小写时，面板必须只出一行。
+/// 修前 codex 记 `GLM-5.3-Flash`、claude-code 记 `glm-5.3-flash` 会在模型分组里
+/// 拆成两行，而且只有与价目表键完全一致的那一行拿得到成本——另一行静默 unpriced。
+/// 同一份记录与同样的期望数字写在 collectors.rs 的 #78 块（解析层）与
+/// Node 端 test/run.mjs 的 [26] 段，三处任一改动都会同时变红。
+/// 期望：1 个模型行 `glm-5.3-flash`，input 301200 / cached 1240000 /
+/// cache_write 60000 / output 140000，合计 1741200 token，四列单价各 1/百万 → 1.7412。
+#[test]
+fn same_model_spelled_differently_across_sources_is_one_row() {
+    const CODEX_78: &str = r#"{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"GLM-5.3-Flash"}}}
+{"timestamp":"2026-09-20T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000,"total_tokens":880000},"last_token_usage":{"input_tokens":800000,"cached_input_tokens":600000,"cache_write_input_tokens":30000,"output_tokens":50000,"reasoning_output_tokens":20000}}}}
+{"timestamp":"2026-09-20T00:00:03Z","type":"turn_context","payload":{"model":"  GLM-5.3-FLASH  "}}
+{"timestamp":"2026-09-20T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200000,"cached_input_tokens":900000,"cache_write_input_tokens":40000,"output_tokens":80000,"reasoning_output_tokens":30000,"total_tokens":1280000},"last_token_usage":{"input_tokens":400000,"cached_input_tokens":300000,"cache_write_input_tokens":10000,"output_tokens":30000,"reasoning_output_tokens":10000}}}}"#;
+    const CLAUDE_78: &str = r#"{"timestamp":"2026-09-20T00:10:00Z","type":"assistant","sessionId":"claude-78","cwd":"/work/parity","requestId":"r-78","message":{"id":"msg-78","model":"glm-5.3-flash","usage":{"input_tokens":1200,"cache_read_input_tokens":340000,"cache_creation_input_tokens":20000,"output_tokens":60000,"output_tokens_details":{"thinking_tokens":7000}}}}"#;
+    let root = std::env::temp_dir().join(format!("tokenmonitor-model-78-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut cache = db::open(&root).unwrap();
+    let codex = tokenmonitor_core::collectors::parse_jsonl("codex", "codex/parity78.jsonl", CODEX_78);
+    let claude = tokenmonitor_core::collectors::parse_jsonl("claude-code", "claude/parity78.jsonl", CLAUDE_78);
+    // 价目表键故意写成大小写混合的配置：两侧都必须命中同一行、都拿到成本
+    let prices = Prices::parse(
+        r#"{"version":1,"currency":"USD","models":{"GLM-5.3-Flash":[{"input":1,"cached":1,"cacheWrite":1,"output":1}]}}"#,
+    )
+    .unwrap();
+    db::replace_file(&mut cache, "codex/parity78.jsonl", "codex", 1, 1, &codex).unwrap();
+    db::replace_file(&mut cache, "claude/parity78.jsonl", "claude-code", 1, 1, &claude).unwrap();
+    let mut q = Query {
+        start: 1_789_862_400_000,
+        end: 1_789_863_060_000,
+        agent: None,
+        model: None,
+        project: None,
+        session: None,
+        search: String::new(),
+        time_zone: None,
+        offset_minutes: 0,
+    };
+    let dash = query::dashboard(&cache, &q, &prices).unwrap();
+    let models = dash["models"].as_array().unwrap().clone();
+    assert_eq!(models.len(), 1, "同一模型的不同写法只能一行：{models:?}");
+    assert_eq!(models[0]["key"], "glm-5.3-flash");
+    assert_eq!(models[0]["totalTokens"], 1_741_200);
+    assert_eq!(models[0]["events"], 3);
+    assert_eq!(models[0]["unpricedEvents"], 0, "大小写变体不能静默不计费");
+    assert!(
+        (models[0]["knownCostUsd"].as_f64().unwrap() - 1.7412).abs() < 1e-9,
+        "{models:?}"
+    );
+    assert_eq!(dash["availableModels"], json!(["glm-5.3-flash"]));
+    assert_eq!(dash["totals"]["totalTokens"], 1_741_200);
+    // 钻取用的标签就是落库的归一名：按归一名过滤必须拿到全部三条
+    q.model = Some("glm-5.3-flash".into());
+    let events = db::events(&cache, &q).unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().all(|e| e.model == "glm-5.3-flash"));
+    assert_eq!(events.iter().map(|e| e.tokens.total()).sum::<i64>(), 1_741_200);
+    drop(cache);
+    std::fs::remove_dir_all(root).unwrap();
 }
