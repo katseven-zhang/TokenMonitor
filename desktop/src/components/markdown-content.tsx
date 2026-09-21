@@ -91,7 +91,7 @@ function MarkdownContentComponent({ content }: MarkdownContentProps) {
     // Local-only product: display/copy URLs without navigating or making requests.
     const outcome = await writeClipboard(href);
     setFeedback({
-      text: outcome.ok ? t("sessions.markdown.link_copied") : t("sessions.markdown.copy_failed"),
+      text: outcome.ok ? t("sessions.detail.markdown_link_copied") : t("sessions.detail.markdown_copy_failed"),
       failed: !outcome.ok,
     });
     if (feedbackTimer.current !== null) window.clearTimeout(feedbackTimer.current);
@@ -106,9 +106,15 @@ function MarkdownContentComponent({ content }: MarkdownContentProps) {
           [rehypeKatex, { strict: false }],
         ]}
         components={{
-          img: ({ alt }) => <span className="text-muted-foreground">[图片：{alt || "外部图片未加载"}]</span>,
+          img: ({ alt }) => (
+            <span className="text-muted-foreground">
+              {t("sessions.detail.markdown_image", {
+                alt: alt || t("sessions.detail.markdown_image_without_alt"),
+              })}
+            </span>
+          ),
           a: ({ children, ...props }: ComponentPropsWithoutRef<"a">) => (
-            <a {...props} title="复制链接（离线模式不会打开网页）" onClick={(event) => void copyMarkdownLink(event)}>
+            <a {...props} title={t("sessions.detail.markdown_link_title")} onClick={(event) => void copyMarkdownLink(event)}>
               {children}
             </a>
           ),

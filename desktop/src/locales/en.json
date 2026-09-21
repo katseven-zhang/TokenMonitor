@@ -623,6 +623,9 @@
       "raw_load_failed": "The raw transcript could not be read",
       "markdown_link_copied": "Link copied",
       "markdown_copy_failed": "The link could not be copied",
+"markdown_image": "[image: {{alt}}]",
+      "markdown_image_without_alt": "external image not loaded",
+      "markdown_link_title": "Copy the link (web pages are not opened in offline mode)",
       "copy_session_id": "Copy session ID",
       "session_id_copied": "Session ID copied",
       "reveal_in_file_manager": "Show in File Manager"
