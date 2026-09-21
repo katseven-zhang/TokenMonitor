@@ -59,7 +59,38 @@ pub fn parse_port(text: &str) -> Option<u32> {
     }
 }
 
-/// 数据根：TOKENMONITOR_DATA_DIR > 打包形态 <根>\data（manifest 标记）> %LOCALAPPDATA%\TokenMonitor。
+/// #89：旧版源码形态运行数据目录的两个名字，与 GUI 启动器/后端同规则
+/// （见 src/config.js 与 windows/gui/src/main.rs）。`TokenMonitor` 与桌面版 NSIS 在
+/// installMode=currentUser 下的默认安装目录（`%LOCALAPPDATA%\<productName>`）完全同路径，
+/// 卸载桌面版会把旧版的日志和运行锁连根删掉，所以新装机器改用 `TokenMonitor-Server`；
+/// 已经在旧目录留过日志/锁的老用户继续用旧目录。
+/// 三个解析点必须一致：GUI 与托盘读的是**同一份 gui-settings.json**，判分歧了就各改各的。
+pub const RUNTIME_DIR_NAME: &str = "TokenMonitor-Server";
+pub const LEGACY_SHARED_RUN_DIR_NAME: &str = "TokenMonitor";
+
+/// 这个目录看起来是不是旧版自己的运行数据。判错成"是"会让旧版继续住在桌面版的卸载
+/// 目录里（正是本函数要避开的那个坑），所以读不动目录一律按"不是"处理。
+fn has_legacy_run_artifacts(dir: &Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("tokenmonitor-") && name.ends_with(".lock") {
+                return true;
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join("logs")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("tokenmonitor") && name.ends_with(".log") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 数据根：TOKENMONITOR_DATA_DIR > 打包形态 <根>\data（manifest 标记）> 源码形态运行目录（#89）。
 /// 与 GUI 启动器/后端的解析同构（同一份 gui-settings.json）。
 pub fn resolve_data_root(
     app_root: Option<&Path>,
@@ -76,7 +107,12 @@ pub fn resolve_data_root(
     }
     if let Some(la) = local_app_data {
         if !la.trim().is_empty() {
-            return Path::new(la).join("TokenMonitor").to_path_buf();
+            let shared = Path::new(la).join(LEGACY_SHARED_RUN_DIR_NAME);
+            return if has_legacy_run_artifacts(&shared) {
+                shared
+            } else {
+                Path::new(la).join(RUNTIME_DIR_NAME)
+            };
         }
     }
     PathBuf::from(".")

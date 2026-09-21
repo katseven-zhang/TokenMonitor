@@ -2220,6 +2220,181 @@ console.log('\n[26] 共存：端口让位、彼此探测、旧版冲突必须退
   }
 }
 
+/* ---------- [27] #89：卸载目录冲突与两张价表的分叉 ---------- */
+console.log('\n[27] #89：桌面版卸载目录 vs 旧版运行数据目录；pricing.json / prices.json 分叉探测');
+{
+  const coex = await import(pathToFileURL(join(ROOT, 'src/coexistence.js')).href);
+  const cfg = await import(pathToFileURL(join(ROOT, 'src/config.js')).href);
+  const LA = ['C:', 'Users', 'anyone', 'AppData', 'Local'].join(String.fromCharCode(92));
+  const SHARED = join(LA, 'TokenMonitor');
+  // 注入 exists/list：这一段全部在内存里，绝不看真机上的 %LOCALAPPDATA%
+  const tree = (paths) => {
+    const all = new Set();
+    for (const p of paths) {
+      const parts = String(p).split('\\');
+      for (let i = 1; i <= parts.length; i++) all.add(parts.slice(0, i).join('\\').toLowerCase());
+    }
+    const exists = (p) => all.has(String(p).toLowerCase());
+    const list = (d) => {
+      const pre = `${String(d).toLowerCase()}\\`;
+      return [...all].filter((p) => p.startsWith(pre) && !p.slice(pre.length).includes('\\')).map((p) => p.slice(pre.length));
+    };
+    return { exists, list };
+  };
+  const srcMode = (paths, extraEnv = {}) => cfg.resolveDataLocations({
+    env: { LOCALAPPDATA: LA, ...extraEnv }, home: 'C:\\Users\\anyone', platform: 'win32',
+    appRoot: null, ...tree(paths),
+  });
+
+  ok('新机器不再共用桌面版的卸载目录（改用 TokenMonitor-Server）',
+    srcMode([]).runtimeDir === join(LA, 'TokenMonitor-Server'), srcMode([]).runtimeDir);
+  ok('改名不越权：数据库仍在 ~/.tokenmonitor',
+    srcMode([]).dbDir === join('C:\\Users\\anyone', '.tokenmonitor'));
+  ok('老用户（logs 里有 tokenmonitor.log）原地继续，不制造孤儿日志',
+    srcMode([join(SHARED, 'logs', 'tokenmonitor.log')]).runtimeDir === SHARED);
+  ok('老用户（留有 tokenmonitor-<port>.lock）原地继续',
+    srcMode([join(SHARED, 'tokenmonitor-8787.lock')]).runtimeDir === SHARED);
+  ok('判据不松到"有个 logs 目录就算"：空的 logs 目录不认成旧版目录',
+    srcMode([join(SHARED, 'logs', 'other-app.log')]).runtimeDir === join(LA, 'TokenMonitor-Server'));
+  ok('TOKENMONITOR_DATA_DIR 仍最高优先级，不受改名影响',
+    srcMode([], { TOKENMONITOR_DATA_DIR: 'D:\\Elsewhere' }).runtimeDir === 'D:\\Elsewhere');
+  ok('非 Windows 不碰 LOCALAPPDATA，运行数据退回 ~/.tokenmonitor',
+    cfg.resolveDataLocations({ env: { LOCALAPPDATA: LA }, home: '/home/u', platform: 'linux', appRoot: null }).runtimeDir
+      === join('/home/u', '.tokenmonitor'));
+
+  // 目录名只有一份来源：改一侧必须同时改另一侧
+  ok('共存模块的运行目录名与 config.js 同源', coex.LEGACY_RUN_DIR_NAME === cfg.LEGACY_SHARED_RUN_DIR_NAME);
+  {
+    const coexSrc = read(join(ROOT, 'src/coexistence.js'));
+    ok('共存模块从 config.js 取新目录名，不自带字面量（任务计划同名是巧合，另算）',
+      /import[^;]*\bRUNTIME_DIR_NAME\b[^;]*from '\.\/config\.js'/.test(coexSrc)
+      && !/join\(local,\s*'TokenMonitor-Server'\)/.test(coexSrc));
+  }
+
+  // 改名涉及三个解析点，判分歧了 GUI 与托盘就会各读各的 gui-settings.json：必须同源
+  {
+    const guiSrc = read(join(ROOT, 'windows/gui/src/main.rs'));
+    const traySrc = read(join(ROOT, 'windows/tray/src/main.rs'));
+    for (const [name, src] of [['GUI 启动器', guiSrc], ['托盘', traySrc]]) {
+      ok(`#89 ${name} 与 config.js 用同一对目录名`,
+        src.includes(`RUNTIME_DIR_NAME: &str = "TokenMonitor-Server"`)
+          && src.includes(`LEGACY_SHARED_RUN_DIR_NAME: &str = "${cfg.LEGACY_SHARED_RUN_DIR_NAME}"`), name);
+      ok(`#89 ${name} 认老用户的判据与 hasLegacyRunArtifacts 同形（锁 + 日志文件，不是"有 logs 目录"）`,
+        /fn has_legacy_run_artifacts/.test(src) && /starts_with\("tokenmonitor-"\)[\s\S]*ends_with\("\.lock"\)/.test(src)
+          && /starts_with\("tokenmonitor"\)[\s\S]*ends_with\("\.log"\)/.test(src), name);
+    }
+    ok('#89 三个解析点都不再直接把 TokenMonitor 当源码形态运行目录写死',
+      !/join\("TokenMonitor"\)/.test(guiSrc) && !/join\("TokenMonitor"\)/.test(traySrc));
+  }
+
+  // ---- 价表分叉：注入 fs，只读，不建目录 ----
+  const tables = (legacy, desktop, mt = { L: 2000, D: 1000 }) => coex.inspectPriceTables({
+    env: {}, legacyPath: 'L', desktopPath: 'D',
+    exists: () => true,
+    read: (p) => JSON.stringify(p === 'L' ? legacy : desktop),
+    stat: (p) => ({ mtimeMs: p === 'L' ? mt.L : mt.D }),
+  });
+  const legacyRow = (o) => ({ models: { m: { currency: 'USD', input_miss: 1.32, input_hit: 0.044, output: 3.96, ...o } } });
+  const desktopRow = (cur, o) => ({ version: 1, currency: cur, models: { m: [{ input: 0.5, cached: 0.1, cacheWrite: 0, output: 1.5, ...o }] } });
+
+  {
+    const r = tables(legacyRow({}), desktopRow('USD', {}));
+    ok('两侧数字不同时判为已分叉', r.diverged.length === 1 && r.diverged[0].id === 'm');
+    ok('更晚编辑的一侧报得出来', r.newerSide === 'legacy', r.newerSide);
+  }
+  // 回归：桌面版条目按 schema 合法地省略 currency 时，必须回落到文件级 currency
+  // （Rust pricing.rs::cost_parts 就是 `unwrap_or(&self.currency)`）。漏了这层回落，
+  // 最可能已经漂移的手改文件会被整片判成"不可比"，等于探测器形同不存在。
+  ok('桌面版条目省略币种时回落文件级币种（与 Rust 一致，不再静默判不可比）',
+    tables(legacyRow({}), { version: 1, currency: 'USD', models: { m: [{ input: 0.5, cached: 0.1, cacheWrite: 0, output: 1.5 }] } }).comparable.length === 1);
+  // 旧版 priceOf 是 `currency === 'USD' ? 价×汇率 : 价`：缺省即人民币直价
+  ok('旧版条目缺币种按 CNY 处理（与 priceOf 一致）',
+    tables({ models: { k: { input_miss: 6.5, input_hit: 1.1, output: 27 } } },
+      { version: 1, currency: 'CNY', models: { k: [{ input: 6.5, cached: 1.1, cacheWrite: 0, output: 99 }] } }).diverged
+      .filter((d) => d.id === 'k' && d.currency === 'CNY').length === 1);
+  ok('币种不同不做数值比对（不猜汇率）',
+    tables(legacyRow({}), desktopRow('CNY', {})).notComparable.length === 1
+    && tables(legacyRow({}), desktopRow('CNY', {})).comparable.length === 0);
+  ok('未知币种不下结论',
+    tables({ models: { m: { currency: 'EUR', input_miss: 1, input_hit: 0, output: 1 } } }, desktopRow('USD', {}))
+      .notComparable.length === 1);
+  ok('桌面版有多条价格历史时不断定"当前价"',
+    tables(legacyRow({}), { version: 1, currency: 'USD', models: { m: [
+      { input: 0.5, cached: 0.1, cacheWrite: 0, output: 1.5 },
+      { effectiveFrom: '2026-01-01T00:00:00Z', input: 0.5, cached: 0.1, cacheWrite: 0, output: 1.5 },
+    ] } }).notComparable.length === 1);
+  ok('带 effectiveFrom 历史的单条也不下结论',
+    tables(legacyRow({}), { version: 1, currency: 'USD', models: { m: [
+      { effectiveFrom: '2026-01-01T00:00:00Z', input: 1, cached: 0, cacheWrite: 0, output: 1 },
+    ] } }).comparable.length === 0);
+  ok('schema 不同（旧版对象 / 桌面版数组）本身即已确认：不再要求字段同名',
+    tables(legacyRow({}), desktopRow('USD', {})).sharedIds === 1);
+  ok('数字一致时不误报分叉',
+    tables(legacyRow({ input_miss: 0.5, output: 1.5 }), desktopRow('USD', {})).diverged.length === 0);
+
+  const broken = coex.inspectPriceTables({
+    env: {}, legacyPath: 'L', desktopPath: 'D', exists: () => true,
+    read: (p) => (p === 'L' ? '{"models":{}}' : '{ 这不是 JSON'),
+    stat: () => ({ mtimeMs: 1 }),
+  });
+  ok('一侧价表损坏不抛异常', broken.desktop.broken === true && broken.legacy.broken === false);
+  {
+    const lines = coex.priceTableLines(broken).join('\n');
+    ok('损坏的一侧被明说，而不是听成"没有重叠模型"', /不是合法 JSON/.test(lines), lines);
+  }
+  {
+    const one = coex.inspectPriceTables({ env: {}, legacyPath: 'L', desktopPath: 'D',
+      exists: (p) => p === 'L', read: () => '{"models":{}}', stat: () => ({ mtimeMs: 1 }) });
+    ok('本机只有一张价表时直接说不存在双表打架',
+      one.bothPresent === false && /不存在双表打架/.test(coex.priceTableLines(one).join('\n')));
+  }
+
+  // ---- 卸载目录冲突报告（只读） ----
+  ok('旧版运行数据仍是共用目录时判为有风险',
+    coex.inspectRunDirCollision({ env: { LOCALAPPDATA: LA }, runtimeDir: SHARED }).atRisk === true);
+  ok('Windows 路径大小写/分隔符不同也认得出是同一路径',
+    coex.inspectRunDirCollision({ env: { LOCALAPPDATA: LA }, runtimeDir: LA.replace(/\\/g, '/') + '/tokenmonitor' }).atRisk === true);
+  ok('已改用独立目录时判为无风险',
+    coex.inspectRunDirCollision({ env: { LOCALAPPDATA: LA }, runtimeDir: join(LA, 'TokenMonitor-Server') }).atRisk === false);
+  ok('没有 LOCALAPPDATA 时不臆造冲突',
+    coex.inspectRunDirCollision({ env: {}, runtimeDir: '/h/.tokenmonitor' }).atRisk === false);
+  {
+    const risky = coex.runDirCollisionLines(coex.inspectRunDirCollision({ env: { LOCALAPPDATA: LA }, runtimeDir: SHARED })).join('\n');
+    ok('有风险时说清是谁删谁', /卸载桌面版会连.*一起删/.test(risky), risky);
+    ok('有风险时说明老目录不自动搬的原因与需要的裁定', /不自动搬/.test(risky) && /裁定/.test(risky));
+  }
+
+  // ---- status 的共存段落真的把两件事都带上了，且全程只读 ----
+  {
+    const probeDir = mkdtempSync(join(tmpdir(), 'coex89-'));
+    const { readdirSync } = await import('node:fs');
+    const lines = await coex.coexistenceLines({
+      env: { LOCALAPPDATA: join(probeDir, 'no-such-localappdata') },
+      ownPort: 8787,
+      probe: async () => false,
+      install: null,
+      run: () => ({ ok: false, out: 'cannot find the file specified.', err: '' }),
+      platform: 'win32',
+    });
+    const text = lines.join('\n');
+    ok('status 的共存报告包含价表分叉探测', /price_tables:/.test(text), text);
+    ok('status 的共存报告包含卸载目录冲突', /run_dir:/.test(text), text);
+    ok('只读探测没有创建任何目录或文件', existsSync(join(probeDir, 'no-such-localappdata')) === false
+      && readdirSync(probeDir).length === 0);
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+
+  // ---- 行为变更必须同一次提交写进文档（绑定要求） ----
+  {
+    const doc = read(join(ROOT, 'docs/WINDOWS.md'));
+    ok('docs/WINDOWS.md 写了新的运行数据目录名', doc.includes('TokenMonitor-Server'));
+    ok('docs/WINDOWS.md 写了卸载目录冲突这件事', /NSIS/.test(doc) && /TokenMonitor/.test(doc));
+    ok('docs/WINDOWS.md 写了价表分叉', /pricing\.json/.test(doc) && /prices\.json/.test(doc));
+    ok('文档不再把 %LOCALAPPDATA%\\TokenMonitor 说成当前源码形态的运行数据目录',
+      !/源码运行形态.*%LOCALAPPDATA%\\TokenMonitor(?![\\-]\w)/m.test(doc.replace(/TokenMonitor-Server/g, 'X')));
+  }
+}
+
 /* ---------- 清理 ---------- */
 rmSync(HOME, { recursive: true, force: true });
 console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');

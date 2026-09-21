@@ -292,8 +292,42 @@ console.log('\n[data locations] TOKENMONITOR_DATA_DIR / manifest 打包形态 / 
   // 源码形态：无 env、无 manifest
   const src = resolveDataLocations({ env: { LOCALAPPDATA: localAppData }, home, platform: 'win32', appRoot: null });
   ok('源码形态 DB 目录 = ~/.tokenmonitor', src.dbDir === join(home, '.tokenmonitor'), JSON.stringify(src));
-  ok('源码形态运行目录 = %LOCALAPPDATA%\\TokenMonitor', src.runtimeDir === join(localAppData, 'TokenMonitor'), JSON.stringify(src));
+  // #89：%LOCALAPPDATA%\TokenMonitor 与桌面版 NSIS(currentUser) 的默认安装目录同路径，
+  // 卸载桌面版会连旧版日志与运行锁一起删，故新装机器改用只属于旧版的目录名。
+  ok('源码形态运行目录 = %LOCALAPPDATA%\\TokenMonitor-Server',
+    src.runtimeDir === join(localAppData, 'TokenMonitor-Server'), JSON.stringify(src));
   ok('源码形态非便携', src.portable === false && src.forced === false && src.appRoot === null);
+
+  // #89 老用户原地继续：判据是"目录里有旧版留下的日志/锁"，注入 fs，不碰真机
+  {
+    const shared = join(localAppData, 'TokenMonitor');
+    const treeOf = (paths) => {
+      const all = new Set();
+      for (const p of paths) {
+        const parts = String(p).split('\\');
+        for (let i = 1; i <= parts.length; i++) all.add(parts.slice(0, i).join('\\').toLowerCase());
+      }
+      return {
+        exists: (p) => all.has(String(p).toLowerCase()),
+        list: (d) => {
+          const pre = `${String(d).toLowerCase()}\\`;
+          return [...all].filter((x) => x.startsWith(pre) && !x.slice(pre.length).includes('\\')).map((x) => x.slice(pre.length));
+        },
+      };
+    };
+    const oldUser = (paths) => resolveDataLocations({
+      env: { LOCALAPPDATA: localAppData }, home, platform: 'win32', appRoot: null, ...treeOf(paths),
+    }).runtimeDir;
+    ok('#89 老用户有历史日志时留在原目录，不把日志变成孤儿',
+      oldUser([join(shared, 'logs', 'tokenmonitor.log')]) === shared,
+      oldUser([join(shared, 'logs', 'tokenmonitor.log')]));
+    ok('#89 老用户只有运行锁时也认出是旧版目录',
+      oldUser([join(shared, 'tokenmonitor-8787.lock')]) === shared);
+    ok('#89 判据不松到"有个 logs 目录就算"（否则会住进桌面版卸载目录）',
+      oldUser([join(shared, 'logs', 'desktop-app.log')]) === join(localAppData, 'TokenMonitor-Server'));
+    ok('#89 目录不存在时直接用新名字',
+      oldUser([]) === join(localAppData, 'TokenMonitor-Server'));
+  }
 
   // 缺 LOCALAPPDATA 时运行目录退回 ~/.tokenmonitor
   const srcNoLa = resolveDataLocations({ env: {}, home, platform: 'win32', appRoot: null });

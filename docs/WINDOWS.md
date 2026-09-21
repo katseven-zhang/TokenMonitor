@@ -52,7 +52,8 @@ node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://
 
 1. **环境变量 `TOKENMONITOR_DATA_DIR`**：显式指定，数据库、日志、锁、设置全部落到该目录（最高优先，测试/自定义场景用）。
 2. **打包/安装形态**：应用根存在 `manifest.json`（构建清单，含 `name: TokenMonitor` 标记）即视为打包形态——数据库、日志、锁、设置统一落在 **`<应用根>\data`**，用户看得见、随目录走（便携式）。
-3. **源码运行形态**：数据库 `%USERPROFILE%\.tokenmonitor\tokenmonitor.db`（[../src/config.js](../src/config.js)）；运行数据（日志、锁文件）在 `%LOCALAPPDATA%\TokenMonitor`（[../src/platform/runtime.js](../src/platform/runtime.js)）。源码运行与打包运行使用各自的新数据根，不读取、迁移或删除其他命名空间。
+3. **源码运行形态**：数据库 `%USERPROFILE%\.tokenmonitor\tokenmonitor.db`（[../src/config.js](../src/config.js)）；运行数据（日志、锁文件）在 **`%LOCALAPPDATA%\TokenMonitor-Server`**（[../src/platform/runtime.js](../src/platform/runtime.js)）。源码运行与打包运行使用各自的新数据根，不读取、迁移或删除其他命名空间。
+   - **#89 改名**：这里过去用 `%LOCALAPPDATA%\TokenMonitor`，而桌面版 NSIS 在 `installMode=currentUser` 下的默认安装目录恰好是 `%LOCALAPPDATA%\<productName>` = **同一路径**（productName 见 `desktop/src-tauri/tauri.conf.json`，Tauri 未提供改安装目录的配置项），卸载桌面版会把旧版的日志和运行锁连根删掉。新装机器直接用上面的新名字；**已经在旧目录里留下过日志（`logs\tokenmonitor*.log`）或任一把 `tokenmonitor-<port>.lock` 的老用户继续用旧目录**——自动搬家会把他们的历史日志变成孤儿，比共用名字更糟。老机器的处置见 3b 节（需要产品裁定）。
 
 - **单实例锁**：`tokenmonitor-<端口>.lock`，位于上述运行数据目录；重复启动返回 `already_running` 与已运行 PID。
 - **端口**：默认 `8787`；`--port N`（1–65535）对 serve/status/install-agent/bar 均可用，非法值直接报错退出。服务只绑定 `127.0.0.1` 回环并校验 `Host` 头（DNS rebinding 防护，[../src/server.js](../src/server.js)）。
@@ -75,8 +76,8 @@ node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://
   以及两套自启各自的注册状态；桌面版侧
   [../desktop/src-tauri/src/coexistence.rs](../desktop/src-tauri/src/coexistence.rs) 反向认旧版的
   运行锁与端口。探测**只读**：不建目录、不写文件、不创建/修改/删除任务计划、绝不终止对方进程。
-- `tokenmonitor status` 现在多出四行：`desktop_edition`、`desktop_port`、`desktop_running`、
-  `legacy_logon_task` / `desktop_logon_entry`。
+- `tokenmonitor status` 现在多出这几行：`desktop_edition`、`desktop_port`、`desktop_running`、
+  `legacy_logon_task` / `desktop_logon_entry`，以及 #89 的 `run_dir` 与 `price_tables`。
 - **旧版端口冲突不再是静默的**（这是 #87 里最坏的一条路径）：修前 `bin/tokenmonitor.js` 里
   `installDaemonGuards()` 的 `unhandledRejection` 兜底会把 `startServer()` 抛出的
   `EADDRINUSE` 拒绝当普通日志吞掉，于是 `await` 之后的运行锁代码永不执行，而已经启动的
@@ -88,6 +89,39 @@ node bin\tokenmonitor.js serve    # 启动后台与本地面板，默认 http://
 - 老用户的 `settings.json` 是升级前写的，端口仍可能是 `8787`：这不会静默打架——旧版会因
   冲突退出并说明原因，桌面版会在 `service.log` 与 `status` 里报告"旧版在跑/端口相同"。
   自行把其中一侧改成别的端口即可。
+
+### 3b-1. #89：同名的四处冲突，本轮做到"发现并说出来"
+
+两个产品共用四个名字，其中两处会真丢数据。探测全部在
+[../src/coexistence.js](../src/coexistence.js)（只读：不建目录、不写文件、不改任何一张价表），
+测试：[../test/run.mjs](../test/run.mjs) 的 `[27]` 段。
+
+| 冲突 | 后果 | 本轮处置 |
+| --- | --- | --- |
+| 卸载目录 `%LOCALAPPDATA%\TokenMonitor` | 卸载桌面版连旧版日志/运行锁一起删，运行守卫随即放行 | 新机器改名 `TokenMonitor-Server`；老机器 `run_dir` 报"有风险"并说明不自动搬的理由 |
+| 两张价表 `pricing.json` / `prices.json` | 名字像、schema 不同、互不同步：改了这边，那边仍按旧价计费 | `price_tables` 报出两侧路径与最后编辑时间、谁更新、可比模型里哪几个数字已经不一致 |
+| 两个 `TokenMonitor.exe` | 端口占用者无法据此指认 | #87 已改为不指认产品、给出两侧安装路径 |
+| 各自残留的卸载孤儿 | 卸载一个，另一个的残留没人管 | 见下方"未做" |
+
+- **改名落在三个解析点，必须同源**：[../src/config.js](../src/config.js)（后端，唯一常量源）、
+  [../windows/gui/src/main.rs](../windows/gui/src/main.rs)（GUI 启动器）、
+  [../windows/tray/src/main.rs](../windows/tray/src/main.rs)（托盘）。GUI 与托盘读的是
+  **同一份 `gui-settings.json`**，三处判分歧就会出现"GUI 改了端口、托盘还在旧目录里看不到"，
+  比冲突本身更难查；`[27]` 段用文本比对钉住三处常量与判据同形。GUI 还把新旧两个目录都列为
+  候选根（#60 的备用根机制），所以老机器上日志搬家了也 tail 得回来。
+
+- **价表只比对敢断定的部分**：同 id + 桌面版只有一条价格记录且无 `effectiveFrom` 历史 +
+  两侧币种相同，才比 `input/output` 数字；其余一律计入"不可比"并说明数量，**不猜**。
+  币种缺省按各自计费代码的真实行为解析（旧版 `pricing.js::priceOf` 缺省即人民币；
+  桌面版 `pricing.rs::cost_parts` 是 `unwrap_or(&self.currency)`，条目省略币种回落到文件级
+  `currency`）——这里两边行为本就不同，写死成一套会有一侧整片误判。合并两张表要动的计费口径
+  （峰谷系数、缓存价、`effectiveFrom` 历史、汇率取值时刻各不相同）超出"发现"的范围。
+- **需要产品裁定、本轮没有做的（不猜）**：
+  1. 把桌面版 NSIS 安装目录彻底挪出 `%LOCALAPPDATA%\TokenMonitor`。Tauri 未暴露该配置项，
+     只能改 `productName` 或 fork NSIS 模板；两者都会牵动桌面版自己的数据目录命名与已装机
+     用户的卸载入口，属产品决定。裁定前，老机器只能靠 `run_dir` 报告 + 第 3 节的改名。
+  2. 卸载孤儿的**自动清理**。删除别的安装器留下的残留是破坏性操作，且两个产品的卸载入口
+     各自独立；本轮只保证"不制造新孤儿"（改名 + 第 8 节的数据保留），不自动删任何东西。
 
 ## 4. 开机自启：当前用户任务计划（✅ 已集成，#8）
 
@@ -120,7 +154,7 @@ node bin\tokenmonitor.js bar                                                 # �
 
 实现：[../src/platform/runtime.js](../src/platform/runtime.js)（`RuntimeLogger` / `sanitizeLogMessage`）；测试：[../test/windows/runtime.test.mjs](../test/windows/runtime.test.mjs)。
 
-- 位置：`%LOCALAPPDATA%\TokenMonitor\logs\tokenmonitor.log`。
+- 位置：源码运行形态 `%LOCALAPPDATA%\TokenMonitor-Server\logs\tokenmonitor.log`（#89 前建的机器仍在 `%LOCALAPPDATA%\TokenMonitor\logs\`，以 `status` 的 `run_dir` 行为准）；打包/安装形态 `<安装目录>\data\logs\`。
 - 自动脱敏：`Authorization`/`Bearer` 头、`sk-ant-`/`sk-`/`key-` 形态 API Key、`token`/`auth_token`/`access_token` 字段，以及会话正文/提示词类内容，统一替换为 `[REDACTED]`。
 - 轮转：单文件 5 MiB 上限，最多保留 5 个备份（`tokenmonitor.log.1` … `.5`），无时间戳目录堆积。
 
