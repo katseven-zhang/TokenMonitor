@@ -130,10 +130,14 @@ function firstUserPreview(turn: SessionReplayDetail["turns"][number]) {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
-function formatCompactTokenCount(value: number) {
+// The largest session in the local database passes a billion tokens, so the scale has to
+// reach past `m`: without the `b` tier a 1.5e9 total rendered as `1500m`, which reads as a
+// number the panel never intends to be comparable at a glance.
+export function formatCompactTokenCount(value: number) {
   if (Math.abs(value) < 1_000) return formatNumber(value);
   if (Math.abs(value) < 1_000_000) return `${Number((value / 1_000).toFixed(1))}k`;
-  return `${Number((value / 1_000_000).toFixed(1))}m`;
+  if (Math.abs(value) < 1_000_000_000) return `${Number((value / 1_000_000).toFixed(1))}m`;
+  return `${Number((value / 1_000_000_000).toFixed(1))}b`;
 }
 
 // Colors one request's token volume. Per the contract in session-conversation.ts
