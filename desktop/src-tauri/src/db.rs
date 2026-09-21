@@ -369,7 +369,6 @@ pub fn query_session_rollup_record(
             cost_usd: 0.0,
             models: BTreeMap::new(),
             projects: BTreeMap::new(),
-            updated_at: String::new(),
         });
         let input = e.tokens.input + e.tokens.cached + e.tokens.cache_write;
         d.input_tokens += input;

@@ -3069,7 +3069,6 @@ mod tests {
                             cost_usd: 0.5,
                             models: BTreeMap::new(),
                             projects: BTreeMap::new(),
-                            updated_at: String::new(),
                         })
                         .collect(),
                     prompt_title: Some(format!("Session {index}")),
@@ -3147,7 +3146,6 @@ mod tests {
             cost_usd,
             models: BTreeMap::new(),
             projects: BTreeMap::new(),
-            updated_at: "2026-06-01T00:00:00.000Z".to_string(),
         };
         let rollup =
             |path: &Path, modified_at_ms, prompt_title: &str, cost_usd| SessionFileRollup {

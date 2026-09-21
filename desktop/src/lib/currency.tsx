@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
 
-export function formatMoney(usd:number|null|undefined,code:'CNY'|'USD',factor=1) {
+function formatMoney(usd:number|null|undefined,code:'CNY'|'USD',factor=1) {
   if(usd==null) return '未定价';
   const value=usd*factor;
   // `toLocaleString` signs the digits, not the amount, so a credit or a correction read

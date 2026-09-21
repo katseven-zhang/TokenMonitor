@@ -24,7 +24,6 @@ pub struct DailyUsageRow {
     pub cost_usd: f64,
     pub models: BTreeMap<String, ModelUsage>,
     pub projects: BTreeMap<String, ProjectUsage>,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1108,7 +1108,7 @@ function TimelineItem({ item, activity, tokenUsage, rawJsonlLines }: TimelineEnt
   return content;
 }
 
-export function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; rawJsonlLines: string[] }) {
+function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; rawJsonlLines: string[] }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (block.kind === "item") return <TimelineItem {...block.entry} rawJsonlLines={rawJsonlLines} />;

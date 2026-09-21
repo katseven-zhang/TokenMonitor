@@ -46,7 +46,6 @@ pub struct Summary {
     pub unpriced_events: usize,
     pub unpriced_tokens: i64,
     pub events: usize,
-    pub first_ts: i64,
     pub last_ts: i64,
     pub agent: String,
     pub session: String,
@@ -57,11 +56,8 @@ impl Summary {
         self.tokens.add(&e.tokens);
         self.total_tokens += e.tokens.total();
         self.events += 1;
-        self.first_ts = if self.first_ts == 0 {
-            e.ts
-        } else {
-            self.first_ts.min(e.ts)
-        };
+        // The window's own start already bounds the first event of every projection, and
+        // no reader displayed a per-row first timestamp, so only `lastTs` is tracked.
         self.last_ts = self.last_ts.max(e.ts);
         match p.cost_parts(e) {
             Some(parts) => {
@@ -132,8 +128,6 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         bucket += width;
     }
     let mut session_keys = BTreeSet::new();
-    let mut all_models = BTreeSet::new();
-    let mut all_projects = BTreeSet::new();
     for e in &events {
         totals.add(e, prices);
         group(&mut models, &e.model, &e.model, e, prices);
@@ -176,8 +170,6 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
             e,
             prices,
         );
-        all_models.insert(e.model.clone());
-        all_projects.insert(crate::model::project_key(&e.project));
     }
     let activities = db::activities(db, q)?
         .into_iter()
@@ -205,7 +197,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         .collect::<Result<Vec<_>, _>>()?;
     let quota_history = quota_history(db, q)?;
     Ok(
-        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":calendar_rows(days,q,false)?,"months":calendar_rows(months,q,true)?,"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activityCount":activities.len(),"quotas":quotas,"quotaHistory":quota_history,"status":status,"availableModels":all_models,"availableProjects":all_projects,"eventCount":events.len()}),
+        json!({"query":q,"totals":totals,"models":models.into_values().collect::<Vec<_>>(),"projects":projects.into_values().collect::<Vec<_>>(),"sessions":sessions.into_values().collect::<Vec<_>>(),"agents":agents.into_values().collect::<Vec<_>>(),"days":calendar_rows(days,q,false)?,"months":calendar_rows(months,q,true)?,"series":series.into_values().collect::<Vec<_>>(),"bucketMs":width,"tools":tools,"activityCount":activities.len(),"quotas":quotas,"quotaHistory":quota_history,"status":status}),
     )
 }
 pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) -> Result<Value, String> {

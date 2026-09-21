@@ -1,1 +1,1 @@
-{"identifier":"default","windows":["main"],"permissions":["core:default","dialog:allow-save","autostart:default"]}
+{"identifier":"default","description":"No autostart grant: the app toggles launch-at-login through tauri_plugin_autostart::ManagerExt in desktop.rs, a Rust-side call that never passes the JS command ACL, and no frontend module imports the plugin.","windows":["main"],"permissions":["core:default","dialog:allow-save"]}

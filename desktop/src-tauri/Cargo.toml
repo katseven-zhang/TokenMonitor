@@ -24,6 +24,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+# `functions` backs the `tm_lower`/`tm_project` scalar functions registered in db.rs.
+# `hooks` is not dead either: tests/query_scale.rs instruments wide-range paging through
+# `Connection::progress_handler`, and dropping the feature fails to compile with E0599.
 rusqlite = { version = "0.32", features = ["bundled", "functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
