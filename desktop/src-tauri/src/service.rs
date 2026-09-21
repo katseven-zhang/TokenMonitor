@@ -98,12 +98,32 @@ fn replay(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
     Ok(detail)
 }
 fn csv(s: &str) -> String {
-    let safe = if s.starts_with(['=', '+', '-', '@']) {
+    // #83: Excel strips leading TAB/CR before interpreting a cell, so a value
+    // like "\t=cmd()" is formula-injection territory exactly like "=cmd()".
+    let safe = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{s}")
     } else {
         s.to_string()
     };
     format!("\"{}\"", safe.replace('"', "\"\""))
+}
+/// #83: exports land on a sibling temp file first and are renamed into place.
+/// A crash or a full disk halfway used to leave a truncated file under the
+/// final name — indistinguishable from a complete export.
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temp, text).map_err(|e| e.to_string())?;
+    let committed = commit_replacing(&temp, path);
+    if committed.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    committed
+}
+fn commit_replacing(temp: &Path, path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    fs::rename(temp, path).map_err(|e| e.to_string())
 }
 fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value, String> {
     let q: Query = serde_json::from_value(args["query"].clone()).map_err(|e| e.to_string())?;
@@ -163,7 +183,7 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
                 text.push('\n');
                 text.push_str(&row.iter().map(|s| csv(s)).collect::<Vec<_>>().join(","));
             }
-            fs::write(&path, text).map_err(|e| e.to_string())?;
+            write_atomic(&path, &text)?;
         }
         "markdown" => {
             let mut text = format!(
@@ -177,12 +197,19 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
                 text.push_str(&format!(
                     "|{}|\n",
                     row.iter()
-                        .map(|s| s.replace('|', "\\|").replace(['\n', '\r'], " "))
+                        // #83: escape the backslash itself first. A cell ending in `\`
+                        // used to emit `...path\|` — markdown reads `\|` as a literal
+                        // pipe and the row silently loses a column boundary.
+                        .map(|s| {
+                            s.replace('\\', "\\\\")
+                                .replace('|', "\\|")
+                                .replace(['\n', '\r'], " ")
+                        })
                         .collect::<Vec<_>>()
                         .join("|")
                 ));
             }
-            fs::write(&path, text).map_err(|e| e.to_string())?;
+            write_atomic(&path, &text)?;
         }
         "xlsx" => {
             let mut book = rust_xlsxwriter::Workbook::new();
@@ -194,7 +221,9 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
             }
             for (i, row) in rows.iter().enumerate() {
                 for (j, value) in row.iter().enumerate() {
-                    if (5..=11).contains(&j) && value.parse::<f64>().is_ok() {
+                    // #83: "Line" is a number too — as text Excel warns about
+                    // numbers-stored-as-text and refuses to sort it numerically.
+                    if (matches!(j, 5..=11 | 13)) && value.parse::<f64>().is_ok() {
                         sheet
                             .write_number(i as u32 + 1, j as u16, value.parse::<f64>().unwrap())
                             .map_err(|e| e.to_string())?;
@@ -209,7 +238,12 @@ fn export(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
             sheet
                 .set_column_range_width(0, 4, 24)
                 .map_err(|e| e.to_string())?;
-            book.save(&path).map_err(|e| e.to_string())?;
+            let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+            let committed = book.save(&temp).map_err(|e| e.to_string()).and_then(|()| commit_replacing(&temp, &path));
+            if committed.is_err() {
+                let _ = fs::remove_file(&temp);
+            }
+            committed?;
         }
         _ => return Err("不支持的导出格式".into()),
     }
@@ -406,16 +440,36 @@ pub fn start(root: &Path) -> Result<Value, String> {
         command.creation_flags(0x08000000);
     }
     let mut child = command.spawn().map_err(|e| e.to_string())?;
-    for _ in 0..50 {
-        if let Ok(v) = rpc(root, "status", json!({})) {
-            return Ok(v);
+    wait_for_ready(
+        || rpc(root, "status", json!({})).ok().map(Ok),
+        || child.try_wait().ok().flatten().is_some(),
+        300,
+        Duration::from_millis(100),
+    )
+}
+
+/// #83: the old inline loop gave up after 50×100ms=5s and reported "启动超时",
+/// but a first start must open/migrate the whole cache (db::open runs before
+/// the accept loop) — on big caches 5s is routinely exceeded while the child
+/// is alive and initializing, so the panel cried wolf. The polling is now a
+/// testable helper with a 30s budget, child-exit takes precedence (fail fast,
+/// don't burn the budget), and exhaustion says "still starting" — a different
+/// fact from "failed to start".
+fn wait_for_ready<P, E>(mut probe: P, mut exited: E, attempts: u32, delay: Duration) -> Result<Value, String>
+where
+    P: FnMut() -> Option<Result<Value, String>>,
+    E: FnMut() -> bool,
+{
+    for _ in 0..attempts {
+        if let Some(result) = probe() {
+            return result;
         }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+        if exited() {
             return Err("后台启动失败，端口可能被其他应用占用".into());
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(delay);
     }
-    Err("后台启动超时，请检查服务日志".into())
+    Err("后台仍在启动：首次建库或视图迁移可能较慢，请稍候刷新；持续未就绪请查看服务日志".into())
 }
 
 pub fn stop(root: &Path) -> Result<Value, String> {
@@ -601,6 +655,116 @@ mod tests {
             .unwrap_err()
             .contains("设置未更改"));
         assert_eq!(fs::read(root.join("settings.json")).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// #83: 启动等待的轮询语义——就绪即回状态；子进程已退出必须快速失败、
+    /// 不烧预算；预算耗尽报"仍在启动"（首次建库/迁移慢不是启动失败）。
+    #[test]
+    fn startup_polling_prioritizes_exit_and_says_still_starting_on_budget() {
+        let mut polls = 0;
+        let ready = wait_for_ready(
+            || {
+                polls += 1;
+                (polls == 3).then(|| Ok(json!({"running": true})))
+            },
+            || false,
+            10,
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(ready["running"], true);
+        assert_eq!(polls, 3);
+        let mut polls = 0;
+        let mut exit_checks = 0;
+        let err = wait_for_ready(
+            || {
+                polls += 1;
+                None
+            },
+            || {
+                exit_checks += 1;
+                exit_checks >= 2
+            },
+            1000,
+            Duration::from_millis(1),
+        )
+        .unwrap_err();
+        assert!(err.contains("启动失败"), "{err}");
+        assert!(polls <= 2 && polls >= 1, "进程已退出必须立刻失败，不得烧预算：polls={polls}");
+        let err = wait_for_ready(|| None, || false, 3, Duration::from_millis(1)).unwrap_err();
+        assert!(err.contains("仍在启动"), "{err}");
+    }
+    /// #83: 导出三件套。① 反斜杠结尾的单元格不得吃掉 markdown 列分隔符
+    /// （未转义分隔符计数恒为 15）；② 制表符/回车开头的 CSV 单元格要和 `=`
+    /// 一样拿到引号前缀（Excel 会先剥前导空白再解释公式）；③ 重复导出原子
+    /// 覆盖且目录里没有 .tmp 残留。
+    #[test]
+    fn export_escaping_column_integrity_and_atomic_replacement() {
+        fn unescaped_separators(row: &str) -> usize {
+            let mut n = 0;
+            let mut backslashes = 0usize;
+            for ch in row.chars() {
+                match ch {
+                    '\\' => backslashes += 1,
+                    '|' => {
+                        if backslashes % 2 == 0 {
+                            n += 1;
+                        }
+                        backslashes = 0;
+                    }
+                    _ => backslashes = 0,
+                }
+            }
+            n
+        }
+        let (root, _) = fixture();
+        let mut cache = db::open(&root).unwrap();
+        let event = crate::model::Event {
+            id: "1".into(),
+            agent: "codex".into(),
+            session: "\r=evil".into(),
+            project: r"x|y\".into(),
+            model: "\t=who".into(),
+            ts: 60_000,
+            tokens: crate::model::Tokens { input: 5, ..Default::default() },
+            path: "fixture.jsonl".into(),
+            line: 3,
+        };
+        db::replace_file(
+            &mut cache,
+            "fixture.jsonl",
+            "codex",
+            1,
+            1,
+            &crate::model::Parsed { events: vec![event], ..Default::default() },
+        )
+        .unwrap();
+        drop(cache);
+        let base = |format: &str, path: PathBuf| {
+            json!({"query":{"start":60_000,"end":120_000,"agent":"codex"},"format":format,"path":path})
+        };
+        let md = root.join("out.md");
+        query_local(&root, "export", &base("markdown", md.clone())).unwrap();
+        let text = fs::read_to_string(&md).unwrap();
+        let row = text.lines().rev().find(|l| l.starts_with('|') && !l.contains("---")).unwrap();
+        assert!(row.contains(r"x\|y\\"), "反斜杠要先加倍、竖线再转义：{row}");
+        assert_eq!(unescaped_separators(row), 15, "分隔符被反斜杠吃了：{row}");
+        let csv_path = root.join("out.csv");
+        query_local(&root, "export", &base("csv", csv_path.clone())).unwrap();
+        let csv_text = fs::read_to_string(&csv_path).unwrap();
+        assert!(csv_text.contains("\"'\t=who\""), "Tab 前导未加引号前缀：{csv_text}");
+        assert!(csv_text.contains("\"'\r=evil\""), "CR 前导未加引号前缀：{csv_text}");
+        for _ in 0..2 {
+            let again = query_local(&root, "export", &base("csv", csv_path.clone())).unwrap();
+            assert_eq!(again["rows"], 1);
+        }
+        let leftovers: Vec<String> = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "原子导出不得留临时文件：{leftovers:?}");
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -13,14 +13,20 @@ pub struct Tokens {
 }
 impl Tokens {
     pub fn total(&self) -> i64 {
-        self.input + self.cached + self.cache_write + self.output
+        // #83: saturating — 单条损坏源行不得把 total 回绕成负数
+        self.input
+            .saturating_add(self.cached)
+            .saturating_add(self.cache_write)
+            .saturating_add(self.output)
     }
     pub fn add(&mut self, other: &Self) {
-        self.input += other.input;
-        self.cached += other.cached;
-        self.cache_write += other.cache_write;
-        self.output += other.output;
-        self.reasoning += other.reasoning;
+        // #83: 累加同样饱和；release 构建里 i64 加法是 wrap，一次回绕就把整列
+        // 变负且再也回不来。
+        self.input = self.input.saturating_add(other.input);
+        self.cached = self.cached.saturating_add(other.cached);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.output = self.output.saturating_add(other.output);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +123,10 @@ pub fn windows_project_key(value: &str) -> Option<String> {
     let drive=bytes.len()>=3 && bytes[0].is_ascii_alphabetic() && bytes[1]==b':' && matches!(bytes[2],b'/'|b'\\');
     if !drive && !value.starts_with("\\\\") && !value.starts_with("//") { return None; }
     let normalized=value.replace('\\',"/").to_ascii_lowercase();
-    Some(if drive && normalized.len()==3 { normalized } else { normalized.trim_end_matches('/').to_string() })
+    // #83: 盘符根此前特判保留三字符形态（"c:/"），而 "C:\\"、"C://" 会被
+    // trim 成 "c:"——同一个根项目拆成两个分组键。根目录一律折到 "c:"：
+    // 它不与任何真子路径前缀相撞（子路径至少是 "c:/x"），分组回到一起。
+    Some(normalized.trim_end_matches('/').to_string())
 }
 pub fn project_key(value: &str) -> String {
     windows_project_key(value).unwrap_or_else(||value.to_string())
@@ -141,7 +150,7 @@ pub fn display_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::display_path;
+    use super::{display_path, windows_project_key, Tokens};
     /// #62 黄金样例：三种 verbatim 形态各自的展示结果；普通路径原样保留。
     /// 合成盘符 Q: 与 UNC 服务器名都是纯字符串输入，不触碰文件系统。
     #[test]
@@ -151,5 +160,30 @@ mod tests {
         assert_eq!(display_path(r"\\?\Q:\"), r"Q:\");
         assert_eq!(display_path(r"Q:\already\normal.jsonl"), r"Q:\already\normal.jsonl");
         assert_eq!(display_path("/tmp/plain.jsonl"), "/tmp/plain.jsonl");
+    }
+    /// #83：盘符根的全部写法（单/双分隔符、正/反斜杠、大小写）必须落进同一个
+    /// 分组键——修前 "C:\" 保留成 "c:/"，而 "C:\\"、"C://" 被 trim 成 "c:"，
+    /// 根项目被拆成两组。子路径分组不受影响。合成盘符不触碰文件系统。
+    #[test]
+    fn drive_root_variants_group_into_one_key() {
+        for variant in ["Q:\\", "Q:/", "q:/", "Q:\\\\", "Q://", "q:\\"] {
+            assert_eq!(windows_project_key(variant).as_deref(), Some("q:"), "{variant:?}");
+        }
+        assert_eq!(windows_project_key(r"Q:\Users\proj").as_deref(), Some("q:/users/proj"));
+        assert_eq!(windows_project_key("\\\\srv\\share\\team\\").as_deref(), Some("//srv/share/team"));
+        assert_eq!(windows_project_key("/home/user"), None, "POSIX 路径不进折叠");
+    }
+    /// #83：i64 累加在 release 构建里是回绕。一条畸形源行（i64::MAX 的 token）
+    /// 加第二行就会把总数翻成负数；现在饱和在 MAX。
+    #[test]
+    fn token_accumulation_saturates_instead_of_wrapping() {
+        let mut big = Tokens { input: i64::MAX, cached: 10, ..Default::default() };
+        let before = big.total();
+        big.add(&Tokens { input: i64::MAX, cached: i64::MAX, output: 5, ..Default::default() });
+        assert_eq!(big.input, i64::MAX);
+        assert_eq!(big.cached, i64::MAX);
+        assert!(big.total() >= before && big.total() > 0, "total 不得回绕：{}", big.total());
+        let overflowed = Tokens { input: i64::MAX, cached: 1, ..Default::default() }.total();
+        assert_eq!(overflowed, i64::MAX, "单行 total 加法也不能回绕");
     }
 }

@@ -24,6 +24,11 @@ pub struct DailyUsageRow {
     pub total_tokens: i64,
     #[serde(rename = "costUSD")]
     pub cost_usd: f64,
+    /// #83: events in this rollup that had no price row. A rollup cost of 0
+    /// must be readable as "0" only when every event was priced — otherwise
+    /// unpriced usage is silently counted as free.
+    #[serde(default)]
+    pub unpriced_events: usize,
     pub models: BTreeMap<String, ModelUsage>,
     pub projects: BTreeMap<String, ProjectUsage>,
     pub updated_at: String,

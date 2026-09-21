@@ -55,7 +55,9 @@ pub struct Summary {
 impl Summary {
     fn add(&mut self, e: &Event, p: &Prices) {
         self.tokens.add(&e.tokens);
-        self.total_tokens += e.tokens.total();
+        // #83: 与 Tokens::add 同一纪律：计数列一律 saturating，坏行不得把
+        // 总数回绕成负数（debug 下直接 panic，release 下静默变负）。
+        self.total_tokens = self.total_tokens.saturating_add(e.tokens.total());
         self.events += 1;
         self.first_ts = if self.first_ts == 0 {
             e.ts
@@ -70,7 +72,7 @@ impl Summary {
             },
             None => {
                 self.unpriced_events += 1;
-                self.unpriced_tokens += e.tokens.total();
+                self.unpriced_tokens = self.unpriced_tokens.saturating_add(e.tokens.total());
             },
         };
         self.cost_usd = if self.unpriced_events == 0 {
@@ -154,7 +156,7 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
         group(
             &mut sessions,
             &key,
-            titles.get(&e.path).unwrap_or(&e.session),
+            titles.get(&(e.agent.clone(), e.path.clone())).unwrap_or(&e.session),
             e,
             prices,
         );
@@ -345,5 +347,82 @@ mod tests {
         assert_eq!(dashboard(&db, &q, &p).unwrap()["totals"]["totalTokens"], 20);
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    /// #83: 同一路径被两个 agent 索引（配置的根重叠）时各记各的标题。修前
+    /// titles 以 path 为键，后读的一行顶掉前一个 agent 的标题：按 codex 标题
+    /// 搜索会 0 命中，面板把 codex 会话标成 pi 的标题。
+    #[test]
+    fn same_path_under_two_agents_keeps_its_own_title() {
+        let root = std::env::temp_dir().join(format!("tokenmonitor-titles-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = db::open(&root).unwrap();
+        let make = |agent: &str, id: &str| Event {
+            id: id.into(),
+            agent: agent.into(),
+            session: "shared".into(),
+            project: "p".into(),
+            model: "m".into(),
+            ts: 60_000,
+            tokens: Tokens { input: 100, ..Default::default() },
+            path: "same.jsonl".into(),
+            line: 1,
+        };
+        db::replace_file(&mut db, "same.jsonl", "codex", 1, 1, &Parsed {
+            title: Some("codex-only-title".into()),
+            events: vec![make("codex", "c1")],
+            ..Default::default()
+        })
+        .unwrap();
+        db::replace_file(&mut db, "same.jsonl", "pi", 1, 1, &Parsed {
+            title: Some("pi-only-title".into()),
+            events: vec![make("pi", "p1")],
+            ..Default::default()
+        })
+        .unwrap();
+        let p = Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        let q = Query {
+            start: 60_000,
+            end: 120_000,
+            agent: None,
+            model: None,
+            project: None,
+            session: None,
+            search: "codex-only-title".into(),
+            time_zone: None,
+            offset_minutes: 0,
+        };
+        // 无搜索时两个会话行各自带着自己的标题（修前 path 单键让 pi 行覆盖 codex 行，
+        // codex 会话会被标成 "pi-only-title"）。
+        let all = dashboard(&db, &Query { search: String::new(), ..q.clone() }, &p).unwrap();
+        let sessions = all["sessions"].as_array().unwrap();
+        let label_of = |key: &str| sessions.iter().find(|s| s["key"] == key).unwrap()["label"].clone();
+        assert_eq!(label_of("codex:shared"), serde_json::json!("codex-only-title"));
+        assert_eq!(label_of("pi:shared"), serde_json::json!("pi-only-title"));
+        // 按 codex 的标题搜索必须只命中 codex 事件（修前命中 0 个）。
+        let result = dashboard(&db, &q, &p).unwrap();
+        assert_eq!(result["totals"]["totalTokens"], 100);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// #83: 汇总计数 saturating——两条 i64::MAX 级的畸形事件不再把总数翻负。
+    #[test]
+    fn summarize_saturates_on_pathological_totals() {
+        let p = Prices::parse(r#"{"version":1,"currency":"USD","models":{}}"#).unwrap();
+        let huge = Event {
+            id: "h".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: "m".into(),
+            ts: 1,
+            tokens: Tokens { input: i64::MAX, cached: 1, ..Default::default() },
+            path: "p".into(),
+            line: 1,
+        };
+        let s = summarize(&[huge.clone(), huge], &p);
+        assert_eq!(s.total_tokens, i64::MAX);
+        assert_eq!(s.unpriced_tokens, i64::MAX);
+        assert_eq!(s.tokens.input, i64::MAX);
+        assert_eq!(s.unpriced_events, 2);
     }
 }

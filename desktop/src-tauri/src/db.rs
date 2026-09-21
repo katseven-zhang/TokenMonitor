@@ -257,7 +257,7 @@ pub fn events(db: &Connection, q: &Query) -> Result<Vec<Event>, String> {
                     e.model,
                     e.project,
                     e.session,
-                    labels.get(&e.path).map(String::as_str).unwrap_or("")
+                    labels.get(&(e.agent.clone(), e.path.clone())).map(String::as_str).unwrap_or("")
                 )
                 .to_lowercase()
                 .contains(&search))
@@ -297,12 +297,16 @@ pub fn activities(db: &Connection, q: &Query) -> Result<Vec<Activity>, String> {
     rows.map(|r| serde_json::from_str(&r.map_err(|e| e.to_string())?).map_err(|e| e.to_string()))
         .collect()
 }
-pub fn titles(db: &Connection) -> Result<BTreeMap<String, String>, String> {
+/// #83: titles must be keyed by (agent, path), not path alone. Two agents can
+/// index one file (overlapping configured roots), and with a path-only map the
+/// row read later silently overwrote the earlier agent's title — searches and
+/// session labels then show a title that belongs to a different agent.
+pub fn titles(db: &Connection) -> Result<BTreeMap<(String, String), String>, String> {
     let mut stmt = db
-        .prepare("SELECT path,title FROM source_files WHERE title IS NOT NULL")
+        .prepare("SELECT agent,path,title FROM source_files WHERE title IS NOT NULL")
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map([], |r| Ok(((r.get::<_, String>(0)?, r.get::<_, String>(1)?), r.get::<_, String>(2)?)))
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<BTreeMap<_, _>, _>>()
         .map_err(|e| e.to_string())
@@ -375,31 +379,41 @@ pub fn query_session_rollup_record(
             reasoning_output_tokens: 0,
             total_tokens: 0,
             cost_usd: 0.0,
+            unpriced_events: 0,
             models: BTreeMap::new(),
             projects: BTreeMap::new(),
             updated_at: String::new(),
         });
-        let input = e.tokens.input + e.tokens.cached + e.tokens.cache_write;
-        d.input_tokens += input;
-        d.cached_input_tokens += e.tokens.cached;
-        d.output_tokens += e.tokens.output;
-        d.reasoning_output_tokens += e.tokens.reasoning;
-        d.total_tokens += e.tokens.total();
-        d.cost_usd += prices.as_ref().and_then(|p| p.cost(&e)).unwrap_or(0.0);
+        // #83: saturating accumulation. A pathological/corrupt token total must
+        // not silently wrap i64 negative and drag the day's cost/usage sign over.
+        let input = e.tokens.input.saturating_add(e.tokens.cached).saturating_add(e.tokens.cache_write);
+        d.input_tokens = d.input_tokens.saturating_add(input);
+        d.cached_input_tokens = d.cached_input_tokens.saturating_add(e.tokens.cached);
+        d.output_tokens = d.output_tokens.saturating_add(e.tokens.output);
+        d.reasoning_output_tokens = d.reasoning_output_tokens.saturating_add(e.tokens.reasoning);
+        d.total_tokens = d.total_tokens.saturating_add(e.tokens.total());
+        match prices.as_ref().and_then(|p| p.cost(&e)) {
+            Some(cost) => d.cost_usd += cost,
+            // #83: an unpriced event is a real, reportable fact, not 0.0 USD.
+            None => d.unpriced_events += 1,
+        }
         let m = d
             .models
             .entry(e.model.clone())
             .or_insert_with(ModelUsage::default);
-        m.input_tokens += input;
-        m.cached_input_tokens += e.tokens.cached;
-        m.output_tokens += e.tokens.output;
-        m.reasoning_output_tokens += e.tokens.reasoning;
-        m.total_tokens += e.tokens.total();
+        m.input_tokens = m.input_tokens.saturating_add(input);
+        m.cached_input_tokens = m.cached_input_tokens.saturating_add(e.tokens.cached);
+        m.output_tokens = m.output_tokens.saturating_add(e.tokens.output);
+        m.reasoning_output_tokens = m.reasoning_output_tokens.saturating_add(e.tokens.reasoning);
+        m.total_tokens = m.total_tokens.saturating_add(e.tokens.total());
         let p = d.projects.entry(e.project.clone()).or_default();
-        p.input_tokens += input;
-        p.cached_input_tokens += e.tokens.cached;
-        p.output_tokens += e.tokens.output;
-        p.total_tokens += e.tokens.total();
+        p.input_tokens = p.input_tokens.saturating_add(input);
+        p.cached_input_tokens = p.cached_input_tokens.saturating_add(e.tokens.cached);
+        p.output_tokens = p.output_tokens.saturating_add(e.tokens.output);
+        // #83: projects previously never carried reasoning, so every project row
+        // showed 0 reasoning_output_tokens even when models and days had real numbers.
+        p.reasoning_output_tokens = p.reasoning_output_tokens.saturating_add(e.tokens.reasoning);
+        p.total_tokens = p.total_tokens.saturating_add(e.tokens.total());
     }
     Ok(Some(SessionRollupRecord {
         path: path.into(),
@@ -543,6 +557,62 @@ mod tests {
         replace_file(&mut db, "f.jsonl", "codex", 2, 2, &Parsed::default()).unwrap();
         let left: i64 = db.query_row("SELECT COUNT(*) FROM quota", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #83 rollup 三处：① 无价事件计入 unpriced_events（修前按 0.0 加进成本，
+    /// rollup 的 0 与"免费"不可区分）；② ProjectUsage 带上 reasoning（修前该
+    /// 字段恒 0，日/模型列都有数、项目列永远是 0）；③ 每列 saturating 累加。
+    /// 黄金数：priced 1,000,000 input × 2/百万 = 2.0；missing 500,000 不计价；
+    /// reasoning 700+300=1000。
+    #[test]
+    fn rollup_tracks_unpriced_and_project_reasoning() {
+        let root = temp_root();
+        std::fs::write(
+            &root.join("prices.json"),
+            serde_json::json!({
+                "version": 1, "currency": "USD",
+                "models": { "priced": [{ "input": 2, "cached": 0, "cacheWrite": 0, "output": 0 }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut db = open(&root).unwrap();
+        let mk = |model: &str, input: i64, reasoning: i64| Event {
+            id: model.into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "proj".into(),
+            model: model.into(),
+            ts: 60_000,
+            tokens: Tokens { input, cached: 0, cache_write: 0, output: 0, reasoning },
+            path: "r.jsonl".into(),
+            line: 1,
+        };
+        replace_file(
+            &mut db,
+            "r.jsonl",
+            "codex",
+            10,
+            10,
+            &Parsed {
+                events: vec![mk("priced", 1_000_000, 700), mk("missing", 500_000, 300)],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let rollup = query_session_rollup_record(&db, "r.jsonl")
+            .unwrap()
+            .expect("rollup");
+        assert_eq!(rollup.rows.len(), 1);
+        let day = &rollup.rows[0];
+        assert_eq!(day.unpriced_events, 1);
+        assert!((day.cost_usd - 2.0).abs() < 1e-12, "只有 priced 事件进成本：{}", day.cost_usd);
+        assert_eq!(day.reasoning_output_tokens, 1000);
+        let project = day.projects.get("proj").expect("project row");
+        assert_eq!(project.reasoning_output_tokens, 1000, "ProjectUsage.reasoning 修前恒 0");
+        assert_eq!(project.input_tokens, 1_500_000);
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
     }

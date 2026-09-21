@@ -43,12 +43,23 @@ fn verbatim_source_paths_leave_the_export_text_formats() {
     let event=Event{id:"1".into(),model:"m".into(),agent:"codex".into(),session:"s".into(),project:"p".into(),path:stored.clone(),line:7,ts:60_000,tokens:Tokens{input:1,output:0,..Default::default()}};
     db::replace_file(&mut cache,&stored,"codex",1,1,&Parsed{events:vec![event],..Default::default()}).unwrap();
     let q=Query{start:60_000,end:120_000,agent:Some("codex".into()),model:None,project:None,session:None,search:String::new(),time_zone:None,offset_minutes:0};
-    for format in ["csv","markdown"] {
-        let path=root.join(format!("verbatim.{format}"));
-        service::query_local(&root,"export",&json!({"query":q,"format":format,"path":path})).unwrap();
+    {
+        let path=root.join("verbatim.csv");
+        service::query_local(&root,"export",&json!({"query":q,"format":"csv","path":path})).unwrap();
         let text=fs::read_to_string(&path).unwrap();
-        assert!(text.contains(r"Q:\sessions\a.jsonl"),"{format}: 导出缺少还原后的路径");
-        assert!(!text.contains(r"\\?\"),"{format}: 导出仍带 verbatim 前缀");
+        assert!(text.contains(r"Q:\sessions\a.jsonl"),"csv: 导出缺少还原后的路径");
+        assert!(!text.contains(r"\\?\"),"csv: 导出仍带 verbatim 前缀");
+    }
+    {
+        let path=root.join("verbatim.md");
+        service::query_local(&root,"export",&json!({"query":q,"format":"markdown","path":path})).unwrap();
+        let text=fs::read_to_string(&path).unwrap();
+        // #83: markdown escapes backslashes (so a cell ending in `\` cannot eat
+        // the column separator). The restored drive path still shows up, only
+        // doubled; the raw verbatim prefix would render as `\\\\?\\` and must
+        // be absent.
+        assert!(text.contains(r"Q:\\sessions\\a.jsonl"),"markdown: 缺少还原后的路径（转义形态）");
+        assert!(!text.contains(r"\\\\?\\"),"markdown: 仍带 verbatim 前缀的转义形态");
     }
     // 存储键没被动过：reveal 的授权查询仍以原样路径命中。
     let hits: i64 = cache.query_row("SELECT COUNT(*) FROM source_files WHERE path=?1", [&stored], |r|r.get(0)).unwrap();
@@ -91,8 +102,13 @@ fn xlsx_export_content_is_checked_beyond_zip_magic() {
     assert!(sheet.contains(r#"<c r="F2"><v>1000000</v></c>"#),"Input 黄金数没进 F2 数字单元格：{sheet}");
     assert!(sheet.contains(r#"<c r="L2"><v>2</v></c>"#),"成本 1M×2/百万=2.0 没进 L2 数字单元格：{sheet}");
     assert!(shared.contains(r"Q:\sessions\a.jsonl")&&!shared.contains(r"\\?\"),"#62 的 verbatim 还原没进 xlsx：{shared}");
-    // #83 现状记录：Line 列此刻仍是文本单元格（Excel 会给它挂"以文本形式存储的
-    // 数字"警告）。#83 把它改成数字单元格时，这条断言随之翻转。
-    assert!(shared.contains("<si><t>7</t></si>"),"Line=7 当前以共享字符串落盘：{shared}");
+    // #83: "Line" is now a numeric cell, not a shared string — Excel no longer
+    // flags number-stored-as-text and sorting by line works.
+    assert!(sheet.contains(r#"<c r="N2"><v>7</v></c>"#),"Line=7 应为数字单元格：{sheet}");
+    assert!(!shared.contains("<si><t>7</t></si>"),"Line=7 不再是共享字符串：{shared}");
+    // #83: re-export over the same path replaces atomically, no .tmp litter.
+    service::query_local(&root,"export",&json!({"query":q,"format":"xlsx","path":path})).unwrap();
+    let leftovers:Vec<String>=fs::read_dir(&root).unwrap().filter_map(|e|e.ok()).map(|e|e.file_name().to_string_lossy().into_owned()).filter(|n|n.ends_with(".tmp")).collect();
+    assert!(leftovers.is_empty(),"原子导出不得留临时文件：{leftovers:?}");
     drop(cache);fs::remove_dir_all(root).unwrap();
 }

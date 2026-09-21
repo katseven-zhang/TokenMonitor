@@ -2753,6 +2753,7 @@ mod tests {
             reasoning_output_tokens: 0,
             total_tokens: 140,
             cost_usd,
+            unpriced_events: 0,
             models: BTreeMap::new(),
             projects: BTreeMap::new(),
             updated_at: "2026-06-01T00:00:00.000Z".to_string(),
