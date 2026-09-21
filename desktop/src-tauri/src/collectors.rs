@@ -463,9 +463,16 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
     }
     out
 }
+/// #111：dsh 的压缩帧判定，**大小写不敏感**（Windows 文件系统本身就不区分）。
+/// 扫描器的入选条件与这里的解码分支共用这一个函数，避免两处各写一遍再走岔：
+/// 修前扫描器用 `ext == "zstd"`、这里也用 `== "zstd"`，`.ZSTD` 在两道都被当成别的文件。
+pub fn is_dsh_zstd_ext(ext: &std::ffi::OsStr) -> bool {
+    ext.eq_ignore_ascii_case("zstd") || ext.eq_ignore_ascii_case("zst")
+}
+
 pub fn read_jsonl(agent: &str, path: &Path) -> Result<Parsed, String> {
     let mut bytes = Vec::new();
-    if agent == "dsh" && path.extension().is_some_and(|e| e == "zstd" || e == "zst") {
+    if agent == "dsh" && path.extension().is_some_and(is_dsh_zstd_ext) {
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = zstd::stream::read::Decoder::new(file).map_err(|e| e.to_string())?;
         // Complete frames remain usable if the writer has not finished its last frame.

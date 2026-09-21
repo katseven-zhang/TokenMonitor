@@ -13,6 +13,20 @@ use std::{
     time::{Instant, UNIX_EPOCH},
 };
 
+/// #111：Windows 文件系统大小写不敏感，`会话.JSONL` 与 `会话.jsonl` 是同一类文件。
+/// 修前这里做的是**大小写敏感**的字符串比较（`ext != "jsonl"`），于是 `.JSONL`/`.Jsonl`/
+/// `.ZSTD` 的日志被**静默跳过**——不计 files、不进 seen、也不报错，用户看到的是
+/// 「这个来源一条都没有」。改成显式的小写不敏感判定，集中在这一个函数里，
+/// 免得扫描器与解析器两处各写一遍再走岔（dsh 的 zstd 分支两边都要认）。
+pub fn is_collectable_ext(agent: &str, ext: &std::ffi::OsStr) -> bool {
+    ext.eq_ignore_ascii_case("jsonl") || (agent == "dsh" && collectors::is_dsh_zstd_ext(ext))
+}
+
+/// #111：sqlite 源的文件名判定，同一条大小写不敏感口径（`.DB` 也是数据库文件）。
+pub fn is_sqlite_db_ext(ext: &std::ffi::OsStr) -> bool {
+    ext.eq_ignore_ascii_case("db")
+}
+
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanStatus {
@@ -152,7 +166,7 @@ pub fn scan_cancellable(
                     match entry {
                         Ok(e)
                             if e.file_type().is_file()
-                                && e.path().extension().is_some_and(|x| x == "db") =>
+                                && e.path().extension().is_some_and(is_sqlite_db_ext) =>
                         {
                             let name = e
                                 .path()
@@ -192,10 +206,7 @@ pub fn scan_cancellable(
                     }
                     match entry {
                         Ok(e) if e.file_type().is_file() => {
-                            let ext = e.path().extension().unwrap_or_default().to_string_lossy();
-                            if ext != "jsonl"
-                                && !(agent == "dsh" && (ext == "zstd" || ext == "zst"))
-                            {
+                            if !e.path().extension().is_some_and(|ext| is_collectable_ext(agent, ext)) {
                                 continue;
                             }
                             if !seen.insert(indexed_path(e.path()).to_lowercase()) {
