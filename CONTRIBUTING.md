@@ -8,12 +8,30 @@
 
 0. **先做可行性判定**：逐请求用量必须以**可解析**的形式落地。找不到就不要接——一个靠猜字段写出来的
    采集器会变成"永远报 0 却在健康面板显示正常"的假数据源，比不接更有害。
-   反面案例见 `docs/ARCHITECTURE.md` 的 Antigravity 一节（载荷加密，判定为当前不可接入）。
+   判定要**可复核**：Antigravity 在 2026-09 一度被判"载荷加密、不可接入"（`conversations/*.pb`
+   熵 8.00、非任何压缩魔数），后来在同一数据面的 **SQLite `gen_metadata.data`（protobuf 裸格式）**
+   里找到了可解析的逐请求用量，如今是已发货的第 10 个来源（[docs/sources/antigravity.md](docs/sources/antigravity.md)）。
+   教训不是"Antigravity 不能接"，而是**一次调研的否定结论必须写清证据范围并留复核入口**——
+   加密的 `.pb` 是真的，"因此整源无可解析用量"的推论是错的。
 
 1. **调研格式**：找到数据文件，确认 usage 字段位置、口径（input 是否含缓存、reasoning 是否已含在 output 内）、
    模型名字段、时间戳格式与单位。口径结论要用原始数据验证，例如逐条核对
    `total == input + cacheRead + cacheWrite + output` 是否成立
-2. **写 collector**（`src/collectors/<tool>.js`），实现统一接口：
+2. **写来源 manifest**（`src/sources/<slug>.js`，`<slug>` 就是注册键 / `tool` 名）：
+
+```js
+export default {
+  tool: '<slug>', label: '展示名', kind: 'jsonl' | 'sqlite' | 'zst',
+  version: 1, collector: '<collector-id>', order: 10, apiBilled: false,
+  roots(ctx) { return [join(ctx.homedir, '.<slug>', 'sessions')]; },
+};
+```
+
+   要点：路径一律从 `ctx.homedir` / `ctx.localAppData` / `ctx.appData` / `ctx.xdgDataHome` 拼，
+   **禁止写死盘符或用户名**（注册表测试会拦）；`kind: 'sqlite'` 的 root 必须是**单个库文件**
+   （scanner 对它直接 stat），会话库随性增减时以索引库之类的稳定文件作锚点。
+
+3. **写 collector**（`src/collectors/<slug>.js`），实现统一接口：
 
 ```js
 export async function collectXxxFile(store, { tool, path, fileId, offset, state, version }) {
@@ -27,20 +45,33 @@ export async function collectXxxFile(store, { tool, path, fileId, offset, state,
 
    要点：模型名过 `normalizeModel()`；`dedup_key` 全局唯一且重放幂等；若用 state 保存跨次解析状态，**必须写入 `_v = version`**（否则常驻服务每轮全量重扫）
 
-3. **注册**（`src/config.js` 的 `SOURCES`）：tool 名、roots、kind（`jsonl`/`sqlite`/`zst`）、collector、version
-4. **前端登记**：`web/lib/theme.js` 的 `TOOL_COLORS`/`TOOL_LABEL` 各加一项，`web/style.css` 加 badge 配色。
-   配色别凭眼挑：新色要在深色底上与既有各色算 CIEDE2000（含红盲/绿盲模拟），标准是
-   **加入后全集的最差配对不比现状更差**。测试里有一条断言会拦住"加了源却忘了登记配色/标签"。
-   （健康列表不用管，它从 `SOURCES` 推导。）
-5. **补测试**（`test/run.mjs`）：在临时 HOME 下加 fixture，断言黄金数字、dedup 幂等、project 归属、
-   工具调用；增量类源再补一条"续写/删行后仍正确"的用例。判断测试是否够格的办法是把实现改坏一行，
-   看它会不会变红——不会变红的测试等于没写。
-6. **对账**：写独立脚本（Python 等）直接重算原始文件，与 `tokenmonitor scan` 后的库内数字精确比对，
+4. **注册＝什么都不用改**。加载由中心注册器 [src/source-registry.js](src/source-registry.js) 完成：它按目录枚举
+   `src/sources/*.js`（跳过 `contract.js`），逐个 `validateManifest` → 解析 roots → 按 `collector` 字段
+   动态 import `src/collectors/<collector>.js`，非法/抛错的 manifest 只记进 `SOURCE_ERRORS`，不让进程崩。
+   [src/config.js](src/config.js) 里没有 `SOURCES` 数组，只有 `export { SOURCES, SOURCE_ERRORS } from './source-registry.js'`。
+   ⚠️ **旧版本文档曾教"在 `src/config.js` 的 `SOURCES` 里登记"——照做会得到一个没有任何人加载的采集器**：
+   `config.js` 里根本没有这个数组，你以为加了，面板上永远是零，而且不报错。这段已经改过来了。
+
+5. **前端登记（可选）**：新来源会自动拿到 `/api/sources` 元数据 + `web/lib/sources.js` 的确定性回退色
+   与 label（#16），零改动即可显示。只有想要**品牌色**时才在 `web/lib/theme.js` 的
+   `TOOL_COLORS`/`TOOL_LABEL` 登记并在 `web/style.css` 加 badge 配色；配色别凭眼挑，新色要在深色底上与
+   既有各色算 CIEDE2000（含红盲/绿盲模拟），标准是**加入后全集的最差配对不比现状更差**。
+   内建 9 源必须有色有标签（`test/run.mjs` 有断言会拦），新来源不强制——否则每加一个源都得改 `theme.js`，
+   与"新来源只带自己的文件"的边界冲突。（健康列表不用管，它从 `SOURCES` 推导。）
+6. **补测试**（`test/sources/<slug>/<slug>.test.mjs`，一个能独立跑、能独立红的文件）：
+   ```
+   TOKENMONITOR_OFFLINE=1 node test/sources/<slug>/<slug>.test.mjs
+   ```
+   该目录下的 `*.test.mjs` 由 [test/run.mjs](test/run.mjs) **自动发现并逐个执行**（#67），新增文件不需要改任何
+   运行器；漏接线会被"孤儿测试守卫"直接判红。fixture 全部运行时合成（不落真实数据），断言黄金数字、
+   dedup 幂等、project 归属、增量/续写、锁占用降级。跨源共同的端到端黄金数字仍可加进 `test/run.mjs` 的
+   `[3]` fixtures 段。判断测试是否够格的办法是把实现改坏一行，看它会不会变红——不会变红的测试等于没写。
+7. **对账**：写独立脚本（Python 等）直接重算原始文件，与 `tokenmonitor scan` 后的库内数字精确比对，
    把结果贴进 PR。数量对不上要能解释清楚（例如全 0 用量的空调用被 `total <= 0` 跳过）
 
 ## 采集逻辑升级（已有源）
 
-改完 collector 后把 `config.js` 里对应源的 `version` +1——版本机制会自动对存量文件全量重扫回填（dedup 保证幂等）。
+改完 collector 后把 `src/sources/<slug>.js` 里对应源的 `version` +1——版本机制会自动对存量文件全量重扫回填（dedup 保证幂等）。
 
 ### 上游换了格式：最隐蔽的一类故障
 

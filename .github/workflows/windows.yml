@@ -91,3 +91,35 @@ jobs:
         env:
           TOKENMONITOR_OFFLINE: '1'
         run: node test/windows/gui.test.mjs
+
+  # #90：windows/tray 此前在 CI 里完全没有 job——托盘的 16 项行为断言（单实例互斥、
+  # 中文+空格路径下运行、退出无残留）与 .NET 工程不得复活的源码契约，只有本地手动跑过。
+  # 结构与 windows-gui 一致：先零告警构建，再 build.ps1 产出 publish/，最后行为测试。
+  # 缺产物时 tray.test.mjs 自身 exit 1（不接受隐式跳过），所以这个 job 是真的能红的门。
+  windows-tray:
+    name: rust tray build + behavior (#9/#32)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: 'Token Monitor'
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: 'Token Monitor'
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Cache cargo registry and tray target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'Token Monitor/windows/tray'
+      - name: cargo build --release (zero-warning gate, warnings denied via RUSTFLAGS)
+        env:
+          RUSTFLAGS: '-Dwarnings'
+        run: cargo build --release --manifest-path windows/tray/Cargo.toml
+      - name: Build publish artifact
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File windows/tray/build.ps1
+      - name: tray behavioral tests (artifact missing = hard fail; no skip-green)
+        env:
+          TOKENMONITOR_OFFLINE: '1'
+        run: node test/windows/tray.test.mjs

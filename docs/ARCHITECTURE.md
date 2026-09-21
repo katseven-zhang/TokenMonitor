@@ -7,7 +7,10 @@
 ```
 bin/tokenmonitor.js      CLI（scan / serve / today）
 src/
-  config.js              数据源注册表（kind + collector + version）
+  config.js              数据位置/端口/离线开关；SOURCES 只是 source-registry 的 re-export
+  source-registry.js     来源加载器：枚举 src/sources/*.js → 校验 manifest → 解析 roots → 绑定 collector
+  sources/               每源一个 manifest（<slug>.js 即注册键）：antigravity/ccmr/claude-code/codex/
+                         dsh/grok/opencode/pi/workbuddy/zcode（+ contract.js：kind 枚举、context、校验、去重）
   store.js               SQLite（node:sqlite）：events / files游标 / quota / rates / tool_calls / balance_history
   scanner.js             按源类型枚举 + 增量扫描 + FSEvents + 版本回填 + resume链模型继承
   server.js              HTTP API + SSE + 健康计算 + Claude 5h 推算 + 每日备份
@@ -15,9 +18,17 @@ src/
   pricing.js             ccmr 费用折算 + 余额对账
   rates.js               WorkBuddy 积分费率自学习（最小二乘）
   models.js              模型名归一化（跨源大小写合并）
-  collectors/            每源一个适配器（claude / codex / zcode / dsh / workbuddy / grok / pi / opencode）
+  bar.js                 `bar` 分发：macOS 胶囊 / Windows 托盘 EXE 查找与拉起
+  platform/              Windows 侧运行时（runtime 日志与锁、watch 降级、windows-service 任务计划）
+  collectors/            每源一个适配器（claude〔claude-code+ccmr 共用〕/ codex / zcode / dsh /
+                         workbuddy / grok / pi / opencode / antigravity）。另有 lines.js 不是来源，
+                         是共用的 JSONL 字节游标 reader（半行不推进、剥行尾 CR、跨块 UTF-8 安全），
+                         被 claude/codex/grok/pi/workbuddy 五个采集器 import
 web/                     零构建前端（vanilla JS + ECharts UMD）
 menubar/                 macOS 菜单栏 App（Swift/AppKit，需 .app bundle）
+windows/gui/             Windows 启动器（原生 Rust Win32，#24/#28）
+windows/tray/            Windows 系统托盘（原生 Rust Win32，#9/#32）
+desktop/                 Tauri 桌面版（React 前端 + Rust 后端，独立版本线）
 ~/.tokenmonitor/         运行时数据（库 / 备份 / pricing.json / 日志）
 ```
 
@@ -116,9 +127,22 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
   `message` `ON DELETE CASCADE`，session 还带 `revert` 列——删掉最大 rowid 后 SQLite 会把该号
   让给下一条插入，新行的 rowid 就可能不大于水位而被静默跳过。故每轮先比 `MAX(rowid)`：表变短
   即说明删过行，水位退回 0 整表重读（dedup 幂等）。残留边界：若"删行"与"插新行"之间一次扫描
-  都没发生，缩短信号会被错过，需靠 `SOURCES.version` 自增触发全量重扫补回
+  都没发生，缩短信号会被错过，需靠该源 manifest（`src/sources/<slug>.js`）的 `version` 自增触发全量重扫补回
 - ZCode 的 `model_usage` 只追加、不改行，rowid 水位够用——同为 sqlite 源也不能照抄增量策略，
   先确认那张表会不会删行、会不会原地更新
+
+### Antigravity
+`~/.gemini/antigravity*`（IDE / CLI / ACP 变体，`ANTIGRAVITY_HOME` 可覆盖）下每个 home 两类 SQLite
+（WAL，只读并发）：`conversation_summaries.db` 供 `conversation_id → workspace_uris`（项目名），
+`conversations/<uuid>.db` 的 `gen_metadata.data` 是未加密 protobuf 裸格式、逐行一次 LLM 生成。
+kind=sqlite，manifest version 1，`apiBilled` 未置（订阅制计量，无证据扣用户 API 钱包）。
+口径与 opencode/pi 同族：input 不含缓存，`output` **已含 thinking**（`reasoning_tokens` 单列只作分析，
+绝不再加进 total），零用量与无时间戳行跳过。两代布局差异（完成时间从行内 `1.9.4.x` 迁到同库
+`steps` 同 idx 行）两代都认，行内优先、回退 steps 对齐、皆无则丢行。
+**锚点取舍**：scanner 要求 sqlite 源的 root 是单个文件，而会话库随性增减，故以同 home 的
+`conversation_summaries.db` 作稳定锚点、由 collector 自行枚举 `conversations/*.db`；
+代价是"只有会话库而无索引库"的 home 发现不了——此时不猜测、不扫全盘，宁可漏扫。
+字段映射、增量水位与锁占用降级见 [sources/antigravity.md](./sources/antigravity.md)。
 
 ## 计价：DeepSeek 的峰谷价
 
@@ -136,7 +160,7 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 
 - **增量三策略**：jsonl 字节游标（只推进到完整行尾，写入中的半行下次重读；UTF-8 跨块安全）/ sqlite 水位（只追加的表用 rowid，会原地更新的表用 `time_updated`）/ zst 快照重解析
 - **dedup 幂等**：所有事件带全局唯一 dedup_key，重复解析 INSERT OR IGNORE
-- **采集器版本号**：`SOURCES.version` 与 `files.state_json._v` 不符 → 自动全量重扫回填（用于采集逻辑升级，如新增工具调用提取）
+- **采集器版本号**：来源 manifest 的 `version` 与 `files.state_json._v` 不符 → 自动全量重扫回填（用于采集逻辑升级，如新增工具调用提取）
 - **常驻进程版本戳**：collector 必须把 `_v` 写进 state，否则常驻服务每轮全量重扫（真实踩坑）
 - **健康自检**：解析错误（红）/ 文件 30 分钟内在写但无新事件（黄，格式漂移静默失败信号）/ 无数据（灰）
 
@@ -144,7 +168,14 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
 
 每源接入后用独立脚本（Python/独立 SQL）对原始文件重算比对，全部精确一致。Codex 的正确口径经"官方面板累计值 vs 本地差分值"交叉验证（差值为官方跨设备统计）。WorkBuddy 积分费率经最小二乘残差验证。
 
-## Antigravity / antigravity-cli：调研结论是**当前不可接入**（2026-09 实测）
+## Antigravity / antigravity-cli：一次"否定结论"被实现推翻的完整记录（2026-09）
+
+> **状态更正（#90）**：本节原标题与正文的结论——"**当前不可接入**"——**已被实现推翻**。
+> Antigravity 现在是已发货的第 10 个来源：`src/sources/antigravity.js` +
+> `src/collectors/antigravity.js` + [sources/antigravity.md](./sources/antigravity.md) +
+> `test/sources/antigravity/antigravity.test.mjs`（39 项断言；另对本机 23 个真实会话库 /
+> 6520 行 `gen_metadata` 实跑：首轮 6460 事件入库、23 行零用量或无时间戳跳过、重扫 0 重复）。
+> 原始调研全文保留在下面，因为它记录的是一次**方法上正确、推论上错误**的判定——删掉只会丢掉教训。
 
 Google Antigravity（IDE，`com.google.antigravity` 2.3.1）与 antigravity-cli 都在本机留了数据，
 但**逐请求 token 用量没有以任何可解析的形式落地**。逐项证据：
@@ -168,7 +199,18 @@ tool_calls / thinking`——有完整的对话与工具调用，唯独没有 usa
 确认，重点看 `conversations/*.db` 的 `gen_metadata`（列名 `data`/`size`，最像放生成元数据的地方）
 是否开始有行。
 
-结论：**在拿到可解析的用量来源之前不接**。写一个解析猜测字段的采集器，只会做出一个
+**上面那张表错在哪一格**：`conversations/*.db` 那行写的是"表存在但为空"——这句话本身是对的，
+错在把它读成了"这张表没有用量"。**空表 ≠ 无 schema**：表与列都在、行数为 0，只说明那台机器没登录；
+而同一格的"载荷列是 protobuf blob"其实已经指到了答案上——`gen_metadata.data` 是**未加密的**
+protobuf 裸格式，逐行一次 LLM 生成，token 明细就在里面。`.pb` 文件加密是真的，
+"因此整源无可解析用量"的推论是错的：用量根本不在 `.pb` 里。当年那句"保留"里指明的复核入口
+（看 `gen_metadata` 是否开始有行）就是后来落地这个来源时真正走通的路径。
+
+结论修正为：**"不可接入"必须是带范围的判定（哪个数据面、哪台机器、什么状态下不可接入），
+不能是源级别的永久判决**——只要还有一个可解析的数据面没被排除干净，就不能写"整源不可接"。
+而"不得猜字段"这条纪律本身没有被推翻，它现在仍在生效：Antigravity 的 `steps` 表确有工具调用痕迹，
+但其编码未经独立验证，所以工具调用至今**不解析**，作为已知 unsupported 记录在
+[sources/antigravity.md](./sources/antigravity.md)。写一个靠猜字段凑出来的采集器，只会做出一个
 永远报 0 却在健康面板显示"正常"的数据源，比不接更有害。
 
 ## 不可统计的边界
