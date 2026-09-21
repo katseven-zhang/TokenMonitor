@@ -1151,6 +1151,34 @@ function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; 
   );
 }
 
+/// #119：焦点陷阱里「这一句 Tab 该做什么」的判定，抽成纯函数是为了能被单测驱动
+/// （本仓库的 desktop 单测没有 DOM 装置，vitest 跑在 node 环境里）。
+/// 语义：在 last 上按 Tab → 回环到 first；在 first 上按 Shift+Tab → 回环到 last；
+/// 其余情况交给浏览器正常前进。空列表由调用方决定（它要 preventDefault 后自己兜底）。
+export function tabWrapTarget<T>(
+  focusable: readonly T[],
+  active: T | null,
+  shiftKey: boolean,
+): "first" | "last" | "none" {
+  if (focusable.length === 0) return "none";
+  if (shiftKey && active === focusable[0]) return "last";
+  if (!shiftKey && active === focusable[focusable.length - 1]) return "first";
+  return "none";
+}
+
+/// #119：把处于 `inert` 子树里的元素从可聚焦集合里剔掉。
+/// `inert` 只影响浏览器自己的 Tab 顺序，**不影响 `querySelectorAll` 的匹配**：
+/// 折叠头部（滚动后 `inert={isScrolled}`）里的按钮仍然会被查出来，于是陷阱算出的
+/// first/last 可能是头部元素，`document.activeElement === last` 永不成立，
+/// Tab 从最后一个内容元素继续时焦点就逃出对话框（body 已 overflow:hidden）。
+/// 判定用 `closest("[inert]")`，所以 React 渲染出的 `inert=""` 与手写 `inert="true"`
+/// 都能识别（属性存在即视为 inert，不看值）。
+export function withoutInerted<T extends { closest(selector: string): unknown }>(
+  elements: readonly T[],
+): T[] {
+  return elements.filter((element) => element.closest("[inert]") == null);
+}
+
 export function SessionDetailModal({ session, query, onClose }: SessionDetailModalProps) {
   const {money:formatCurrency}=useCurrency();
   const { t, i18n } = useTranslation();
@@ -1246,26 +1274,37 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
       const dialog = dialogRef.current;
       if (!dialog) return;
 
-      const focusableElements = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      const focusableElements = withoutInerted(
+        Array.from(
+          dialog.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
         ),
       );
 
       if (focusableElements.length === 0) {
+        // 一个可聚焦元素都不剩（整窗都被 inert 掉）：焦点留在对话框里，不让它跑到浏览器 UI。
         event.preventDefault();
         return;
       }
 
-      const first = focusableElements[0];
-      const last = focusableElements[focusableElements.length - 1];
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
+      switch (
+        tabWrapTarget<HTMLElement>(
+          focusableElements,
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          event.shiftKey,
+        )
+      ) {
+        case "first":
+          event.preventDefault();
+          focusableElements[0].focus();
+          break;
+        case "last":
+          event.preventDefault();
+          focusableElements[focusableElements.length - 1].focus();
+          break;
+        default:
+          break;
       }
     }
     window.addEventListener("keydown", handleKeyDown);
