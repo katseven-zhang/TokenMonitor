@@ -329,3 +329,50 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tokens.total(), 870);
 }
+
+/// #79：旧结构（assistant/chunk）同一 seq 的不同 step 必须各自成一行。
+/// 事件缓存的主键是 (agent,id)，只按 seq 定键时后一条会整条顶掉前一条——
+/// Node 端早就把 turn/step 带进键里（src/collectors/dsh.js），桌面端此前没有。
+/// 同一份记录与同样的期望数字写在 test/windows/dsh.test.mjs 的 [#79] 段。
+#[test]
+fn dsh_same_seq_legacy_chunks_are_not_overwritten_in_the_cache() {
+    let f = Fixture::new();
+    let dir = f.jsonl(
+        "dsh",
+        &[
+            json!({"type":"assistant/chunk","seq":7,"time":TS,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"cacheReadTokens":10,"cacheWriteTokens":5,"outputTokens":20}}}}),
+            json!({"type":"assistant/chunk","seq":7,"time":TS+1000,"data":{"turn":1,"step":2,"chunk":{"type":"usage","usage":{"inputTokens":200,"cacheReadTokens":20,"cacheWriteTokens":0,"outputTokens":40}}}}),
+        ],
+    );
+    let mut roots = BTreeMap::new();
+    roots.insert("dsh".to_string(), vec![dir]);
+    let settings = config::Settings {
+        roots,
+        ..Default::default()
+    };
+    let query = Query {
+        start: TS,
+        end: TS + 60_000,
+        agent: Some("dsh".into()),
+        model: None,
+        project: None,
+        session: None,
+        search: String::new(),
+        time_zone: None, offset_minutes: 0,
+    };
+    for round in 0..2 {
+        let statuses = scanner::scan(&f.0, &settings).unwrap();
+        assert!(
+            statuses.iter().all(|s| s.errors.is_empty()),
+            "round {round}: {statuses:?}"
+        );
+        let cache = db::open_read(&f.0).unwrap();
+        let events = db::events(&cache, &query).unwrap();
+        assert_eq!(events.len(), 2, "round {round}: 同 seq 的两个 step 不能互相顶掉");
+        assert_eq!(
+            events.iter().map(|e| e.tokens.total()).sum::<i64>(),
+            395,
+            "round {round}"
+        );
+    }
+}

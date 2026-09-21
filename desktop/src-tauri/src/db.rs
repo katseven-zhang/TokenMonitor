@@ -75,7 +75,8 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     }
     // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
     // while preserving cached data until each replacement transaction is ready.
-    // 5: #75 Codex 首个采样/回落只认 last_token_usage，且 cache_write 认两种字段名。
+    // 5: #75 Codex 首个采样/回落只认 last_token_usage，且 cache_write 认两种字段名；
+    //    #79 dsh 旧结构定键带上 turn/step（此前同 seq 的后一条整条顶掉前一条）。
     const COLLECTOR_REVISION: &str = "5";
     let revision: Option<String> = db
         .query_row(

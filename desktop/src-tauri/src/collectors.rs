@@ -25,6 +25,15 @@ fn number(v: &Value, key: &str) -> i64 {
 fn string(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
 }
+/// turn/step 这类"可能是数字、可能是字符串、也可能没有"的分代标签。
+/// 缺失必须与 0 可区分（与 Node 端 `${rec.data?.turn ?? ''}` 同式）。
+fn usage_tag(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
 fn first(values: &[String], fallback: &str) -> String {
     values
         .iter()
@@ -361,14 +370,25 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                         reasoning: number(u, "reasoningTokens"),
                     });
                     model = first(&[string(&data["message"]["source"], "model")], &model);
-                    key = format!(
-                        "{session}:{}:{}",
-                        Path::new(path)
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy(),
-                        rec["seq"]
-                    );
+                    // #79 与 Node 端 collectDshFile 的同一条定键规则：
+                    // 旧结构（assistant/chunk）的 seq 在 turn/step 空间里会重复出现，
+                    // 只按 seq 定键会让同一 seq 的后续 step 整条顶掉前一条（事件缓存
+                    // 的 PRIMARY KEY(agent,id) 是覆盖语义，不是并存）。
+                    // v3（assistant/message）的 seq 全文件唯一，按文件名分代即可。
+                    let file = Path::new(path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    key = if kind == "assistant/chunk" {
+                        format!(
+                            "{session}:{file}:{}:{}:{}",
+                            rec["seq"],
+                            usage_tag(&data["turn"]),
+                            usage_tag(&data["step"])
+                        )
+                    } else {
+                        format!("{session}:{file}:{}", rec["seq"])
+                    };
                 }
             }
             "grok" => {
@@ -508,7 +528,13 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let event = row.map_err(|e| e.to_string())?;
+            // #79：单行读不动（列类型漂移、NULL 撞上非空列型、值过大）只丢这一行并计入
+            // malformed，让来源健康停留在 warning；修前这里的 `?` 会让一行坏数据把整个
+            // 文件解析判失败，该源从此每轮 error、再也不出数。
+            let Ok(event) = row else {
+                out.malformed_lines += 1;
+                continue;
+            };
             // Empty/in-progress rows are not usage requests, as in the other adapters.
             if event.tokens.total() > 0 {
                 out.events.push(event);
@@ -528,7 +554,11 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (id, s, n, t) = row.map_err(|e| e.to_string())?;
+            // #79：同上一条规则，坏行只丢自己
+            let Ok((id, s, n, t)) = row else {
+                out.malformed_lines += 1;
+                continue;
+            };
             tool(&mut out, agent, &s, t, &n, &id.to_string(), &source, 0);
         }
     } else if agent == "opencode" {
@@ -545,7 +575,11 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (id, session, time, data, project) = row.map_err(|e| e.to_string())?;
+            // #79：坏行只丢自己，不把整源判失败
+            let Ok((id, session, time, data, project)) = row else {
+                out.malformed_lines += 1;
+                continue;
+            };
             let Ok(v) = serde_json::from_str::<Value>(&data) else {
                 out.malformed_lines += 1;
                 continue;
@@ -589,7 +623,11 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             })
             .map_err(|e| e.to_string())?;
         for row in rows {
-            let (id, s, t, d) = row.map_err(|e| e.to_string())?;
+            // #79：坏行只丢自己，不把整源判失败
+            let Ok((id, s, t, d)) = row else {
+                out.malformed_lines += 1;
+                continue;
+            };
             if let Ok(v) = serde_json::from_str::<Value>(&d) {
                 if v["type"] == "tool" {
                     tool(
@@ -677,7 +715,8 @@ fn step_times(db: &Connection) -> rusqlite::Result<BTreeMap<i64, i64>> {
         stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
     let mut out = BTreeMap::new();
     while let Some(row) = rows.next() {
-        let (idx, b) = row?;
+        // #79：单行读不动只丢那一行的时间，不让整库解析失败
+        let Ok((idx, b)) = row else { continue };
         if let Ok(f) = fields(&b) {
             let t = nested(&f, 1);
             out.insert(idx, num(&t, 1) * 1000 + num(&t, 2) / 1_000_000);
@@ -710,7 +749,11 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
         .map_err(|e| e.to_string())?;
     for row in rows {
-        let (idx, b) = row.map_err(|e| e.to_string())?;
+        // #79：坏行只丢自己，不把整源判失败
+        let Ok((idx, b)) = row else {
+            out.malformed_lines += 1;
+            continue;
+        };
         let Ok(f) = fields(&b) else {
             out.malformed_lines += 1;
             continue;
@@ -881,6 +924,54 @@ mod tests {
     }
     /// #95（桌面侧对偶）：steps 表被改走时必须降级为"没有步级时间"，
     /// 能定时的生成照常入库，定不了时的按 malformed 计，整库解析仍返回 Ok。
+    /// #79：旧结构（assistant/chunk）同一 seq 在不同 turn/step 上重复出现时，两条都必须
+    /// 留下。只按 seq 定键会让后一条整条顶掉前一条（事件缓存主键是覆盖语义）。
+    /// 同一份记录与同样的期望数字写在 Node 端 test/windows/dsh.test.mjs 的 [#79] 段，
+    /// 落库后的"两条都在"则由 desktop/src-tauri/tests/sources.rs 的 dsh 同 seq 块守。
+    #[test]
+    fn dsh_legacy_chunks_sharing_seq_stay_separate() {
+        let s = r#"{"type":"session","time":1800000000000,"cwd":"D:\\repo"}
+{"type":"assistant/chunk","seq":7,"time":1800000001000,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":100,"cacheReadTokens":10,"cacheWriteTokens":5,"outputTokens":20}}}}
+{"type":"assistant/chunk","seq":7,"time":1800000002000,"data":{"turn":1,"step":2,"chunk":{"type":"usage","usage":{"inputTokens":200,"cacheReadTokens":20,"cacheWriteTokens":0,"outputTokens":40}}}}"#;
+        let p = parse_jsonl("dsh", "会话目录/session.jsonl", s);
+        assert_eq!(p.events.len(), 2, "{:?}", p.events);
+        assert_eq!(p.events[0].tokens.total(), 135);
+        assert_eq!(p.events[1].tokens.total(), 260);
+        assert_ne!(p.events[0].id, p.events[1].id);
+        // v3 的 seq 全文件唯一，定键规则刻意不带 turn/step（两端同式）
+        let v3 = r#"{"type":"assistant/message","seq":7,"time":1800000001000,"data":{"turn":1,"step":1,"usage":{"inputTokens":100,"cacheReadTokens":10,"cacheWriteTokens":5,"outputTokens":20},"message":{"source":{"model":"m"}}}}
+{"type":"assistant/message","seq":7,"time":1800000002000,"data":{"turn":1,"step":2,"usage":{"inputTokens":100,"cacheReadTokens":10,"cacheWriteTokens":5,"outputTokens":20},"message":{"source":{"model":"m"}}}}"#;
+        let p2 = parse_jsonl("dsh", "会话目录/session.v3.jsonl", v3);
+        assert_eq!(p2.events.len(), 2);
+        assert_eq!(p2.events[0].id, p2.events[1].id);
+    }
+    /// #79（桌面侧）：SQLite 源里一行列类型读不动只丢那一行并计 malformed，
+    /// 整个文件/整个源不再被判失败。
+    #[test]
+    fn sqlite_bad_row_is_skipped_without_failing_the_source() {
+        let path = std::env::temp_dir().join(format!("tm-zcode-{}.db", uuid::Uuid::new_v4()));
+        let _ = fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE session(id TEXT,directory TEXT);
+                 CREATE TABLE model_usage(id TEXT,session_id TEXT,model_id TEXT,started_at INTEGER,input_tokens INTEGER,output_tokens INTEGER,reasoning_tokens INTEGER,cache_creation_input_tokens INTEGER,cache_read_input_tokens INTEGER);
+                 CREATE TABLE tool_usage(id INTEGER,session_id TEXT,tool_name TEXT,started_at INTEGER);
+                 INSERT INTO session VALUES('z-session','project-dir');
+                 INSERT INTO model_usage VALUES('z-1','z-session','m',1800000000000,800,60,0,0,700);
+                 INSERT INTO model_usage VALUES(NULL,'z-session','m',1800000001000,1,1,0,0,0);
+                 INSERT INTO tool_usage VALUES(1,'z-session','Bash',1800000000000);
+                 INSERT INTO tool_usage VALUES(2,NULL,'Read',1800000002000);",
+            )
+            .unwrap();
+        }
+        let parsed = read_sqlite("zcode", &path).expect("一行坏不能让整个源失败");
+        assert_eq!(parsed.events.len(), 1, "{:?}", parsed.events);
+        assert_eq!(parsed.events[0].tokens.total(), 860);
+        assert_eq!(parsed.activities.len(), 1, "{:?}", parsed.activities);
+        assert_eq!(parsed.malformed_lines, 2);
+        fs::remove_file(path).unwrap();
+    }
     #[test]
     fn antigravity_missing_steps_table_degrades_instead_of_failing() {
         fn var(mut n: u64) -> Vec<u8> {
