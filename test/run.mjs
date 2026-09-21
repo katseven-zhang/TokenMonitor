@@ -1643,6 +1643,41 @@ console.log('\n[17] Codex rate_limits 规范化（#44：三窗口/0与缺失可�
       JSON.stringify(r75.state.cum));
     rmSync(base, { recursive: true, force: true });
   }
+
+  /* --- 跨分支对账：codex 首样本与十源平价探针的差值已经是 0（#75 第 1 项） ---
+   * 姊妹分支 `codex/fix-desktop-data`@6b91d98 的 desktop/scripts/compare-local.mjs 把
+   * codex 记成"量化分歧 -1 事件 / -120 tokens / -80 cached"，理由写的是"Node 侧每条
+   * 会话第一次 token_count 只建累计基线不产事件（src/collectors/codex.js:149）"——那是
+   * #75 之前的形状（现在的对应实现是 codex.js 的 baseline 分支，它**产**这一条事件）。
+   * 这里把那条登记的夹具原样跑一遍并钉住数字；桌面侧同一份输入钉在
+   * collectors.rs::codex_first_sample_no_longer_diverges_from_node_parity_probe。
+   * 两边任一端把首样本改回"只建基线不产事件"，这两条断言就会分头变红。 */
+  {
+    const sample = '{"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}}';
+    const PROBE = [
+      '{"type":"session_meta","payload":{"id":"codex-session","cwd":"D:\\\\我的 项目"}}',
+      '{"type":"turn_context","payload":{"model":"m"}}',
+      `{"timestamp":"2026-09-20T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":${sample}}}`,
+      // 累计值与上一条完全相同 = 同一次请求的重复通知，两端都不产第二条
+      `{"timestamp":"2026-09-20T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":${sample}}}`,
+    ].join('\n') + '\n';
+    const base = mkdtempSync(join(tmpdir(), 'codex-parity-probe-'));
+    const file = join(base, 'rollout-2026-09-20T00-00-00-probe.jsonl');
+    writeFileSync(file, PROBE);
+    const ev = [];
+    const keys = new Set();
+    const store = {
+      saveQuota: () => {}, insertToolCall: () => 1,
+      insertEvent: (e) => { if (keys.has(e.dedup_key)) return 0; keys.add(e.dedup_key); ev.push(e); return 1; },
+    };
+    await collectCodexFile(store, { path: file, fileId: 'probe', offset: 0, state: null, version: 3 });
+    ok('跨分支对账：平价探针的 codex 夹具在 Node 侧给出 1 条事件（不是 0 条）',
+      ev.length === 1, JSON.stringify(ev.map((e) => e.total_tokens)));
+    ok('跨分支对账：那条登记的 -120 tokens / -80 cached 差值现在是 0',
+      ev[0]?.total_tokens === 120 && ev[0]?.cached_input === 80 && ev[0]?.input_tokens === 20,
+      JSON.stringify(ev[0]));
+    rmSync(base, { recursive: true, force: true });
+  }
 }
 
 /* ---------- [18] Codex 配额快照历史存储（#45） ---------- */

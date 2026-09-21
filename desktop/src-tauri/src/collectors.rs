@@ -926,6 +926,14 @@ fn num(f: &BTreeMap<u64, Field>, key: u64) -> i64 {
 }
 /// steps.metadata 提供的步级时间（idx → ms）。本机 build 的生成行内没有 wall-clock，
 /// 时间只能来自这里（与 Node 端 stepTimestampMs 同一路径 1.1/1.2）。
+/// SQLite 的 schema 漂移：表被删/改名，或列被改名。这两种说的是"上游换了形状"，
+/// 不是"这一份数据读坏了"，所以只能让对应的信息位缺失，绝不能让整个源每轮抛错——
+/// scanner 拿到 `Err` 就把该源标成 error 且**不做** `replace_file`，缓存从此停在旧快照
+/// 上再不出数（#79 与 #95 修的都是这一条停摆路径，两边只差在坏的是行还是列名）。
+fn schema_drift(e: &rusqlite::Error) -> bool {
+    let text = e.to_string();
+    text.contains("no such table") || text.contains("no such column")
+}
 fn step_times(db: &Connection) -> rusqlite::Result<BTreeMap<i64, i64>> {
     let mut stmt = db.prepare("SELECT idx,metadata FROM steps")?;
     let mut rows =
@@ -950,13 +958,14 @@ pub fn read_antigravity(path: &Path, project: &str) -> Result<Parsed, String> {
         .to_string_lossy()
         .to_string();
     let source = path.display().to_string();
-    // #95：steps 表被改走（schema 漂移）只意味着"没有步级时间"，不能让整库解析失败 ——
-    // 修前这里的 `?` 会把该源永久标成 error（一个漂移的会话库 = 整源再不出数）。
+    // #95：steps 表被改走（整表缺失或列被改名）只意味着"没有步级时间"，不能让整库解析
+    // 失败 —— 修前这里的 `?` 会把该源永久标成 error（一个漂移的会话库 = 整源再不出数）。
     // 锁/IO 一类的暂时性失败仍然上报：那种情况下缓存里已有的事件必须原样保留、
     // 下一轮重读，绝不能用一份读不全的结果去替换它。
     let times = match step_times(&db) {
         Ok(t) => t,
-        Err(e) if e.to_string().contains("no such table") => BTreeMap::new(),
+        // "no such table" 与 "no such column" 都是上游改了 schema 的形状，不是读坏了数据
+        Err(e) if schema_drift(&e) => BTreeMap::new(),
         Err(e) => return Err(e.to_string()),
     };
     let mut stmt = db
@@ -1200,6 +1209,29 @@ mod tests {
         );
         assert!(alone.events.is_empty(), "{:?}", alone.events);
     }
+    /// 跨分支对账（#75 第 1 项）：姊妹分支 `codex/fix-desktop-data`@6b91d98 新加的十源
+    /// 平价探针把 codex 记成"量化分歧 −1 事件 / −120 tokens / −80 cached"，理由是
+    /// "Node 侧每条会话第一次 token_count 只建累计基线不产事件（`codex.js:149`）"。
+    /// 那个理由说的是 #75 之前的 Node 形状；把它自己的夹具原样搬过来钉住两端就知道
+    /// 差值已经是 0：首个采样两端都按 `last_token_usage` 落这一条 120/80 的事件，
+    /// 第二条累计值未变（重复通知）两端都不落。Node 侧同一份输入钉在
+    /// `test/run.mjs` 的"跨分支对账"块里。任一端改回"只建基线不产事件"必红。
+    #[test]
+    fn codex_first_sample_no_longer_diverges_from_node_parity_probe() {
+        const PROBE_USAGE: &str = r#""last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10},"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10}"#;
+        let text = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"codex-session\",\"cwd\":\"D:\\\\我的 项目\"}}}}\n\
+             {{\"type\":\"turn_context\",\"payload\":{{\"model\":\"m\"}}}}\n\
+             {{\"timestamp\":\"2026-09-20T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{{s}}}}}}}\n\
+             {{\"timestamp\":\"2026-09-20T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"info\":{{{s}}}}}}}\n",
+            s = PROBE_USAGE
+        );
+        let p = parse_jsonl("codex", "probe.jsonl", &text);
+        assert_eq!(p.malformed_lines, 0, "夹具本身不能带坏行：{:?}", p.events);
+        assert_eq!(p.events.len(), 1, "首个采样两端都产这一条：{:?}", p.events);
+        let t = &p.events[0].tokens;
+        assert_eq!((t.total(), t.cached, t.input), (120, 80, 20), "{:?}", t);
+    }
     #[test]
     fn anthropic_reasoning_is_not_double_counted() {
         let p = parse_jsonl(
@@ -1239,6 +1271,9 @@ mod tests {
     }
     /// #79（桌面侧）：SQLite 源里一行列类型读不动只丢那一行并计 malformed，
     /// 整个文件/整个源不再被判失败。
+    /// 坏行的形状按验收条件点名的一种来：**TEXT 型的 `started_at`**（SQLite 动态类型
+    /// 下 INTEGER 声明只是亲和性提示，写入方塞字符串进去完全合法，'不是数字' 转不成
+    /// INTEGER 就以 TEXT 存着），外加 NULL 撞非空列型那一种。
     #[test]
     fn sqlite_bad_row_is_skipped_without_failing_the_source() {
         let path = std::env::temp_dir().join(format!("tm-zcode-{}.db", uuid::Uuid::new_v4()));
@@ -1252,8 +1287,10 @@ mod tests {
                  INSERT INTO session VALUES('z-session','project-dir');
                  INSERT INTO model_usage VALUES('z-1','z-session','m',1800000000000,800,60,0,0,700);
                  INSERT INTO model_usage VALUES(NULL,'z-session','m',1800000001000,1,1,0,0,0);
+                 INSERT INTO model_usage VALUES('z-3','z-session','m','不是数字',500,50,0,0,400);
                  INSERT INTO tool_usage VALUES(1,'z-session','Bash',1800000000000);
-                 INSERT INTO tool_usage VALUES(2,NULL,'Read',1800000002000);",
+                 INSERT INTO tool_usage VALUES(2,NULL,'Read',1800000002000);
+                 INSERT INTO tool_usage VALUES(3,'z-session','Write','不是数字');",
             )
             .unwrap();
         }
@@ -1261,7 +1298,85 @@ mod tests {
         assert_eq!(parsed.events.len(), 1, "{:?}", parsed.events);
         assert_eq!(parsed.events[0].tokens.total(), 860);
         assert_eq!(parsed.activities.len(), 1, "{:?}", parsed.activities);
-        assert_eq!(parsed.malformed_lines, 2);
+        // 四条坏行各自只丢自己：NULL 主键、TEXT 型 started_at（用量行）、NULL 会话、
+        // TEXT 型 started_at（工具行）
+        assert_eq!(parsed.malformed_lines, 4, "{:?}", parsed);
+        fs::remove_file(path).unwrap();
+    }
+    /// #79 第三条验收：opencode 走的是同一条容错读取（同一个 `let Ok(..) else` 形状），
+    /// 一行 TEXT 型 `time_created` 只丢那一行，健康停在 malformed 计数而不是整源 error。
+    #[test]
+    fn opencode_bad_sqlite_row_is_skipped_without_failing_the_source() {
+        let path = std::env::temp_dir().join(format!("tm-opencode-{}.db", uuid::Uuid::new_v4()));
+        let _ = fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE session(id TEXT,directory TEXT);
+                 CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,data TEXT);
+                 CREATE TABLE part(id TEXT,session_id TEXT,time_created INTEGER,data TEXT);
+                 INSERT INTO session VALUES('o-session','project-dir');
+                 INSERT INTO message VALUES('m-1','o-session',1800000000000,
+                   '{\"role\":\"assistant\",\"modelID\":\"M\",\"tokens\":{\"input\":10,\"output\":5,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1800000000000}}');
+                 INSERT INTO message VALUES('m-2','o-session','不是数字',
+                   '{\"role\":\"assistant\",\"modelID\":\"M\",\"tokens\":{\"input\":7,\"output\":3},\"time\":{\"created\":1800000001000}}');
+                 INSERT INTO part VALUES('p-1','o-session',1800000000000,
+                   '{\"type\":\"tool\",\"tool\":\"bash\",\"callID\":\"c1\",\"state\":{\"time\":{\"start\":1800000000000}}}');
+                 INSERT INTO part VALUES('p-2','o-session','不是数字',
+                   '{\"type\":\"tool\",\"tool\":\"read\",\"callID\":\"c2\"}');",
+            )
+            .unwrap();
+        }
+        let parsed = read_sqlite("opencode", &path).expect("一行类型漂移不能冻结整源");
+        assert_eq!(parsed.events.len(), 1, "{:?}", parsed.events);
+        assert_eq!(parsed.events[0].tokens.total(), 15);
+        assert_eq!(parsed.activities.len(), 1, "{:?}", parsed.activities);
+        assert_eq!(parsed.malformed_lines, 2, "{:?}", parsed);
+        fs::remove_file(path).unwrap();
+    }
+    /// #79/#95：`steps` 表**在但列被改名**（schema 漂移的另一种）与整表缺失同一种
+    /// 处理——只是"没有步级时间"，不是解析失败。修前这里的白名单只放 `no such table`，
+    /// `no such column` 仍然把整份结果判 Err，scanner 因此永不 `replace_file`，
+    /// 该会话库从此每轮重炸、缓存里是旧快照。
+    #[test]
+    fn antigravity_renamed_steps_column_degrades_instead_of_failing() {
+        fn var(mut n: u64) -> Vec<u8> {
+            let mut out = vec![];
+            while n >= 128 {
+                out.push((n as u8 & 127) | 128);
+                n >>= 7;
+            }
+            out.push(n as u8);
+            out
+        }
+        fn number(field: u64, n: u64) -> Vec<u8> {
+            [var(field << 3), var(n)].concat()
+        }
+        fn blob(field: u64, b: &[u8]) -> Vec<u8> {
+            [var((field << 3) | 2), var(b.len() as u64), b.to_vec()].concat()
+        }
+        let path = std::env::temp_dir().join(format!("tm-agy-col-{}.db", uuid::Uuid::new_v4()));
+        let _ = fs::remove_file(&path);
+        {
+            let db = Connection::open(&path).unwrap();
+            // steps 表存在，但 metadata 列被改名为 meta
+            db.execute_batch("CREATE TABLE steps(idx INTEGER,meta BLOB);CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);")
+                .unwrap();
+            let usage = [number(2, 100), number(3, 80)].concat();
+            let timed = blob(
+                1,
+                &[
+                    blob(4, &usage),
+                    blob(19, b"m"),
+                    blob(9, &blob(4, &[number(1, 1_800_000_000), number(2, 500_000_000)].concat())),
+                ]
+                .concat(),
+            );
+            db.execute("INSERT INTO gen_metadata VALUES(1,?1)", [&timed]).unwrap();
+        }
+        let parsed = read_antigravity(&path, "proj").expect("列名漂移不是解析失败");
+        assert_eq!(parsed.malformed_lines, 0, "{:?}", parsed.events);
+        assert_eq!(parsed.events.len(), 1, "{:?}", parsed.events);
         fs::remove_file(path).unwrap();
     }
     #[test]
