@@ -26,13 +26,14 @@ const UPDATED_LOOKBACK_MS = 60_000;
  *   （实测：session 表的 tokens_* 聚合列 == 各 message 之和，故 message 级不重不漏）。
  * - `part` 表 `data.type='tool'` 是工具调用。
  * - message 按 time_updated 水位增量，part 按 rowid 水位增量；dedup_key 兜底幂等
- *   （版本升级触发全量重扫时不会重复计数）。
+ *   （版本升级触发全量重扫时不会重复计数）。part 是会删行的表，水位所指那一行被换掉时
+ *   整表重读一次，见下方 #96 第 9 条。
  *
  * 口径：`tokens.total = input + output + cache.read + cache.write`，
  * 即 input 不含缓存、reasoning 已含在 output 内——与 Pi 相同，与库内公式同构。
  */
 export async function collectOpencodeDb(store, { tool, path, state, version }) {
-  const prev = { msgUpdatedAt: 0, partMaxRowid: 0, ...(state ?? {}) };
+  const prev = { msgUpdatedAt: 0, partMaxRowid: 0, partMaxRowidId: null, ...(state ?? {}) };
   const st = { ...prev, _v: version };
   let inserted = 0;
   let db;
@@ -49,12 +50,31 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
      * session 还带 revert——删掉最大 rowid 后 SQLite 会把该号让给下一条插入，
      * 新消息的 rowid 就可能不大于水位，于是被静默跳过（不报错、只是永远少一条）。
      * 表变短就是删过行的信号：把水位退回 0 整表重读，dedup 保证重读是幂等的。
+     *
+     * #96 第 9 条：只比 `MAX(rowid) < 水位` 拦不住**最常见**的那种复用。"删掉最大那条 +
+     * 紧接着插入"之后，新行正好落在被让出的那个号上，`MAX(rowid)` 又回到了水位本身，
+     * `max < watermark` 为假 → 不回看 → `rowid > 水位` 一行也读不到 → 这条 part 永久丢失。
+     * 所以要认的是"水位所指的那一行还是不是当初那一行"：把水位行的主键 id 一起存进 state，
+     * 该 rowid 上的 id 变了或那一行没了，就说明号被复用过，整表重读一次。
+     * 只在 O(1) 的 rowid 主键查找上加一次判断，中间行被删（MAX 不变、水位行仍是原行）时
+     * 不会误触发全表重读。
+     * 存量 state 没有 `partMaxRowidId`：这一轮按旧行为只比 MAX，采到之后写入身份，下一轮起
+     * 就是完整判断，因此不需要升 version 触发全量重扫。
      */
-    const rewindIfShrunk = (table, watermark) => {
-      const max = db.prepare(`SELECT MAX(rowid) AS m FROM "${table}"`).get()?.m ?? 0;
-      return max < watermark ? 0 : watermark;
+    const partRowAt = db.prepare('SELECT id FROM part WHERE rowid = ?');
+    const partWatermarkReused = (watermark, watermarkId) => {
+      if (!(watermark > 0)) return false;
+      const max = db.prepare('SELECT MAX(rowid) AS m FROM part').get()?.m ?? 0;
+      if (max < watermark) return true; // 表变短且还没补回那个号
+      if (watermarkId == null) return false; // 旧 state 无身份记录：维持修正前的行为
+      const at = partRowAt.get(watermark);
+      return !at || at.id !== watermarkId;
     };
-    st.partMaxRowid = rewindIfShrunk('part', st.partMaxRowid);
+    st.partRewinds = Number(prev.partRewinds) || 0; // 排障用：这个源的 part 被整表重读过几次
+    if (partWatermarkReused(st.partMaxRowid, st.partMaxRowidId)) {
+      st.partMaxRowid = 0;
+      st.partRewinds += 1;
+    }
 
     /**
      * message 不能按 rowid 增量：assistant 消息是"先插后改"——开始生成就插入一行（tokens 全 0），
@@ -106,7 +126,8 @@ export async function collectOpencodeDb(store, { tool, path, state, version }) {
       SELECT rowid AS rid, id, session_id, time_created, data
       FROM part WHERE rowid > ? ORDER BY rowid`).all(st.partMaxRowid);
     for (const p of parts) {
-      st.partMaxRowid = Math.max(st.partMaxRowid, p.rid);
+      // 水位与"水位那一行的主键"必须成对前进，下一轮才判得出这个号有没有被复用
+      if (p.rid > st.partMaxRowid) { st.partMaxRowid = p.rid; st.partMaxRowidId = p.id; }
       let d;
       try { d = JSON.parse(p.data); } catch { continue; }
       if (d?.type !== 'tool' || !d.tool) continue;
