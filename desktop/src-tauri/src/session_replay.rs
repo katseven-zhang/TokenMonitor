@@ -332,7 +332,8 @@ impl ReplayParseState {
                 .pointer("/thread_settings/model")
                 .and_then(Value::as_str)
             {
-                self.current_model = Some(model.to_string());
+                // #78 第 4 项：与 extract_model 同一条归一（这条分支不走 extract_model）
+                self.current_model = Some(crate::model::normalize_model(model));
             }
             return;
         }
@@ -1781,17 +1782,23 @@ fn convert_to_delta(raw: &RawUsage) -> ModelUsage {
 }
 
 fn extract_model(value: &Value) -> Option<String> {
+    // #78 第 4 项：回放/展示侧与采集侧同一条归一（model.rs::normalize_model，Node 端
+    // src/models.js 同式）。事件缓存里存的是归一名，而这里读的是 rollout 原文，
+    // 不归一就会把 `GLM-5.3-Flash` 与 `glm-5.3-flash` 并进同一个 summary.models
+    // （build_summary 把两个来源合到一个集合里），同一会话的模型标签出现两行；
+    // 前端按模型过滤时也只命中其中一种写法。
+    let normalize = |model: String| Some(crate::model::normalize_model(&model));
     if let Some(info) = value.get("info") {
         if let Some(model) =
             string_field(info, "model").or_else(|| string_field(info, "model_name"))
         {
-            return Some(model);
+            return normalize(model);
         }
         if let Some(model) = info
             .get("metadata")
             .and_then(|metadata| string_field(metadata, "model"))
         {
-            return Some(model);
+            return normalize(model);
         }
     }
 
@@ -1799,7 +1806,7 @@ fn extract_model(value: &Value) -> Option<String> {
         value
             .get("metadata")
             .and_then(|metadata| string_field(metadata, "model"))
-    })
+    }).and_then(normalize)
 }
 
 fn string_field(value: &Value, field: &str) -> Option<String> {
@@ -2433,6 +2440,78 @@ mod tests {
         assert_eq!(
             events.iter().map(|event| event.total_tokens).collect::<Vec<_>>(),
             vec![880_000, 440_000, 240_000, 230_000]
+        );
+    }
+
+    /// #78 第 4 项：回放/展示侧与采集侧同一条归一。
+    /// 修前的形态正是 dd7f8c1 提交说明里点出留下的那一条：`build_summary` 把
+    /// 事件缓存（`rows[].models` 的键，已经是归一名）与回放自己解析 rollout 得到的
+    /// 原始写法并进同一个 `summary.models` 集合，同一会话的模型标签因此并列出现两行；
+    /// 前端按模型名过滤时只命中其中一行，成本也接不上价表（价表键全小写、精确匹配）。
+    #[test]
+    fn replay_normalizes_model_names_like_the_collectors_do() {
+        let raw = [
+            // 采集上下文里的三种写法：含空白/全大写/驼峰，还有一个走 thread_settings_applied
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "  GLM-5.3-FLASH  ", "/repo/app"),
+            event_msg(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({"type":"thread_settings_applied","turn_id":"turn-1","thread_settings":{"model":"GLM-5.3-Flash"}}),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                token_payload("turn-1", "Glm-5.3-Flash", 100, 20, 50, 150, 100, 20, 50, 150),
+            ),
+            event_msg(
+                "2026-06-01T00:00:04.000Z",
+                token_payload_without_last("turn-1", "GLM-5.3-Flash", 180, 40, 90, 270),
+            ),
+        ]
+        .join("\n");
+
+        let mut record = record("/tmp/session.jsonl");
+        // 事件缓存那一侧：日报的 models 键来自已归一的落库事件（collectors.rs）
+        record.rows = vec![DailyUsageRow {
+            date: "2026-06-01".to_string(),
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            output_tokens: 50,
+            reasoning_output_tokens: 0,
+            total_tokens: 150,
+            cost_usd: 0.0,
+            models: BTreeMap::from([("glm-5.3-flash".to_string(), ModelUsage::default())]),
+            projects: BTreeMap::new(),
+            updated_at: "2026-06-01T00:00:00.000Z".to_string(),
+        }];
+        let detail = parse_session_detail(record, raw.clone());
+        let events: Vec<_> = detail
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.token_events)
+            .collect();
+        assert_eq!(events.len(), 2, "{:?}", detail.summary.models);
+        for event in &events {
+            assert_eq!(event.model, "glm-5.3-flash", "回放的每一条都归一：{event:?}");
+        }
+        assert_eq!(
+            detail.summary.models,
+            vec!["glm-5.3-flash".to_string()],
+            "缓存里的归一名与回放解析出的原始写法必须并成同一行"
+        );
+
+        // 同一份 rollout 在另一条链路（事件缓存）上得到的模型名与回放标签逐个相等：
+        // 两侧共用 model.rs::normalize_model，不是各自抄一份规则。
+        let collected = crate::collectors::parse_jsonl("codex", "/tmp/session.jsonl", &raw);
+        assert!(!collected.events.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.model.as_str())
+                .collect::<Vec<_>>(),
+            collected
+                .events
+                .iter()
+                .map(|event| event.model.as_str())
+                .collect::<Vec<_>>()
         );
     }
 
