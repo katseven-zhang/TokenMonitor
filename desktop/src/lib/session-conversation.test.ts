@@ -157,6 +157,27 @@ describe("conversation projection", () => {
     expect(volumes).toEqual([100, 30]);
   });
 
+  it("composes the turn's system snapshot into the timeline exactly once", () => {
+    const turn = {
+      ...replayTurn([command("cat a")]),
+      systemMessages: [
+        { timestamp: null, kind: "base_instructions", text: "Use the repository instructions." },
+        { timestamp: null, kind: "base_instructions", text: "Second rule." },
+      ],
+    };
+    const texts = buildConversation(turn)
+      .flatMap((block) => (block.kind === "exploration"
+        ? block.entries.map((entry) => entry.item)
+        : [block.entry.item]))
+      .filter((item) => item.kind === "message")
+      .map((item) => (item.kind === "message" ? `${item.role}:${item.text}` : ""));
+
+    expect(texts).toEqual([
+      "system:Use the repository instructions.",
+      "system:Second rule.",
+    ]);
+  });
+
   it("recognizes literal RTK read, search and list commands", () => {
     expect(classifyExploration("rtk proxy cat 'src/a b.rs'")).toEqual([{ label: "Read", text: "src/a b.rs" }]);
     expect(classifyExploration("rtk sed -n '1,20p' src/a.rs")).toEqual([{ label: "Read", text: "src/a.rs" }]);

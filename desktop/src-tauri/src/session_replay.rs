@@ -1025,19 +1025,12 @@ impl ReplayParseState {
         if !self.turns.contains_key(turn_id) {
             self.turn_order.push(turn_id.to_string());
             let mut turn = empty_turn(turn_id);
+            // One snapshot per turn. Base instructions used to be copied twice —
+            // once as messages and again as timeline items — which for a 500-turn
+            // session meant tens of megabytes of duplicated prompt text in the
+            // struct *and* in every replay response; the reader composes them from
+            // `system_messages`.
             turn.system_messages = self.system_messages.clone();
-            turn.items
-                .extend(
-                    self.system_messages
-                        .iter()
-                        .map(|message| SessionReplayItem::Message {
-                            timestamp: message.timestamp.clone(),
-                            role: "system".to_string(),
-                            source: message.kind.clone(),
-                            text: message.text.clone(),
-                            raw_jsonl_line_numbers: message.raw_jsonl_line_numbers.clone(),
-                        }),
-                );
             self.turns.insert(turn_id.to_string(), turn);
         }
         self.turns.get_mut(turn_id).expect("turn exists")
@@ -2218,6 +2211,52 @@ mod tests {
             "Use the repository instructions."
         );
         assert_eq!(detail.turns[1].system_messages[0].kind, "base_instructions");
+        // Each turn keeps one snapshot; the timeline no longer carries a second
+        // copy of the same prompt text, which the reader composes from
+        // `system_messages` instead.
+        assert_eq!(
+            detail
+                .turns
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .filter(|item| matches!(
+                    item,
+                    SessionReplayItem::Message { source, .. } if source == "base_instructions"
+                ))
+                .count(),
+            0
+        );
+        assert!(detail.turns.iter().all(|turn| turn.system_messages.len() == 1));
+    }
+
+    #[test]
+    fn base_instructions_are_carried_once_per_turn_not_twice() {
+        let base = "r".repeat(8 * 1024);
+        let mut lines = vec![session_meta_with_base_instructions(
+            "2026-06-01T00:00:00.000Z",
+            "/repo/app",
+            &base,
+        )];
+        for index in 0..200 {
+            lines.push(turn_context(
+                "2026-06-01T00:00:01.000Z",
+                &format!("turn-{index}"),
+                "gpt-5",
+                "/repo/app",
+            ));
+        }
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), lines.join("\n"));
+        let bytes = serde_json::to_vec(&detail).unwrap().len();
+
+        assert_eq!(detail.turns.len(), 200);
+        assert!(detail.turns.iter().all(|turn| turn.items.is_empty()));
+        // One snapshot per turn costs ~1.68 MB; the removed item mirror doubled the
+        // response on top of that.
+        assert!(
+            bytes < 2_000_000,
+            "replay response carried {bytes} bytes for 200 turns"
+        );
     }
 
     #[test]

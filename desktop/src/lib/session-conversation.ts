@@ -17,10 +17,22 @@ export type TimelineEntry = {
 };
 
 function orderedItems(turn: SessionReplayDetail["turns"][number]): ReplayItem[] {
-  if (turn.items?.length) return turn.items;
+  // Base instructions are snapshotted once per turn on `systemMessages`; the
+  // backend no longer mirrors that prompt text into `items` for every turn. Live
+  // system/developer events still arrive as items so they keep their own role.
+  const systemMessages = turn.systemMessages
+    .filter((message) => message.kind === "base_instructions")
+    .map((message) => ({
+      kind: "message" as const,
+      timestamp: message.timestamp,
+      role: "system" as const,
+      source: message.kind,
+      text: message.text,
+    }));
+  if (turn.items?.length) return [...systemMessages, ...turn.items];
   return [
-    ...turn.systemMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "system", source: message.kind, text: message.text })),
-    ...turn.userMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "user", source: message.kind, text: message.text })),
+    ...systemMessages,
+    ...turn.userMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "user" as const, source: message.kind, text: message.text })),
     ...turn.assistantMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "assistant", source: message.kind, text: message.text })),
     ...turn.reasoningSummaries.map((message) => ({ kind: "reasoning" as const, timestamp: message.timestamp, text: message.text })),
     ...turn.toolCalls.map((tool) => ({ kind: "toolCall" as const, ...tool })),
