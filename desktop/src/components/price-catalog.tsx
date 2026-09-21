@@ -3,6 +3,12 @@ import { localInput } from '../lib/range';
 
 type Rate={currency?:string;effectiveFrom?:string|null;input:number;cached:number;cacheWrite:number;output:number};
 type Catalog={currency?:string;description?:string;models:Record<string,Rate[]>;aliases?:Record<string,string>};
+// #76: 这里刻意不做"别名键与某个模型同名"的前端校验，不要当成漏检来"补上"。
+// 这类冲突的判词在 Rust 侧唯一权威实现 `Prices::parse`（pricing.rs）里：别名键
+// 顶掉真实模型时，事件计费会路由到别名目标、价目表展示的却是该模型自身的单价，
+// 两处数字必然背离。保存路径 save_prices→Prices::parse 会先把它拒掉，一份带着
+// 冲突别名的目录根本到不了本组件（手改 prices.json 也一样：查询与汇总都会立刻
+// 报错，不会静默按背离的数字出数）。在前端再写一遍只会和后端漂移出两套规则。
 const price=(value:number|undefined,currency:string)=>value===undefined?'未定价':`${currency} ${value.toLocaleString('en',{maximumFractionDigits:8})}`;
 export function PriceCatalog({text}:{text:string}) {
   const [search,setSearch]=useState(''),[at,setAt]=useState(()=>localInput(Date.now())),[requestedPage,setPage]=useState(0);

@@ -208,6 +208,118 @@ mod tests {
         let rate = Prices::parse(r#"{"version":1,"currency":"USD","models":{"m":[{"input":1,"cached":0,"cacheWrite":0,"output":0,"reasoning":1}]}}"#);
         assert!(rate.is_err(), "{rate:?}");
     }
+    /// #76 补覆盖：同一模型出现两条相同生效时间必须保存即报错。此前唯一的
+    /// 历史价夹具是"基础价 + 一条带日期"（两个不同的 rate_time），重复分支从未
+    /// 被喂过——把 `dates.insert` 的检查删掉没有任何测试会变红。
+    #[test]
+    fn duplicate_effective_from_for_one_model_is_rejected() {
+        let rate = |from: &str| {
+            format!(r#"{{"effectiveFrom":"{from}","input":1,"cached":0,"cacheWrite":0,"output":1}}"#)
+        };
+        let make = |rates: &str| {
+            format!(r#"{{"version":1,"currency":"USD","models":{{"m":{rates}}}}}"#)
+        };
+        let err = Prices::parse(&make(&format!(
+            "[{},{}]",
+            rate("2026-01-01T00:00:00Z"),
+            rate("2026-01-01T00:00:00Z")
+        )))
+        .unwrap_err();
+        assert_eq!(err, "m: 生效时间重复");
+        // 同一个瞬间写成不同时区偏移同样是重复（rate_time 比的是 epoch 毫秒）。
+        assert_eq!(
+            Prices::parse(&make(&format!(
+                "[{},{}]",
+                rate("2026-01-01T00:00:00Z"),
+                rate("2026-01-01T08:00:00+08:00")
+            )))
+            .unwrap_err(),
+            "m: 生效时间重复"
+        );
+        // 两条都没写 effectiveFrom = 两个基础价，同样是重复（手写文件最常见）。
+        assert_eq!(
+            Prices::parse(&make(
+                r#"[{"input":1,"cached":0,"cacheWrite":0,"output":1},{"input":2,"cached":0,"cacheWrite":0,"output":2}]"#
+            ))
+            .unwrap_err(),
+            "m: 生效时间重复"
+        );
+        // 非空跑对照：同一模型、两个不同生效时间必须解析成功，否则上面三条
+        // 断言会因为任何别的原因报错也算通过。
+        assert!(Prices::parse(&make(&format!(
+            "[{},{}]",
+            rate("2026-01-01T00:00:00Z"),
+            rate("2026-02-01T00:00:00Z")
+        )))
+        .is_ok());
+        // 重复是按模型分组判定的：两个模型各自用同一天不算冲突。
+        assert!(Prices::parse(
+            r#"{"version":1,"currency":"USD","models":{"a":[{"effectiveFrom":"2026-01-01T00:00:00Z","input":1,"cached":0,"cacheWrite":0,"output":1}],"b":[{"effectiveFrom":"2026-01-01T00:00:00Z","input":1,"cached":0,"cacheWrite":0,"output":1}]}}"#
+        )
+        .is_ok());
+    }
+    /// #76 补覆盖：别名的目标模型不存在（与"别名键顶掉真实模型"是两条独立
+    /// 分支）。指向不存在的模型时事件会算不出成本，必须保存即报错。
+    #[test]
+    fn alias_must_point_at_a_configured_model() {
+        let make = |aliases: &str| {
+            format!(r#"{{"version":1,"currency":"USD","aliases":{aliases},"models":{{"real":[{{"input":2,"cached":0,"cacheWrite":0,"output":0}}]}}}}"#)
+        };
+        let event = |model: &str| Event {
+            id: "1".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: model.into(),
+            ts: 1,
+            tokens: Tokens { input: 1_000_000, ..Default::default() },
+            path: String::new(),
+            line: 1,
+        };
+        assert_eq!(
+            Prices::parse(&make(r#"{"nick":"no-such-model"}"#)).unwrap_err(),
+            "别名 nick 必须直接指向已配置模型"
+        );
+        // 空键走的是同一条分支的另一半。
+        let empty = Prices::parse(&make(r#"{"":"real"}"#)).unwrap_err();
+        assert!(empty.contains("必须直接指向已配置模型"), "{empty}");
+        // 非空跑对照：合法别名照旧解析成功，并且真的路由到目标单价 2/百万。
+        let ok = Prices::parse(&make(r#"{"nick":"real"}"#)).unwrap();
+        assert_eq!(ok.cost(&event("nick")), Some(2.0));
+    }
+    /// #76 补覆盖：effectiveFrom 写错格式（rate_time 分支）此前无人喂过——
+    /// 非 RFC3339 的值会一路走到 `unwrap_or(0)`，等于"这条价从 Unix 纪元生效"，
+    /// 用户以为写好了日期、实际顶掉了基础价。
+    #[test]
+    fn effective_from_must_be_rfc3339_with_an_offset() {
+        let make = |from: &str| {
+            format!(r#"{{"version":1,"currency":"USD","models":{{"m":[{{"effectiveFrom":"{from}","input":1,"cached":0,"cacheWrite":0,"output":1}}]}}}}"#)
+        };
+        for bad in ["2026-01-01", "2026-01-01 00:00:00", "not-a-date"] {
+            assert_eq!(
+                Prices::parse(&make(bad)).unwrap_err(),
+                format!("无效生效时间: {bad}；请包含时区")
+            );
+        }
+        // 非空跑对照：UTC 与带偏移的写法都合法。
+        assert!(Prices::parse(&make("2026-01-01T00:00:00Z")).is_ok());
+        assert!(Prices::parse(&make("2026-01-01T08:00:00+08:00")).is_ok());
+    }
+    /// #76 补覆盖：version != 1 的分支此前没有测试喂过任何值。
+    #[test]
+    fn only_version_one_is_accepted() {
+        let body = r#""currency":"USD","models":{"m":[{"input":1,"cached":0,"cacheWrite":0,"output":1}]}"#;
+        for version in [0u32, 2, 999] {
+            let err = Prices::parse(&format!(r#"{{"version":{version},{body}}}"#)).unwrap_err();
+            assert!(err.contains("version=1"), "{version} → {err}");
+        }
+        // 非空跑对照：同一正文、version=1 必须成功，报错才只可能来自版本号。
+        assert!(Prices::parse(&format!(r#"{{"version":1,{body}}}"#)).is_ok());
+        // 版本号写成字符串是 serde 层的事，也必须拒绝，不能被当成 1。
+        assert!(Prices::parse(&format!(r#"{{"version":"1",{body}}}"#))
+            .unwrap_err()
+            .contains("价格JSON无效"));
+    }
     #[test]
     fn mixed_currencies_normalize_before_aggregation_and_validate_exchange_rate() {
         let text=r#"{"version":1,"currency":"USD","displayCurrency":"CNY","usdCny":7,"models":{"domestic":[{"currency":"CNY","input":7,"cached":0.7,"cacheWrite":14,"output":21}],"foreign":[{"input":1,"cached":0.1,"cacheWrite":2,"output":3}]}}"#;

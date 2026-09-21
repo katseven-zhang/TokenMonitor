@@ -372,9 +372,21 @@ pub fn query_session_rollup_record(
         .parent()
         .unwrap_or(Path::new("."))
         .join("prices.json");
-    let prices = std::fs::read_to_string(price_path)
-        .ok()
-        .and_then(|s| Prices::parse(&s).ok());
+    // #76: a hand-edited prices.json can now fail Prices::parse at load (an alias
+    // colliding with a priced model is rejected). service.rs propagates that error,
+    // but this rollup path used `.ok().and_then(|s| Prices::parse(&s).ok())`, which
+    // reads "unparsable price table" as "no price table" and silently dropped every
+    // cost in the rollup while the dashboard told the user the file is broken. Both
+    // load sites now surface the failure; only a genuinely absent file keeps the
+    // "no pricing configured" meaning (each event then counts as unpriced, #83).
+    let prices = match std::fs::read_to_string(&price_path) {
+        Ok(text) => Some(Prices::parse(&text).map_err(|e| format!(
+            "无法解析价格文件 {}，会话汇总已中止：{e}",
+            price_path.display()
+        ))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("无法读取价格文件 {}：{e}", price_path.display())),
+    };
     let mut days: BTreeMap<String, DailyUsageRow> = BTreeMap::new();
     for row in rows {
         let e: Event =
@@ -569,6 +581,68 @@ mod tests {
         replace_file(&mut db, "f.jsonl", "codex", 2, 2, &Parsed::default()).unwrap();
         let left: i64 = db.query_row("SELECT COUNT(*) FROM quota", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 0);
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #76 决策：坏的价格文件不得被 rollup 静默丢成 0 成本。修前这里是
+    /// `.ok().and_then(|s| Prices::parse(&s).ok())`——解析失败等于"没有价格表"，
+    /// 汇总里每条事件都记成 unpriced、成本 0；而同一份文件走面板查询路径
+    /// （service.rs 的 prices()）会直接报错，两处口径相反。现在两处都上抛，只有
+    /// "文件真的不存在"才保留"未配置价格"的语义（#83 的 unpriced_events 不变）。
+    #[test]
+    fn rollup_surfaces_an_unparsable_price_file_instead_of_zeroing_cost() {
+        let root = temp_root();
+        let priced = Event {
+            model: "m".into(),
+            tokens: Tokens { input: 1_000_000, ..Default::default() },
+            ..event("1", 60_000)
+        };
+        let mut db = open(&root).unwrap();
+        replace_file(
+            &mut db,
+            "r.jsonl",
+            "codex",
+            10,
+            10,
+            &Parsed { events: vec![priced], ..Default::default() },
+        )
+        .unwrap();
+        // 别名键顶掉真实模型：#76 之后 Prices::parse 会拒绝这种手改文件。
+        std::fs::write(
+            &root.join("prices.json"),
+            serde_json::json!({
+                "version": 1, "currency": "USD",
+                "aliases": { "m": "other" },
+                "models": {
+                    "m": [{ "input": 2, "cached": 0, "cacheWrite": 0, "output": 0 }],
+                    "other": [{ "input": 1, "cached": 0, "cacheWrite": 0, "output": 0 }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = query_session_rollup_record(&db, "r.jsonl").unwrap_err();
+        assert!(err.contains("无法解析价格文件"), "要说清失败来自价格文件：{err}");
+        assert!(err.contains("别名 m 与已配置模型同名"), "要带上真正的原因：{err}");
+        // 对照①：同一份数据、合法价格表，rollup 正常算出 1M × 2/百万 = 2.0。
+        std::fs::write(
+            &root.join("prices.json"),
+            serde_json::json!({
+                "version": 1, "currency": "USD",
+                "models": { "m": [{ "input": 2, "cached": 0, "cacheWrite": 0, "output": 0 }] }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let rollup = query_session_rollup_record(&db, "r.jsonl").unwrap().expect("rollup");
+        assert!((rollup.rows[0].cost_usd - 2.0).abs() < 1e-12, "合法价格表仍要算出成本：{}", rollup.rows[0].cost_usd);
+        assert_eq!(rollup.rows[0].unpriced_events, 0);
+        // 对照②：文件不存在 = 真的没配价格，rollup 必须照常成功。
+        std::fs::remove_file(&root.join("prices.json")).unwrap();
+        let rollup = query_session_rollup_record(&db, "r.jsonl").unwrap().expect("rollup");
+        assert_eq!(rollup.rows[0].unpriced_events, 1, "缺价格表按 unpriced 计，不是报错也不是 0 成本");
+        assert_eq!(rollup.rows[0].cost_usd, 0.0);
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
     }
