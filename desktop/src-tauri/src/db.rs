@@ -100,14 +100,26 @@ pub fn open(root: &Path) -> Result<Connection, String> {
 pub fn unchanged(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64) -> bool {
     db.query_row("SELECT 1 FROM source_files WHERE path=?1 AND agent=?2 AND size=?3 AND mtime=?4 AND error IS NULL",params![path,agent,size,mtime],|_|Ok(())).is_ok()
 }
-pub fn malformed_lines(db: &Connection, path: &str, agent: &str) -> Result<usize, String> {
+/// #63: the `unchanged()` fast path is only allowed to skip a file when the
+/// cached *whole* observation is intact — that includes its `source_health` row.
+/// `Some(n)` = reuse it, `n` malformed lines were recorded; `None` = the file
+/// must be re-parsed.
+///
+/// A missing health row must never be read as "0 malformed lines":
+/// - it would hide malformed lines the cache does know about (a pre-migration
+///   file that had bad lines would report zero forever), and
+/// - keeping the fast path hot means `replace_file` never runs, so the row is
+///   never written back and nothing can heal the cache on its own.
+/// Treating the absent row as "changed" sends the file through the normal parse,
+/// and `replace_file` restores the health row: the cache self-heals in one scan.
+/// A real query failure is still an error, and the scanner reports it per file.
+pub fn cache_hit(db: &Connection, path: &str, agent: &str, size: i64, mtime: i64) -> Result<Option<usize>, String> {
+    if !unchanged(db, path, agent, size, mtime) {
+        return Ok(None);
+    }
     match db.query_row("SELECT malformed_lines FROM source_health WHERE path=?1 AND agent=?2",params![path,agent],|row|row.get(0)) {
-        Ok(n) => Ok(n),
-        // #63: 行缺失不是错误。source_health 只在 replace_file 里写入，历史库/迁移前
-        // 索引过的文件可能永远没有这一行；未命中指纹走 unchanged 快速路径时这里曾把
-        // 一次查询失败升级成整源报错——而文件本身不变，下次仍走快速路径，错误就永久
-        // 钉在面板上。没有健康行按“无已知畸形行”计，让源正常复用。
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Ok(n) => Ok(Some(n)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }

@@ -68,10 +68,14 @@ fn collect_file(
     s.files += 1;
     // SQLite may change only in WAL; never skip it using the main file fingerprint.
     let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
-    if !sqlite && db::unchanged(db, &path_text, agent, size, mtime) {
-        s.malformed_lines += db::malformed_lines(db, &path_text, agent)?;
-        s.reused += 1;
-        return Ok(());
+    // #63: only reuse when the cached observation is intact *and* carries its
+    // source_health row; a missing row forces the reparse that writes it back.
+    if !sqlite {
+        if let Some(malformed) = db::cache_hit(db, &path_text, agent, size, mtime)? {
+            s.malformed_lines += malformed;
+            s.reused += 1;
+            return Ok(());
+        }
     }
     let parsed = if agent == "antigravity" {
         collectors::read_antigravity(&path, project.unwrap_or(""))
