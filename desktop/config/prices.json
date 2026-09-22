@@ -3,7 +3,7 @@
   "currency": "USD",
   "displayCurrency": "USD",
   "usdCny": 6.7521,
-  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。",
+  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。 2026-09-22 增补 Qwen3.8-Max、Qwen3.7-Max、Qwen3.8-Flash 与 MiMo V2.5/V2.6：采用官方国内实时 API 标价（CNY/百万 tokens），作为 API 等价费用估算，不折算 Qoder credits/套餐优惠。Qwen 缓存读采用隐式缓存价，cacheWrite 采用官方显式创建价；两种缓存命中方式目前不能区分。MiMo 缓存写入按官方限时免费填0，V2.5 Flash 的官方ID为 mimo-v2.5。qmodel_38max 按名称映射 Qwen3.8-Max；不明路由 qfmodel、mimo-auto 保持未定价。新增项按当前价格回算已有记录，不代表历史账单。",
   "aliases": {
     "GLM-5": "glm-5",
     "GLM-5.3": "glm-5.3",
@@ -33,7 +33,17 @@
     "tencent/hy3-preview-20260421": "hy3",
     "xopglm5": "glm-5",
     "xopglm51": "glm-5.1",
-    "z-ai/glm-5.1": "glm-5.1"
+    "z-ai/glm-5.1": "glm-5.1",
+    "qmodel_38max": "qwen3.8-max",
+    "Qwen3.8-Max": "qwen3.8-max",
+    "Qwen3.7-Max": "qwen3.7-max",
+    "Qwen3.8-Flash": "qwen3.8-flash",
+    "mimo-v2.5-flash": "mimo-v2.5",
+    "MiMo-V2.5-Flash": "mimo-v2.5",
+    "MiMo-V2.5": "mimo-v2.5",
+    "MiMo-V2.5-Pro": "mimo-v2.5-pro",
+    "MiMo-V2.6-Pro": "mimo-v2.6-pro",
+    "MiMo-V2.6-Flash": "mimo-v2.6-flash"
   },
   "models": {
     "big-pickle": [
@@ -339,6 +349,51 @@
         "cached": 0.0,
         "cacheWrite": 0.0,
         "output": 0.0
+      }
+    ],
+    "qwen3.8-max": [
+      {
+        "currency": "CNY",
+        "input": 12,
+        "cached": 1.5,
+        "cacheWrite": 15,
+        "output": 36
+      }
+    ],
+    "qwen3.7-max": [
+      {
+        "currency": "CNY",
+        "input": 12,
+        "cached": 2.4,
+        "cacheWrite": 15,
+        "output": 36
+      }
+    ],
+    "qwen3.8-flash": [
+      {
+        "currency": "CNY",
+        "input": 0.8,
+        "cached": 0.1,
+        "cacheWrite": 1.25,
+        "output": 2.7
+      }
+    ],
+    "mimo-v2.6-pro": [
+      {
+        "currency": "CNY",
+        "input": 3,
+        "cached": 0.025,
+        "cacheWrite": 0,
+        "output": 6
+      }
+    ],
+    "mimo-v2.6-flash": [
+      {
+        "currency": "CNY",
+        "input": 1,
+        "cached": 0.02,
+        "cacheWrite": 0,
+        "output": 2
       }
     ]
   }
