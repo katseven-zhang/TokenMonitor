@@ -344,6 +344,60 @@ console.log('\n[pi] session.cwd Windows 路径 + 跨轮次 state + CRLF/半行')
   rmSync(tmp, { recursive: true, force: true });
 }
 
+console.log('\n[#86 pi 工具键] 无 id 的 toolCall 块不再跨消息互撞（兜底键掺入消息键）');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'jsonl-b-pi-tc-'));
+  const fileId = '2026-09-16T00-00-00-000Z_s-pi-tc';
+  const file = join(tmp, `${fileId}.jsonl`);
+  const iso = new Date(NOW - 20000).toISOString();
+  const sessionLine = JSON.stringify({ type: 'session', id: 's-pi-tc', cwd: 'D:\\repo\\pi-tc' });
+  // 两条消息、各带一个**没有 id** 的 toolCall 块，块下标都是 0：修前两条共用
+  // `pi:tc:s-pi-tc:0`，而 tool_calls.dedup_key 是 UNIQUE → 后一条被静默吞掉。
+  const noId = (id, name) => JSON.stringify({
+    type: 'message', id, timestamp: iso,
+    message: {
+      role: 'assistant', model: 'm',
+      usage: { input: 10, output: 5, totalTokens: 15 },
+      content: [{ type: 'toolCall', name, arguments: '{}' }],
+    },
+  });
+  const withId = JSON.stringify({
+    type: 'message', id: 'm-id', timestamp: iso,
+    message: {
+      role: 'assistant', model: 'm',
+      usage: { input: 10, output: 5, totalTokens: 15 },
+      content: [{ type: 'toolCall', id: 'call_stable', name: 'bash', arguments: '{}' }],
+    },
+  });
+  writeFileSync(file, [sessionLine, noId('a', 'read'), noId('b', 'write'), withId].join('\n') + '\n', 'utf8');
+  const store = makeStore();
+  await collectPiFile(store, { tool: 'pi', path: file, fileId, offset: 0, version: 1 });
+  const keys = toolsOf(store, 'pi').map((r) => r.dedup_key).sort();
+  ok('#86 同会话两个无 id 块各自入库（修前只剩 1 条）', keys.length === 3, JSON.stringify(keys));
+  ok('#86 兜底键掺入消息键：pi:tc:{会话}:{消息键}:{块下标}',
+    keys.join(',') === 'pi:tc:s-pi-tc:a:0,pi:tc:s-pi-tc:b:0,pi:tc:s-pi-tc:call_stable',
+    JSON.stringify(keys));
+  ok('#86 有 id 的块键形一字不变（存量行不位移）', keys.includes('pi:tc:s-pi-tc:call_stable'));
+  // 消息键也没有时退回采样时刻：同一条消息内的两个无 id 块仍然各算各的
+  const bare = JSON.stringify({
+    type: 'message', timestamp: iso,
+    message: {
+      role: 'assistant', model: 'm', usage: { input: 10, output: 5, totalTokens: 15 },
+      content: [{ type: 'toolCall', name: 'x' }, { type: 'toolCall', name: 'y' }],
+    },
+  });
+  const tmp2 = mkdtempSync(join(tmpdir(), 'jsonl-b-pi-tc2-'));
+  const file2 = join(tmp2, `${fileId}.jsonl`);
+  writeFileSync(file2, [sessionLine, bare].join('\n') + '\n', 'utf8');
+  const store2 = makeStore();
+  await collectPiFile(store2, { tool: 'pi', path: file2, fileId, offset: 0, version: 1 });
+  const keys2 = toolsOf(store2, 'pi').map((r) => r.dedup_key).sort();
+  ok('#86 无消息键时用采样时刻兜底，同消息两个块不互撞', keys2.length === 2, JSON.stringify(keys2));
+  closeStore(store); closeStore(store2);
+  rmSync(tmp, { recursive: true, force: true });
+  rmSync(tmp2, { recursive: true, force: true });
+}
+
 console.log('\n[pi] 正斜杠 Windows cwd 与 POSIX cwd');
 {
   const tmp = mkdtempSync(join(tmpdir(), 'jsonl-b-pi2-'));

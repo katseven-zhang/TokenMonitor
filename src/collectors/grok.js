@@ -1,6 +1,7 @@
 import { win32 } from 'node:path';
 import { readLinesFrom } from './lines.js';
 import { normalizeModel } from '../models.js';
+import { tokenCount, epochMs } from './tokens.js';
 
 /**
  * Grok Build 采集器：~/.grok/sessions/<项目目录(URL编码)>/<会话id>/updates.jsonl。
@@ -46,8 +47,11 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
       // 非标准 update 行也可能是携带 totalTokens 的分片
       return;
     }
-    let ts = Number(rec.timestamp) || 0;
-    if (ts > 0 && ts < 1e12) ts *= 1000; // 秒 → 毫秒
+    // #85：秒/毫秒归一交给 collectors/tokens.js 的 epochMs()，与 dsh、WorkBuddy 和桌面端
+    // `collectors.rs::timestamp()` 共用同一个 1e11 边界。此前这里自己写了一份、边界是
+    // 1e12：两端在 [1e11,1e12) 这一段上会把同一条记录判成不同粒度，而且这边读不了
+    // ISO 字符串形态的时间（桌面端的 timestamp() 一直能）。
+    const ts = epochMs(rec.timestamp);
     if (!ts) return;
 
     // 流式水位：轮次进行中的实时上下文规模（非消耗量）
@@ -70,14 +74,17 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
     }
     if (upd.sessionUpdate === 'turn_completed' && upd.usage) {
       const u = upd.usage;
-      const models = u.modelUsage && typeof u.modelUsage === 'object'
-        ? Object.entries(u.modelUsage)
-        : [[null, u]];
+      // #96：`modelUsage: {}`（网关在降级轮次里就是这么写的）会让 Object.entries 得到
+      // 空数组，于是 for 循环一次都不执行——整轮的用量凭空消失，且不报错。空对象必须
+      // 与"没有该字段"同义：回落到轮次级的汇总 usage。
+      const entries = u.modelUsage && typeof u.modelUsage === 'object'
+        ? Object.entries(u.modelUsage) : [];
+      const models = entries.length ? entries : [[null, u]];
       for (const [model, m] of models) {
-        const input = m.inputTokens || 0;
-        const cached = Math.min(m.cachedReadTokens || 0, input);
-        const cacheW = m.cacheCreationTokens || 0;
-        const output = m.outputTokens || 0;
+        const input = tokenCount(m.inputTokens);
+        const cached = Math.min(tokenCount(m.cachedReadTokens), input);
+        const cacheW = tokenCount(m.cacheCreationTokens);
+        const output = tokenCount(m.outputTokens);
         const total = input + cacheW + output;
         if (total <= 0) continue;
         inserted += store.insertEvent({
@@ -90,7 +97,7 @@ export async function collectGrokFile(store, { tool, path, fileId, offset }) {
           cached_input: cached,
           cache_write: cacheW,
           output_tokens: output,
-          reasoning_tokens: m.reasoningTokens || 0,
+          reasoning_tokens: tokenCount(m.reasoningTokens),
           total_tokens: total,
           dedup_key: `grok:${p.sessionId}:${upd.prompt_id}:${model ?? 'x'}`,
         });

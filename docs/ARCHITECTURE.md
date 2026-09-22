@@ -31,6 +31,17 @@ menubar/                 macOS 菜单栏 App（Swift/AppKit，需 .app bundle）
 `reasoning_tokens` 只作信息列，**任何源都不得把它再加进 total**——Pi 与 OpenCode 的 reasoning
 都已含在 output 内，重复相加会凭空多算。
 
+**相加之前必须逐项转整数**（#96）。上游 JSON 里的用量字段可能是数字，也可能是数字形态的
+字符串（网关回填 usage 的常见写法），而 JS 的 `+` 遇到字符串做的是拼接：
+`"123" + 0 + 0 + 456 → "12300456"`。`total_tokens` 是 INTEGER 列，SQLite 的亲和性又会把这串
+文本落成整数，于是一次 579 token 的调用被记成 1230 万——不报错、不计坏行，面板上一切正常。
+规则落在 `src/collectors/tokens.js tokenCount()`（claude/ccmr、dsh、grok、pi、opencode、
+workbuddy、zcode 七个采集器共用；codex 的 `num()` 与 antigravity 的 `asNumber()` 早就是这个
+语义），桌面端对应 `collectors.rs::number()`（此前它对字符串一律给 0，等于另一端少记），双端共享夹具见
+`test/run.mjs` 的 [27] 段与 `collectors.rs::stringly_typed_usage_and_empty_model_usage_match_node`。
+存量坏行：桌面端由 `COLLECTOR_REVISION` 整库重建，Node 端没有整库重建通道（`dedup_key` 没变时
+重扫只会 `INSERT OR IGNORE`），因此 `store.js migrate()` 按上面那条恒等式重算一次不满足恒等式的行。
+
 ## 数据源格式笔记
 
 ### Claude Code / ccmr（同一解析器）
@@ -51,11 +62,37 @@ block3 tool_use   3594/47360/309   ← 唯一带真实输出的一行
 
 ### Codex（坑最多）
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`：
-- `token_count.info.total_token_usage` 是**会话累计值**，按相邻事件差分取单次用量；差分 0 的重复通知自然跳过
+- `token_count.info.total_token_usage` 是**会话累计值**，按相邻事件差分取单次用量
+- **重复通知的判据两端统一为一条不变式："这一轮算不出用量就不落库"**（#75）。桌面端是落库前的
+  `tokens.total() > 0`；Node 端此前看上游 `total_tokens` 的差分（`d.tt <= 0`），于是"只有
+  reasoning / 只有 total_tokens 在动"的采样在 Node 端落一条五列全 0 的事件、桌面端一条不落，
+  同一份日志两端事件数不同。`total()` 不含 reasoning，与 `store.insertEvent` 的落库公式同构
 - **resume/fork 会话继承父线程累计基线**——若直接对"每文件终值"求和会把同一对话重复计数（实测差 9 倍），差分 + 首事件建基线天然正确
+- **首个采样、累计值回落、以及缺 `total_token_usage` 的采样都不走差分**（#75）：只认
+  `info.last_token_usage`（本轮真实用量）；它缺失时两端都**不记事件**，绝不退回整段累计值
+  （修前桌面端退回整段累计值 → resume 会话重复计入，Node 端则把回落那一轮整条丢掉 → 少计）。
+  缺 `total_token_usage` 但带 `last_token_usage` 的一条，修前 Node 端在入口 `if (!info?.total_token_usage) return`
+  处**整条丢弃**、桌面端照记 —— 现在两端都记，且累计水位不动（读不到累计值就不能推进基线，
+  否则下一条累计值会跟空基线比出"首个采样"、把整段历史当本轮用量计入）
+- **`cache_creation_input_tokens` / `cache_write_input_tokens` 是同一个累计量的两个写法**，
+  不是两个可以相加的量（#75）。规则明确为三条，两端同式
+  （Node `collectors/codex.js::cacheWriteOf` ↔ 桌面端 `collectors.rs::cache_write_of`）：
+  1. 只出一种 → 用它；两种都出且**数值相同** → 照用（只是重复写了一遍）。
+  2. 两种都出且**数值不同** → 无法判定上游说的是哪个量，该条记录的 `cache_write` **拒读记 0**。
+     旧规则 `.max()` 假设"同一 payload 只会出一种"，此前没有任何 fixture 证明过这个假设，
+     而 `.max()` 等于凭空取一个上游从没说过的较大值。
+  3. 相邻两条采样**各自都写了具体写法**而写法不同（codex 升级换了字段名）→ 跨写法差分必然为负、
+     会被 `delta()` 的 `.max(0)` **静默清零**（那一轮的缓存写入就这么没了，也不报错），
+     因此算"累计序列断了"，与回落同一条处理：改读本条的 `last_token_usage`。
+     上一条"压根没写缓存字段"（或上一条因规则 2 被拒读）**不算序列断**：那条在序列上就是 0，
+     字段第一次出现按普通差分读。
+- `cached` 一律夹进 `[0, input]`，`input` 已含缓存命中
 - 模型名版本漂移：新格式在 `thread_settings_applied.thread_settings.model`，旧格式在 `turn_context.payload.model`；续写文件两者皆无 → 按 `session_meta.parent_thread_id` 继承链回填（dedup 只防重插不更新旧行，需显式 UPDATE）
 - `rate_limits` 为账号级配额快照（used_percent/window/resets_at），只保留全局最新（按 ts，与扫描顺序无关）
-- 工具调用在 `response_item` 且 `payload.type=function_call`（name/call_id）
+- 工具调用在 `response_item` 且 `payload.type` 为 `function_call` 或 `custom_tool_call`（name/call_id）；
+  `custom_tool_call` 是新版 Codex 的 freeform 工具（apply_patch 一类），#85 起两端同记。
+  上游没写 `call_id` 时按"当前 seq + 该 seq 内序号"定键（#85：只用 seq 会让两次采样之间的
+  第二条调用与第一条共用 dedup_key，被 `INSERT OR IGNORE` 静默丢掉）
 - `codex-auto-review` 是 Codex Desktop 内置自动审查子代理的模型槽位，真实用量
 
 ### ZCode
@@ -76,14 +113,30 @@ block3 tool_use   3594/47360/309   ← 唯一带真实输出的一行
 
 会话键用父目录名。迁移期新旧两个快照会并存于同一目录，因此 **v3 的 dedup_key 额外带上文件名**（`dsh:${fileId}:${file}:${seq}`），否则 seq 相同的两条互相顶掉；旧结构的键保持原样，避免历史事件在重扫时被当成新行再插一遍。
 
+`session` 记录的 `cwd` 是绝对路径，**项目名取末段**（`path.win32.basename(cwd) || cwd`，桌面端 `project_name()` 同式）。记录的 `time` **粒度不总是毫秒**：秒级值必须经 `epochMs()` 归一（#85，与 WorkBuddy、Grok 和桌面端 `collectors.rs::timestamp()` 共用同一个 1e11 边界），否则整份快照在两个 UI 里的当日/区间合计完全不同——归一前它会落到 1970 年，Node 面板里根本没有这条事件。dsh `version` 3→4。
+
 ### WorkBuddy
-`~/.WorkBuddy/projects/<目录>/<会话>.jsonl`（Electron 版 transcript）：`message.usage`（input 含 cache）；`providerData` 携带真实模型名（sessions 表的 model 列只是别名如 fast-model）与 traceId。
+`~/.WorkBuddy/projects/<目录>/<会话>.jsonl`（Electron 版 transcript）：`message.usage`（input 含 cache，
+`total = input + cache_write + output`）；`providerData` 携带真实模型名（sessions 表的 model 列只是别名如 fast-model）与 traceId。
+- **目录名是 `<前缀>-WorkBuddy-<项目>`**：项目名取标记之后那一段（`-WorkBuddy-(.+)$`），整名当项目名
+  会让同一个仓库在两个 UI 里是两个名字（#85）
+- `timestamp` 粒度不总是毫秒：秒级记录必须经 `epochMs()` 归一，否则落到 1970-01-21，Node 面板的
+  "今日/本周"里根本没有它（#85；此前这里直接用原值，桌面端一直在归一）
+- `cache_write` / `reasoning` 与 codex 一样有两种字段拼写（`cache_creation_input_tokens` /
+  `cache_write_input_tokens`、`reasoning_output_tokens`），取 max＝有哪个读哪个；#85 之前 Node 端把
+  这两列写死成 0，与桌面端逐字段对账永远对不上
+- `rec.id` 缺失的行两端都不入库（没有稳定 dedup_key 的行在全量重扫时会变成重复计数）
 - `workbuddy.db.session_usage` 是上下文水位表（used=最近请求 input_tokens，非累计）
 - `credit_json` 键 = 轮次 traceId、值 = 该轮积分消耗 → 与事件表按 trace_id 连接可**经验性标定积分费率**（纯单模型轮次无截距最小二乘，实测残差≈两位小数舍入）；混合轮次与 <3 样本不参与
 - SQLite 为 WAL 写入，transcript 与水位表同秒落盘
 
 ### Grok Build
-`~/.grok/sessions/<URL编码项目目录>/<会话id>/updates.jsonl`：`turn_completed.usage` 带全量明细（含 cachedRead/reasoning/modelCalls/costUsdTicks 厂商成本刻度）与 `modelUsage` 逐模型拆分；timestamp 为 Unix 秒。工具调用在 `tool_call` 事件（title/kind）。注意 `_meta.totalTokens` 是会话上下文水位而非轮次用量，勿用。
+`~/.grok/sessions/<URL编码项目目录>/<会话id>/updates.jsonl`：`turn_completed.usage` 带全量明细（含 cachedRead/reasoning/modelCalls/costUsdTicks 厂商成本刻度）与 `modelUsage` 逐模型拆分；timestamp 为 Unix 秒（#85 起秒/毫秒归一走 `collectors/tokens.js` 的 `epochMs()`，与 dsh/WorkBuddy 和桌面端 `collectors.rs::timestamp()` 共用同一个 1e11 边界，并认 ISO 字符串；此前这里自己写了一份、边界是 1e12）。工具调用在 `tool_call` 事件（title/kind）。注意 `_meta.totalTokens` 是会话上下文水位而非轮次用量，勿用。
+
+**`grok:live` 是 Node 端独有的快照**：进行中的轮次把 `_meta.totalTokens` 最大值写成
+`saveQuota('grok:live', ts, {context_tokens, session_id, project})`，供 `web/app.js` 的
+"Grok 进行中"卡片显示。桌面端没有消费这个水位的界面，因此也没有对偶实现——这一条是
+**已知缺口而不是漏看**，详见上一节的第 9 行。
 
 ### Pi
 `~/.pi/agent/sessions/<编码cwd>/<ISO时间>_<会话uuid>.jsonl`，追加式。用量在 `type=message` 的
@@ -119,6 +172,70 @@ Windows 下 `%LOCALAPPDATA%`（取自其可执行体内的字符串常量），�
   都没发生，缩短信号会被错过，需靠 `SOURCES.version` 自增触发全量重扫补回
 - ZCode 的 `model_usage` 只追加、不改行，rowid 水位够用——同为 sqlite 源也不能照抄增量策略，
   先确认那张表会不会删行、会不会原地更新
+
+## 模型名归一：同一模型在两端、跨来源都只能有一行
+
+模型标识是**大小写不敏感**的厂商 id：ZCode 记 `GLM-5.3-Flash`、WorkBuddy 记 `glm-5.3-flash`，
+是同一个模型。因此归一（去首尾空白 + 小写）必须在**采集侧、落库之前**做完——价表键全小写
+且两端的价格查找都是精确匹配，名字没归一就是静默不计费，面板里还会被拆成两行。
+
+- Node：`src/models.js normalizeModel()`，10 个采集器与 `store.js` 启动期 `migrate()`（把历史
+  大小写变体折进同一行）共用它
+- 桌面：`desktop/src-tauri/src/model.rs normalize_model()`，`collectors.rs` 五个产事件的位置
+  （JSONL / zcode / opencode / antigravity）全部走它；价表侧 `pricing.rs::parse` 对 models 与
+  aliases 的键同样归一（配置写成 `"GLM-5.3-Flash"` 也能命中，不再需要手工补大小写别名），
+  历史缓存由 `db.rs COLLECTOR_REVISION = 7` 整库重建
+- **两处刻意不同**：① 模型名缺失时 Node 落 `NULL`（列可空），桌面落哨兵 `unknown`
+  （`Event.model` 是 `String`、列 `NOT NULL`），两边各自只有一行，不参与任何黄金数；
+  ② 别名路由（`deepseek-flash` 一类"这个 id 该按哪个键计费"）不在词法规则里——Node 那张表
+  在 `models.js`，桌面那张在 `prices.json` 的 `aliases`，两端各自的价目表键不同，甚至对同一对
+  id 路由方向相反，合并任何一侧都会让另一侧不计费
+- 双端共享的黄金数（同一份记录、同一组期望）：`test/run.mjs` 的 [26] 段与
+  `desktop/src-tauri/src/collectors.rs`、`desktop/src-tauri/tests/sources.rs` 的 #78 块，
+  合并行 `glm-5.3-flash` = input 301200 / cached 1240000 / cache_write 60000 / output 140000
+  = 1741200 token
+
+## 桌面端 ↔ Node 端采集口径对账（#85）
+
+同一份日志在两个 UI 里必须给出同一组数字。桌面端（`desktop/src-tauri/src/collectors.rs`）
+与 Node 端（`src/collectors/*.js`）是两份独立实现，历史上漂了十处。逐条给结论：
+**要么两边改到同一条规则，要么把差异写在这里**——"没文档的悄悄分叉"本身就是缺陷。
+下面 1-10 是任务里点名的十处，11-13 是同一轮里顺带改到、以及**与本仓库另一条分支
+互相矛盾**的三处口径（同样三选一：对齐 / 记为有意差异 / 说明为何不改），
+本表因此对全部十三项给出可核对的结论。
+共享夹具的两侧对应关系：`test/run.mjs` 的 [28] 段 ↔
+`collectors.rs` 的 `project_model_and_tool_identity_match_node_on_one_fixture` 与
+`tool_record_gate_and_line_identity_and_malformed_ts`；
+`tests/sources.rs` 的 `antigravity_decoder_branches_and_project_match_node` ↔
+`test/sources/antigravity/antigravity.test.mjs`；
+`test/fixtures/codex-parity/rollout.jsonl` ↔
+`compare_local_golden_is_what_the_desktop_collector_produces`（Rust 侧逐字段钉黄金）+
+`node desktop/scripts/compare-local.mjs --fixture`（Node 侧现场跑 `collectCodexFile`）。
+
+| # | 漂移 | 结论 |
+|---|---|---|
+| 1 | codex 工具活动：桌面端只看 `payload.type`，Node 端还要求 `rec.type === 'response_item'` | **已对齐（取更严的一边）**：桌面端补记录级门槛（`event_msg` 里的回放不再数第二遍）。`custom_tool_call` 是新版 Codex 的 freeform 工具（apply_patch 一类），是真实工具调用，所以补的是 Node 端那一边——桌面端此前只多在这一项上，砍掉它等于两端一起少记。codex `version` 4→5 |
+| 2 | project 分组键：七个源里桌面端存整条绝对路径/原始目录名，Node 端存末段或剥掉前缀 | **已对齐**：桌面端新增 `project_name()`＝Node 的 `path.win32.basename(x) \|\| x`（`/`与`\`都是分隔符、先剥尾分隔符、无分隔符时剥 `C:` 设备前缀；刻意不用 `Path`，因为本仓库日志里两种分隔符并存，采集端必须在任何宿主上给出同一个答案）。覆盖 claude/ccmr、pi、codex、grok、opencode、zcode、antigravity、workbuddy（`<前缀>-WorkBuddy-<项目>` 取标记之后那段） |
+| 3 | antigravity `workspace_uris`：桌面端只取 `v[0]`、不判 scheme、POSIX 分支丢掉根斜杠 | **已对齐**：桌面端新增 `project_from_workspace_uris()`，扫到第一个 `file://` 项才用，坏项跳过继续找下一个，percent 解码后取末段；`file:///D:/x` 只剥 Windows 多出来的那个前导斜杠，`file:///etc/x` 的根斜杠保留 |
+| 4 | claude：桌面端把空模型记成 `unknown` 入库，`msg.id` 缺失时造合成键入库 | **已对齐**：`message.usage` 不是对象、或 `message.id` 缺失 → 整行不入库（与 Node 的 `if (!usage \|\| !msg?.id) return; if (!model \|\| model === '<synthetic>') return;` 同序同式，关卡都排在内容块扫描之前，所以工具调用同样不记）。同一类修正顺带补到 workbuddy（`rec.id`）与 pi（`rec.id ?? message.responseId`）：编不出稳定去重键的行**宁可少一条也不能多一条**，合成键在全量重扫时会变成重复计数 |
+| 5 | 空 tool id：桌面端 `{session}:{id}` 里 id 为空时同会话的无名调用全塌成一个键互相顶掉 | **已对齐**：`tool()` 统一在 id 为空时按 `line:{行号}` 定位（Node 端各源本来就分别回落到行号/块序号/记录 id，从不产生空键）。codex 的 Node 端也补了对称缺陷：无 `call_id` 时此前只用 `st.seq` 定键，而 seq 只在 token_count 上自增，两次采样之间的第二条 `function_call` 会被 `INSERT OR IGNORE` 静默丢掉；现在同 seq 内的第二条起带 `:{序号}` 后缀，**首条仍沿用裸 seq 的原键**，存量行不位移 |
+| 6 | opencode 工具调用时间：桌面端用 `part.time_created`，Node 端优先 `data.state.time.start` | **已对齐**：桌面端改成 `state.time.start` 优先、缺失才退回列上的 `time_created`；两处都读不到时计 malformed |
+| 7 | antigravity 输出/时间/零用量三分支 + steps 读失败 | **已对齐**（`read_antigravity` 与 `decodeGenerationRow` 同式）：output 三分支——`f3>0` 用 `f3`，否则 `f10` 在场用 `f10+f9`，否则只剩 `f9`（旧写法用"字段在不在"判断，于是 `f3=0` 在桌面端记 0 输出）；时间**行内值优先**、缺失才回退同 idx 的 steps 时间（旧写法取 max，steps 一行覆盖多次生成，会把事件推到比真实完成时刻更晚的位置）；零用量判据 `input/output/cacheRead 全 0 → 丢` 补到桌面端。**steps 读失败两侧走不同通道但保证同一件事**：Node 端扣住水位不越过未采样的生成（#95），桌面端整份结果判失败、保留缓存里已有的行（`collect_file` 不会用读不全的结果替换缓存）——都是"读不到时间的那些生成不会永久丢失"，故不算漂移 |
+| 8 | workbuddy：Node 端把 `cache_write`/`reasoning` 写死 0，且不归一秒级时间戳 | **已对齐（补 Node 端）**：`cache_creation_input_tokens`/`cache_write_input_tokens` 走与 codex **同一处** `tokens.js::cacheWriteOf`（#75 统一规则：只出一种用一种、两种相等照用、两种不等拒读记 0；桌面端 workbuddy 分支调用的 `openai()` 里就是同一条 `cache_write_of`）、`reasoning_output_tokens` 读出来、缓存命中同样认 `cached_input_tokens` 别名；请求数关卡统一到 `total <= 0`（此前只带缓存写入的一轮在 Node 端被丢、桌面端记）。秒级 `timestamp` 归一为毫秒（此前落到 1970-01-21，Node 面板的"今日/本周"里根本没有它）。workbuddy `version` 1→2 |
+| 9 | grok：Node 端有进行中轮次的上下文水位快照（`saveQuota('grok:live')`），桌面端没有 | **有意保留，不在本轮补齐**：桌面端 GUI 没有任何消费这个水位的界面（`web/app.js` 的"Grok 进行中"卡片只存在于 Node 版面板里），要"对齐"就得连 UI 一起做，那不是采集口径修复而是新功能。桌面端的 `quota` 表与 `Parsed.quotas` 通道是通的（codex rate_limits 就走这条路），需要时按 `_meta.totalTokens → Quota{agent:"grok:live"}` 加即可。这一行的意义是让下一个读代码的人知道这是**已知缺口**而不是漏看 |
+| 10 | `scanner.rs` 的 `seen` 去重一律 `to_lowercase()` | **已改成按平台**：Windows 路径大小写不敏感，不归一会把同一份日志采两遍（`raw_events` 主键含 path，两份都留下）；POSIX 恰好相反，`/logs/A.jsonl` 与 `/logs/a.jsonl` 是两个文件，一律 lowercase 会让后者被当成重复**静默跳过**——少一份用量且零错误。抽成 `dedup_key()`（`scanner.rs:65-72`），`to_lowercase()` 只编进 Windows 构建，非 Windows 构建原样返回 |
+| 11 | 会话回放（`session_replay.rs::normalize_raw_usage`）读不到 `cache_write`：三处读者各抄一份字段名，回放那一份两种写法都不读（#75 第 3 项点名的"至多一个正确"） | **已对齐（规则只留一份）**：三个读者调同一个实现——事件缓存 `collectors.rs::openai()`、legacy `codex.js` 经 `src/collectors/tokens.js::cacheWriteOf`、回放 `normalize_raw_usage` 直接调 `collectors::cache_write_of`；没有第四份抄本，`spelling_changed`（累计序列换了写法）也只在两处按同一条判据实现。**回放的 `ModelUsage` 没有独立 cacheWrite 列，缓存写入只并进 `total_tokens`——判定：可接受，不改类型**。理由：`raw_usage.total_tokens = input + cache_write + output`（`session_replay.rs:1734/1761` 两个构造点都是这个式子），而 `input` 是上游原值（OpenAI 口径已含缓存命中），所以它和事件缓存那条 `Tokens::total() = 新输入 + 缓存命中 + cache_write + 输出` **恒等同一个数**；回放面板也不按列计价（`cost_usd` 取自日报行 `session_replay.rs:262/1061`，不由 `ModelUsage` 现算），并进 total 只少一个展示位、不产生数字分歧。给 `ModelUsage` 加字段要连动前端与日报 `models` 的键值结构，那是展示层需求而不是口径修复。**触发重开的条件写在这里**：回放一旦要单列缓存写入、或改成按列计价，这一格立即失效 |
+| 12 | **跨分支矛盾**：`codex/fix-desktop-data`@6b91d98 的十源平价探针（`desktop/scripts/compare-local.mjs` 的 `DIVERGENCES.codex`）把 codex 记成量化分歧 **−1 事件 / −120 tokens / −80 cached**，理由是"Node 侧每条会话第一次 `token_count` 只建累计基线不产事件（`codex.js:149`）"；而 #75 第 1 项声称首样本已对齐 | **那条登记已经过期，删掉它——两端现在都产这一条事件，差值恒为 0**。`codex.js:149` 那一行（`if (!st.cum) { st.cum = cur; return; }`）在 `f6ed418` 里已经不是首样本的处理了：现在 Node 在"无基线/累计回落/换写法"三种情况下都改读 `info.last_token_usage` 并 `insertEvent`（键 `codex:{file}:{ts 之前}:baseline:{ts}`），与桌面端 `collectors.rs` 的 `previous.is_none() \|\| reset \|\| spelling_changed` 分支同式同落库。**谁是对的**：#75（本分支）——探针的差值是在 #75 之前的 Node 形状上量出来的，两个结论不是互相推翻，是同一件事的前后两版。**数字为什么正好是 −1/−120/−80**：那份夹具只有两条采样（`last_token_usage` = input 100 含 cached 80、output 20 → 拆列 20+80+0+20 = **120**、cached **80**；第二条累计值没变 = 重复通知，两端都不落），修前这边 0 条、桌面 1 条。**怎么保证不再回来**：同一份四条记录被两端各自钉住——Rust `collectors.rs::codex_first_sample_no_longer_diverges_from_node_parity_probe`（1 事件 / 120 / 80 / 新输入 20）与 Node `test/run.mjs` 的"跨分支对账"块（同三个数），加上既有的 `compare_local_golden_is_what_the_desktop_collector_produces` + `node desktop/scripts/compare-local.mjs --fixture`（6 事件 / 2358000 / 1250000，`equal:true`，负对照会变红）。合并那条分支时 `DIVERGENCES.codex` 必须删除：它自己的注释就写着"哪天 Node 修了首事件，这条登记就会红，逼着删掉它"——现在就是那天 |
+| 13 | 非法时间字符串：一端读不出来就静默 `continue`，面板一切正常、只是少数据（"静默归零"的姊妹形态） | **已对齐到"带用量的行读不到时间就计 malformed"**：`collectors.rs:305-324` 在 `timestamp()` 三路取值全失败时判断该行是否携带用量（`message.usage` / codex `token_count` / grok `params.update.usage` / dsh `data.usage` / dsh 旧结构 `data.chunk.usage` 五种形态），带用量才 `malformed_lines += 1`，来源健康因此停在 warning；结构性没有时间的行（`session_meta`/`turn_context`/`type:"session"`）**不**算坏行——那是它们本来的样子，报坏就是噪声。秒级时间戳的归一与阈值两端共用（Node `tokens.js:39` 的 `toMs()` 用 1e11 边界，桌面 `collectors.rs:7-21` 的 `timestamp()` 同一条；dsh/workbuddy 都改走它），秒值不会再落到 1970-01-21 从"今日/本周"里消失。**回归**：桌面侧 `collectors.rs::tool_record_gate_and_line_identity_and_malformed_ts` 用 `"timestamp":"not-a-time"` 钉 `malformed_lines == 1`；Node 侧对应 `test/run.mjs` 的 workbuddy 秒级归一断言 |
+
+**两处结构性差异，属"做不到也不该做"，登记为有意保留**：
+
+- **逐行 malformed 信号**：桌面端有 `Parsed.malformed_lines`（来源健康因此能停 warning），
+  Node 端只有文件级 `parse_errors`——collector 返回的是 `{newOffset, inserted, state}`，
+  没有逐行坏计数的通道。所以上面第 4/6 条里"读不到时间的行计 malformed"只落在桌面端；
+  Node 端同一行是静默 `return`。**丢的行数两端一致，差的是它有没有被数出来**。
+- **`project` 的缺失形态**：Node 落 `NULL`（列可空），桌面落空串（`Event.project` 是
+  `String`、列 `NOT NULL`），与 #78 的模型名哨兵 `unknown` 是同一条约定的两个实例。
 
 ## 计价：DeepSeek 的峰谷价
 

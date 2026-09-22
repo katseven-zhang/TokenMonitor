@@ -170,6 +170,46 @@ for (const agent of indexed) {
   if (!covered && !results.some((r) => r.agent === agent && r.unexplained)) {
     results.push({ agent, sample: 0, state: 'indexed rows were never compared', unexplained: true });
   }
+  return db;
+}
+
+const cache = FIXTURE ? fixtureCache(false) : new DatabaseSync(args[0] || 'desktop/.dev-data/events-v2.sqlite', { readOnly: true });
+const adapters = {'codex':collectCodexFile,'claude-code':collectClaudeFile,'ccmr':collectClaudeFile,'workbuddy':collectWorkbuddyFile,'grok':collectGrokFile,'pi':collectPiFile,'zcode':collectZcodeDb,'opencode':collectOpencodeDb};
+async function probe(cache) {
+  const results=[];
+  for(const [agent,collect] of Object.entries(adapters)) {
+    const samples=cache.prepare('SELECT path,size,mtime FROM source_files f WHERE agent=? AND EXISTS(SELECT 1 FROM raw_events e WHERE e.path=f.path AND e.agent=f.agent) ORDER BY mtime,path LIMIT 3').all(agent);
+    for(let sample=0;sample<samples.length;sample++) {
+      const f=samples[sample];const before=statSync(f.path);
+      if(!['zcode','opencode'].includes(agent) && (before.size!==f.size || Math.abs(before.mtimeMs-f.mtime)>1)) {results.push({agent,sample,state:'cache/source changed; skipped'});continue;}
+      const captured=new Map();
+      const store={insertEvent(e){if(captured.has(e.dedup_key))return 0;captured.set(e.dedup_key,e);return 1;},insertToolCall(){return 0;},saveQuota(){}};
+      await collect(store,{tool:agent,path:f.path,fileId:basename(f.path),offset:0,version:1});
+      const after=statSync(f.path);if(after.size!==before.size||after.mtimeMs!==before.mtimeMs){results.push({agent,sample,state:'source changed during probe; skipped'});continue;}
+      const old=[...captured.values()].reduce((a,e)=>({events:a.events+1,tokens:a.tokens+e.total_tokens,cached:a.cached+e.cached_input}),{events:0,tokens:0,cached:0});
+      const current=cache.prepare('SELECT data FROM raw_events WHERE path=? AND agent=?').all(f.path,agent).map(r=>JSON.parse(r.data)).reduce((a,e)=>({events:a.events+1,tokens:a.tokens+e.tokens.input+e.tokens.cached+e.tokens.cacheWrite+e.tokens.output,cached:a.cached+e.tokens.cached}),{events:0,tokens:0,cached:0});
+      results.push({agent,sample,old,current,equal:JSON.stringify(old)===JSON.stringify(current)});
+    }
+  }
+  return results;
+}
+
+const results = await probe(cache);
+if (!FIXTURE) {
+  cache.close();
+  console.log(JSON.stringify(results, null, 2));
+} else {
+  // 负对照：黄金里改一个 token，同一个探针必须报出 equal:false，
+  // 否则"equal:true"可能只是两边同时读不到数（恒真断言）。
+  const control = await probe(fixtureCache(true));
+  cache.close();
+  const clean = results.filter((r) => r.agent === 'codex');
+  const detected = control.filter((r) => r.agent === 'codex' && r.equal !== true);
+  console.log(JSON.stringify({ mode: 'fixture', rollout: FIXTURE_ROLLOUT, clean, control: control.filter((r) => r.agent === 'codex') }, null, 2));
+  const allEqual = clean.length > 0 && clean.every((r) => r.equal === true);
+  const skipped = results.some((r) => r.state);
+  console.log(`codex 夹具对账：样本 ${clean.length} 个，全部 equal=${allEqual}，负对照检出差异 ${detected.length} 个${skipped ? '，注意：有样本被跳过' : ''}`);
+  process.exit(allEqual && !skipped && detected.length > 0 ? 0 : 1);
 }
 cache.close();
 console.log(JSON.stringify(results, null, 2));

@@ -20,14 +20,23 @@ const ok = (name, cond, detail = '') => {
 };
 
 const EXPECTED = [
+  // version 是"存量库要不要全量重扫"的唯一凭据：采集语义一变必须 +1，否则旧文件按
+  // 游标继续读，修好的逻辑永远碰不到已经读过的行。改动这里时请同时写清是哪次修复。
   { tool: 'claude-code', kind: 'jsonl', version: 2, apiBilled: false, collector: 'claude' },
   { tool: 'ccmr', kind: 'jsonl', version: 3, apiBilled: true, collector: 'claude' },
-  { tool: 'codex', kind: 'jsonl', version: 3, apiBilled: false, collector: 'codex' },
+  // #58 resets_at 秒级时间戳归一（此前登记在 3 上没同步到这里）
+  // #85 custom_tool_call 计入工具活动 + 无 call_id 的调用不再共用同一个去重键 → 重扫补回
+  { tool: 'codex', kind: 'jsonl', version: 5, apiBilled: false, collector: 'codex' },
   { tool: 'zcode', kind: 'sqlite', version: 2, apiBilled: false, collector: 'zcode' },
-  { tool: 'dsh', kind: 'zst', version: 3, apiBilled: true, collector: 'dsh' },
-  { tool: 'grok', kind: 'jsonl', version: 1, apiBilled: false, collector: 'grok' },
-  { tool: 'workbuddy', kind: 'jsonl', version: 1, apiBilled: false, collector: 'workbuddy' },
-  { tool: 'pi', kind: 'jsonl', version: 1, apiBilled: false, collector: 'pi' },
+  // #85 `time` 秒级粒度归一（此前秒级记录落到 1970 年，与桌面端的窗口合计完全不同）
+  { tool: 'dsh', kind: 'zst', version: 4, apiBilled: true, collector: 'dsh' },
+  // #96 字符串形态的用量字段被拼成大数 + `modelUsage:{}` 的轮次整条丢失 → 重扫补回
+  // #85 秒/毫秒归一交给共享的 epochMs()（边界 1e12 → 1e11，并认 ISO 字符串）
+  { tool: 'grok', kind: 'jsonl', version: 3, apiBilled: false, collector: 'grok' },
+  // #85 `timestamp` 秒级粒度归一 + cache_write/reasoning 真的读出来（此前写死 0）
+  { tool: 'workbuddy', kind: 'jsonl', version: 2, apiBilled: false, collector: 'workbuddy' },
+  // #96 首行 BOM 让 project 永久为 null，必须把首行再读一遍
+  { tool: 'pi', kind: 'jsonl', version: 2, apiBilled: false, collector: 'pi' },
   { tool: 'opencode', kind: 'sqlite', version: 2, apiBilled: false, collector: 'opencode' },
 ];
 

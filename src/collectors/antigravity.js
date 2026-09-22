@@ -187,6 +187,10 @@ function projectFromWorkspaceUris(raw) {
  *   dedup_key 保证重读幂等。
  * - 索引库 / 会话库被锁或不可读：本轮跳过，水位不动，不抛错（Windows 文件占用
  *   是常态）。
+ * - 时间戳本轮读不到（steps 被锁或 schema 漂移）时，水位**只推进到那一行之前**：
+ *   越过它就等于这一代生成永久丢失（#95）。
+ * - 单个会话库出任何错（含 schema 漂移、镜像损坏）都只跳过该会话并记进
+ *   state.errors，绝不 throw 穿出本源（#95：一个坏库冻结整源）。
  * - 坏记录（解码失败）只丢该行，不推进失败状态、不影响其他行。
  * - dedup_key `antigravity:<会话id>:<idx>` 跨重扫稳定。
  *
@@ -209,6 +213,7 @@ export async function collectAntigravity(store, { tool, path, state, version }) 
 
   /** conversation_id -> project（读不到索引列时按无项目处理） */
   const meta = new Map();
+  const errors = [];
   try {
     const rows = summaries
       .prepare('SELECT conversation_id, workspace_uris FROM conversation_summaries')
@@ -219,7 +224,9 @@ export async function collectAntigravity(store, { tool, path, state, version }) 
   } catch (err) {
     try { summaries.close(); } catch { /* 只读句柄释放 */ }
     if (isLockError(err)) return { inserted: 0, state: prev, skip: true };
-    throw err;
+    // 索引库 schema 漂移（表/列被改名）不是"本源没有数据"的理由：项目名按缺失处理，
+    // conversations/*.db 照收（#95 修前这里 throw，一个坏索引库让整个源每轮停摆）
+    errors.push(`index: ${err.message}`);
   } finally {
     try { summaries.close(); } catch { /* 只读句柄释放 */ }
   }
@@ -251,20 +258,29 @@ export async function collectAntigravity(store, { tool, path, state, version }) 
         .all(gt);
       // 本 build 的 gen 行内没有生成时间，从 steps 表同 idx 行补（见 stepTimestampMs）
       const stepTs = new Map();
+      let stepsUnavailable = false;
       try {
         for (const s of db.prepare('SELECT idx, metadata FROM steps WHERE idx > ?').all(gt)) {
           const ts = stepTimestampMs(s.metadata);
           if (ts) stepTs.set(s.idx, ts);
         }
       } catch (err) {
-        if (!isLockError(err)) throw err; // steps 读不了：退化为行内时间戳（多半为 0 → 跳过）
+        // 锁或 schema 漂移：不是"这一代没有时间"，是"本轮读不到时间"
+        stepsUnavailable = true;
+        errors.push(`${convId}: steps: ${err.message}`);
       }
+      let held = null; // 第一个"时间读不到、行内也无时间"的 idx
       for (const r of rows) {
         let d;
         try { d = decodeGenerationRow(r.data); } catch { continue; }
         if (!d) continue;
         const ts = d.ts || stepTs.get(r.idx) || 0;
-        if (!ts) continue; // 无时间戳无法定位到时间轴
+        if (!ts) {
+          // 没有时间就无法定位到时间轴；steps 本轮读不到时**绝不能越过它推进水位**，
+          // 否则锁一释放这一代生成就永远读不到了（#95 主缺陷）
+          if (stepsUnavailable && held === null) held = r.idx;
+          continue;
+        }
         if (d.input === 0 && d.output === 0 && d.cacheRead === 0) continue; // 零用量行
         const total = d.input + d.cacheRead + d.cacheWrite + d.output;
         if (total <= 0) continue;
@@ -283,14 +299,21 @@ export async function collectAntigravity(store, { tool, path, state, version }) 
           dedup_key: `${tool}:${convId}:${r.idx}`,
         });
       }
-      st.conv[convId] = Math.max(from, maxIdx);
+      // 停在被扣住的那一行之前（idx > 水位 的语义下即 held-1），下轮从它重读；
+      // dedup_key 让重读幂等，被扣住之前的行也已经落库。
+      st.conv[convId] = held === null ? Math.max(from, maxIdx) : Math.max(from, held - 1);
     } catch (err) {
-      if (isLockError(err)) continue; // 读到一半被锁：本轮放弃该会话，水位不动
-      throw err;
+      // 单个会话库的任何问题（读到一半被锁、gen_metadata 被改名、镜像损坏）都只跳过
+      // 这一个会话，水位不动、下轮重试。#95 修前非锁错误一路 throw 穿出本函数，
+      // 一个坏库就能让整个 antigravity 源每轮停摆（其余会话的新行也再也不进库）。
+      errors.push(`${convId}: ${err.message}`);
     } finally {
       try { db.close(); } catch { /* 只读句柄释放；Windows 上必须关掉才能删临时库 */ }
     }
   }
 
-  return { inserted, state: st };
+  // 逐会话错误留在 state 里随 files.state_json 落库：扫描器只有"collect 抛错"这一条
+  // 错误通道，而这里恰恰不能再靠抛错来上报（抛一次 = 全源停摆）。
+  if (errors.length) st.errors = errors.slice(0, 5);
+  return { inserted, state: st, ...(errors.length ? { errors: st.errors } : {}) };
 }

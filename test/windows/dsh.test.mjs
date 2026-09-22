@@ -123,6 +123,42 @@ console.log('\n[v3 + old] 黄金数字，PATH 为空');
   rmSync(tmp, { recursive: true, force: true });
 }
 
+console.log('\n[#79 same-seq] 旧结构同 seq、不同 turn/step 必须各自成一行');
+/* 同一份记录与同样的期望数字也写在桌面端：
+ * desktop/src-tauri/src/collectors.rs::dsh_legacy_chunks_sharing_seq_stay_separate（解析层）
+ * desktop/src-tauri/tests/sources.rs::dsh_same_seq_legacy_chunks_are_not_overwritten_in_the_cache（落库层）
+ * 期望：2 条事件，total 135 / 260，合计 395。 */
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'dsh-79-中文 空格-'));
+  const dir = join(tmp, '--work-projK--', 's-dsh-79');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, 'session.jsonl.zstd');
+  const lines = [
+    JSON.stringify({ type: 'session', seq: 1, time: NOW - 22000, cwd: '/work/projK' }),
+    JSON.stringify({ type: 'assistant/chunk', seq: 7, time: NOW - 20000,
+      data: { turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 10, cacheWriteTokens: 5, outputTokens: 20 } } } }),
+    JSON.stringify({ type: 'assistant/chunk', seq: 7, time: NOW - 19000,
+      data: { turn: 1, step: 2, chunk: { type: 'usage', usage: { inputTokens: 200, cacheReadTokens: 20, cacheWriteTokens: 0, outputTokens: 40 } } } }),
+  ];
+  writeFileSync(file, zstdFrames(lines));
+  const store = makeStore();
+  const r = await collectDshFile(store, { path: file, fileId: 's-dsh-79' });
+  const ev = eventsOf(store);
+  ok('#79 同 seq 的两个 step 各自入库（135 / 260）',
+    r.inserted === 2 && ev.length === 2
+    && ev.map((e) => e.total_tokens).sort((a, b) => a - b).join(',') === '135,260',
+    JSON.stringify(ev.map((e) => [e.total_tokens, e.dedup_key])));
+  ok('#79 dedup_key 带 turn/step 且互不相同',
+    new Set(ev.map((e) => e.dedup_key)).size === 2
+    && ev.every((e) => e.dedup_key.startsWith('dsh:s-dsh-79:7:')),
+    JSON.stringify(ev.map((e) => e.dedup_key)));
+  const again = await collectDshFile(store, { path: file, fileId: 's-dsh-79' });
+  ok('#79 快照整体重解析仍幂等（不增行）', again.inserted === 0 && eventsOf(store).length === 2,
+    String(again.inserted));
+  closeStore(store);
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 console.log('\n[truncated] 坏/截断帧保留已完整帧，不让进程崩');
 {
   const good = hasBuiltinCompress

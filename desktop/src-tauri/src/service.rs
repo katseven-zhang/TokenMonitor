@@ -644,8 +644,9 @@ mod tests {
         let path = root.join("session.jsonl");
         let text = [
             json!({"type":"session_meta","payload":{"id":"session","cwd":"D:/fixture"}}),
-            json!({"timestamp":"2026-09-20T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"unpriced-fixture","total_token_usage":{"input_tokens":100,"output_tokens":20}}}}),
-            json!({"timestamp":"2026-09-20T00:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"unpriced-fixture","total_token_usage":{"input_tokens":200,"output_tokens":40}}}}),
+            // #75：首采样按 info.last_token_usage 记账（真实 rollout 恒有该字段）
+            json!({"timestamp":"2026-09-20T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"unpriced-fixture","total_token_usage":{"input_tokens":100,"output_tokens":20},"last_token_usage":{"input_tokens":100,"output_tokens":20}}}}),
+            json!({"timestamp":"2026-09-20T00:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"model":"unpriced-fixture","total_token_usage":{"input_tokens":200,"output_tokens":40},"last_token_usage":{"input_tokens":100,"output_tokens":20}}}}),
         ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
         fs::write(&path, &text).unwrap();
         let source = path.display().to_string();

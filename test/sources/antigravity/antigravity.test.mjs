@@ -93,6 +93,23 @@ function newConvDb(path, { wal = true } = {}) {
   return db;
 }
 
+/** schema 漂移形态一：只有 gen_metadata，没有时间来源的 steps 表。 */
+function newConvDbNoSteps(path) {
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode=WAL');
+  db.exec(`CREATE TABLE gen_metadata (
+    idx integer, data blob, size integer NOT NULL DEFAULT 0, PRIMARY KEY (idx))`);
+  return db;
+}
+
+/** schema 漂移形态二：gen_metadata 表整体缺失/被改名。 */
+function newConvDbNoGen(path) {
+  const db = new DatabaseSync(path);
+  db.exec('PRAGMA journal_mode=WAL');
+  db.exec('CREATE TABLE generation_metadata (idx integer, data blob)');
+  return db;
+}
+
 const SEC0 = 1726000000;
 const SEC1 = 1726000100;
 
@@ -244,6 +261,53 @@ console.log('\n[collector] 黄金数 / 增量 / 幂等 / 锁');
   writer.close();
   const rUnlocked = await collectAntigravity(store, { tool: 'antigravity', path: anchor, state: rLock.state, version: 1 });
   ok('锁释放后补采（水位从未推进）', rUnlocked.inserted === 1, String(rUnlocked.inserted));
+
+  /* #95：schema 漂移必须只坏一个会话，且"时间读不到"时水位不得越过未采集的生成。 */
+  {
+    // conv-ddd：gen 行内无时间（本机 build 的真实形态），时间只能来自 steps —— 而 steps 表没了
+    const drift = newConvDbNoSteps(join(home, 'conversations', 'conv-ddd.db'));
+    drift.prepare('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(0, Buffer.from(genRow({
+      model: 'gemini-3.8-flash', input: 11, outTotal: 3, thinking: 1, visible: 2,
+    })));
+    drift.prepare('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(1, Buffer.from(genRow({
+      model: 'gemini-3.8-flash', input: 13, outTotal: 5, thinking: 2, visible: 3,
+    })));
+    drift.close();
+    // conv-eee：整个 gen_metadata 表不见（另一种漂移形态）
+    newConvDbNoGen(join(home, 'conversations', 'conv-eee.db')).close();
+
+    const count95 = () => store.db.prepare("SELECT COUNT(*) n FROM events WHERE tool='antigravity'").get().n;
+    const before95 = count95();
+    const r95 = await collectAntigravity(store, { tool: 'antigravity', path: anchor, state: rUnlocked.state, version: 1 });
+    ok('#95 两个坏库不抛穿、不动既有事件（整源不再被一个坏库冻结）',
+      r95.inserted === 0 && count95() === before95, `${r95.inserted}/${before95}->${count95()}`);
+    ok('#95 逐会话错误可见（state.errors + 返回值）',
+      Array.isArray(r95.errors) && r95.errors.length === 2
+      && r95.errors.every((e) => /conv-(ddd|eee)/.test(e))
+      && JSON.stringify(r95.state).includes('conv-eee'), JSON.stringify(r95.errors));
+    ok('#95 steps 读不到时水位不越过被扣住的生成',
+      (r95.state.conv['conv-ddd'] ?? 0) === 0, JSON.stringify(r95.state.conv));
+    ok('#95 gen_metadata 缺失的会话水位不动',
+      r95.state.conv['conv-eee'] === undefined, JSON.stringify(r95.state.conv));
+
+    // 漂移修好（steps 回来）：两行必须还能补采回来——证明确实没被永久跳过
+    const fix = new DatabaseSync(join(home, 'conversations', 'conv-ddd.db'));
+    fix.exec('CREATE TABLE steps (idx integer, metadata blob, PRIMARY KEY (idx))');
+    fix.prepare('INSERT INTO steps VALUES (?, ?)').run(0, Buffer.from(stepMeta(SEC0, 500000000)));
+    fix.prepare('INSERT INTO steps VALUES (?, ?)').run(1, Buffer.from(stepMeta(SEC1, 0)));
+    fix.close();
+    const r95b = await collectAntigravity(store, { tool: 'antigravity', path: anchor, state: r95.state, version: 1 });
+    ok('#95 修复后扣住的生成全部补采回（黄金数 14 / 18）',
+      r95b.inserted === 2 && count95() === before95 + 2, `${r95b.inserted}/${before95}->${count95()}`);
+    const d0 = store.db.prepare("SELECT * FROM events WHERE dedup_key='antigravity:conv-ddd:0'").get();
+    ok('#95 补采行的时间与用量正确',
+      d0 && d0.ts === 1726000000500 && d0.total_tokens === 14 && d0.output_tokens === 3
+      && d0.reasoning_tokens === 1 && d0.model === 'gemini-3.8-flash', JSON.stringify(d0));
+    ok('#95 修复后水位推进到最大 idx', r95b.state.conv['conv-ddd'] === 1,
+      String(r95b.state.conv['conv-ddd']));
+    ok('#95 修好后重扫幂等（dedup 不重复计数）',
+      (await collectAntigravity(store, { tool: 'antigravity', path: anchor, state: r95b.state, version: 1 })).inserted === 0);
+  }
 
   // 锚点缺失：manifest 指向的 summaries 库不存在 → skip，不抛
   const miss = await collectAntigravity(store, {

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { win32 } from 'node:path';
 import { normalizeModel } from '../models.js';
+import { tokenCount } from './tokens.js';
 
 function isLockError(err) {
   const m = String(err?.message || err);
@@ -51,10 +52,12 @@ export async function collectZcodeDb(store, { path, state, version }) {
     for (const r of rows) {
       st.maxRowid = Math.max(st.maxRowid, r.rid);
       if (!Number.isFinite(r.started_at)) continue;
-      const inputRaw = r.input_tokens || 0;
-      const cached = Math.min(r.cache_read_input_tokens || 0, inputRaw); // 防御：cached 不超 input
-      const cacheWrite = r.cache_creation_input_tokens || 0;
-      const output = r.output_tokens || 0;
+      // #96：SQLite 是动态类型——列声明成 INTEGER 只保证"写入时尽力转换"，声明为
+      // NUMERIC/BLOB/无亲和性的列里存着 "800" 这种文本时原样返回。相加前必须转整数。
+      const inputRaw = tokenCount(r.input_tokens);
+      const cached = Math.min(tokenCount(r.cache_read_input_tokens), inputRaw); // 防御：cached 不超 input
+      const cacheWrite = tokenCount(r.cache_creation_input_tokens);
+      const output = tokenCount(r.output_tokens);
       const total = inputRaw + cacheWrite + output;
       if (total <= 0) continue;
       const dir = sessDir.get(r.session_id)?.directory;
@@ -68,7 +71,7 @@ export async function collectZcodeDb(store, { path, state, version }) {
         cached_input: cached,
         cache_write: cacheWrite,
         output_tokens: output,
-        reasoning_tokens: r.reasoning_tokens || 0,
+        reasoning_tokens: tokenCount(r.reasoning_tokens),
         total_tokens: total,
         dedup_key: `zcode:${r.id}`,
       });

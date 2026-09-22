@@ -225,6 +225,99 @@ console.log('\n[opencode] Windows cwd + 黄金数字 + 先插后改 + rowid 复�
   ok('OpenCode 句柄关闭后可删临时库', (rmSync(tmp, { recursive: true, force: true }), !existsSync(file)));
 }
 
+console.log('\n[#96-9] part 表 rowid 复用：水位所指那一行被换掉时必须整表重读');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'sqlite-oc-part-'));
+  const file = join(tmp, '中文 目录', 'opencode.db');
+  const o = createOpencodeDb(file);
+  o.prepare(`INSERT INTO session VALUES ('s-oc', ?, 't')`).run('D:\\Users\\Test User\\我的 项目\\projH');
+  // part 只带工具，不带 message 行：本用例只盯 part 的 rowid 水位，不与 message 的
+  // time_updated 轴纠缠。
+  const insPart = (db, id, ts, name, callId) => db.prepare(
+    `INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(id, 'm1', 's-oc', ts, ts, JSON.stringify({
+      type: 'tool', tool: name, callID: callId, state: { status: 'completed', time: { start: ts } },
+    }));
+  for (let i = 1; i <= 5; i++) insPart(o, `p${i}`, NOW - 5000 + i * 100, `tool-${i}`, `call-${i}`);
+  o.close();
+
+  const store = makeStore();
+  const tools = () => toolsOf(store, 'opencode');
+  const names = () => tools().map((t) => t.name).join(',');
+  const rowAt = (rid) => {
+    const d = new DatabaseSync(file);
+    const r = d.prepare('SELECT id FROM part WHERE rowid = ?').get(rid);
+    const m = d.prepare('SELECT MAX(rowid) AS m FROM part').get().m;
+    d.close();
+    return { id: r?.id ?? null, max: m };
+  };
+
+  const r1 = await collectOpencodeDb(store, { tool: 'opencode', path: file, version: 2 });
+  ok('part 首扫 5 条工具调用', tools().length === 5, names());
+  ok('part 水位停在 MAX(rowid)=5 并记下那一行的主键',
+    r1.state.partMaxRowid === 5 && r1.state.partMaxRowidId === 'p5', JSON.stringify(r1.state));
+  ok('首扫不触发重读', r1.state.partRewinds === 0, String(r1.state.partRewinds));
+
+  // OpenCode 的 part 随 message ON DELETE CASCADE，还带 revert：删掉的可以正是最大那条。
+  const o2 = new DatabaseSync(file);
+  o2.exec("DELETE FROM part WHERE id = 'p5'");
+  insPart(o2, 'p6', NOW + 1000, 'tool-6', 'call-6');
+  o2.close();
+  const at5 = rowAt(5);
+  ok('新 part 复用了被删掉的 5 号（`rowid > 水位` 一行也读不到）',
+    at5.id === 'p6' && at5.max === 5, JSON.stringify(at5));
+  ok('MAX(rowid) 又回到水位本身：只比 max<水位 的旧判据在此失灵',
+    at5.max === r1.state.partMaxRowid, `max=${at5.max} wm=${r1.state.partMaxRowid}`);
+
+  const r2 = await collectOpencodeDb(store, { tool: 'opencode', path: file, state: r1.state, version: 2 });
+  ok('第二轮仍采到复用 rowid 的新 part', tools().some((t) => t.name === 'tool-6'), names());
+  ok('整表重读不产生重复工具行（dedup_key 兜住幂等）', tools().length === 6, `${tools().length}：${names()}`);
+  ok('重读被记了一次账', r2.state.partRewinds === 1, String(r2.state.partRewinds));
+  ok('水位与身份成对前进',
+    r2.state.partMaxRowid === 5 && r2.state.partMaxRowidId === 'p6', JSON.stringify(r2.state));
+
+  const r3 = await collectOpencodeDb(store, { tool: 'opencode', path: file, state: r2.state, version: 2 });
+  ok('无事的一轮不回看、不重复计数',
+    tools().length === 6 && r3.state.partRewinds === 1 && r3.state.partMaxRowid === 5,
+    JSON.stringify([tools().length, r3.state.partRewinds, r3.state.partMaxRowid]));
+
+  // 纯删除（不补插入）：MAX(rowid) 缩短，仍是旧的那条路
+  const o4 = new DatabaseSync(file);
+  o4.exec("DELETE FROM part WHERE id = 'p6'");
+  o4.close();
+  const r4 = await collectOpencodeDb(store, { tool: 'opencode', path: file, state: r3.state, version: 2 });
+  ok('只删不插时 MAX(rowid) 缩短也能触发回看', r4.state.partRewinds === 2, JSON.stringify(r4.state));
+  const o5 = new DatabaseSync(file);
+  insPart(o5, 'p7', NOW + 2000, 'tool-7', 'call-7');
+  o5.close();
+  const r5 = await collectOpencodeDb(store, { tool: 'opencode', path: file, state: r4.state, version: 2 });
+  ok('缩短后补回来的 part 采到', tools().some((t) => t.name === 'tool-7'), names());
+  ok('回看后水位重新对齐', r5.state.partMaxRowid === 5 && r5.state.partMaxRowidId === 'p7',
+    JSON.stringify([r5.state.partMaxRowid, r5.state.partMaxRowidId]));
+
+  // 中间行删除 + 追加：MAX 不变、水位那一行仍是原来那条 → **不该**整表重读，
+  // 新行按 rowid > 水位 增量就跟得上（否则每次 revert 都要重扫整张 part 表）。
+  const o6 = new DatabaseSync(file);
+  o6.exec("DELETE FROM part WHERE id = 'p2'");
+  insPart(o6, 'p8', NOW + 3000, 'tool-8', 'call-8');
+  insPart(o6, 'p9', NOW + 4000, 'tool-9', 'call-9');
+  o6.close();
+  const r6 = await collectOpencodeDb(store, { tool: 'opencode', path: file, state: r5.state, version: 2 });
+  const tc6 = tools();
+  ok('删中间行后追加的新 part 两条都采到',
+    tc6.some((t) => t.name === 'tool-8') && tc6.some((t) => t.name === 'tool-9'), names());
+  ok('中间行删除不触发整表重读（只在水位那行被换掉时回看）',
+    r6.state.partRewinds === r5.state.partRewinds, `${r5.state.partRewinds} -> ${r6.state.partRewinds}`);
+  ok('水位只按增量前进', r6.state.partMaxRowid === 7 && r6.state.partMaxRowidId === 'p9',
+    JSON.stringify([r6.state.partMaxRowid, r6.state.partMaxRowidId]));
+  ok('被删 part 的历史工具行仍保留', tc6.some((t) => t.name === 'tool-2'), names());
+  ok('工具行不增不减：9 条 part 各一行，被删过行的历史仍留着',
+    tc6.length === 9, `${tc6.length}：${names()}`);
+
+  closeStore(store);
+  rmSync(tmp, { recursive: true, force: true });
+}
+
 if (failed) {
   console.error(`\nsqlite-sources FAILED ${failed}`);
   process.exit(1);

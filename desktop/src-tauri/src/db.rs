@@ -90,7 +90,7 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
 // #110 故意**不**升这个号：本次只是开始给"失败"记账（source_files.error 从此有了
 // 写入方），已成功文件的解析结果一个字节都没变。升号等于把全量重扫当代价付掉，
 // 与 #110 要的"少做事"正好相反。
-pub const COLLECTOR_REVISION: &str = "5";
+pub const COLLECTOR_REVISION: &str = "9";
 pub fn open(root: &Path) -> Result<Connection, String> {
     let db = Connection::open(root.join("events-v2.sqlite")).map_err(|e| e.to_string())?;
     register_query_functions(&db)?;
