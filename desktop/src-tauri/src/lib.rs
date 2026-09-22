@@ -10,5 +10,4 @@ pub mod query;
 pub mod scanner;
 pub mod service;
 pub mod session_replay;
-#[allow(dead_code)]
 pub mod types;

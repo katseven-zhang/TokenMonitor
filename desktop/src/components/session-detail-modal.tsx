@@ -10,7 +10,9 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { fetchSessionDetail, fetchSessionRawPage, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
 import { formatNumber, formatPercent } from "@/lib/formatters";
+import { formatTimestamp as formatRangeTime } from "../lib/localized-format";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
+import { writeClipboard } from "@/lib/clipboard";
 import { SessionQuotaUsageView } from "./session-quota-usage";
 
 type SessionDetailModalProps = {
@@ -29,6 +31,28 @@ const RAW_PREVIEW_LINE_LENGTH = 240;
 // session can no longer be copied whole into the IPC payload and then the DOM.
 const RAW_PAGE_LINES = 2_000;
 const RAW_RENDER_CAP_LINES = 20_000;
+// How long a copy confirmation or a copy failure stays on screen.
+const COPY_FEEDBACK_MS = 1_400;
+// `status` arrives verbatim from the log file (session_replay.rs keeps anything
+// in `success | ok | completed | running | stopped`, and can also emit `failed`),
+// so the renderer used to paste a raw backend token into the UI. Known tokens get
+// the active language; an unrecognised one stays visible as-is rather than being
+// dropped, and a session that recorded no status is no longer shown as
+// "completed", which was a state that never happened.
+const TOOL_STATUS_KEYS: Record<string, string> = {
+  completed: "sessions.detail.status_completed",
+  running: "sessions.detail.status_running",
+  stopped: "sessions.detail.status_stopped",
+  failed: "sessions.detail.status_failed",
+  success: "sessions.detail.status_success",
+  ok: "sessions.detail.status_success",
+};
+
+function toolStatusLabel(status: string | null | undefined, t: (key: string) => string) {
+  if (!status) return t("sessions.detail.status_unrecorded");
+  const key = TOOL_STATUS_KEYS[status.toLowerCase()];
+  return key ? t(key) : status;
+}
 const COLLAPSED_PREVIEW_LINE_LENGTH = 240;
 const COLLAPSED_AGENT_LIMIT = 3;
 const DISCLOSURE_BUTTON_CLASS = "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -106,10 +130,14 @@ function firstUserPreview(turn: SessionReplayDetail["turns"][number]) {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
-function formatCompactTokenCount(value: number) {
+// The largest session in the local database passes a billion tokens, so the scale has to
+// reach past `m`: without the `b` tier a 1.5e9 total rendered as `1500m`, which reads as a
+// number the panel never intends to be comparable at a glance.
+export function formatCompactTokenCount(value: number) {
   if (Math.abs(value) < 1_000) return formatNumber(value);
   if (Math.abs(value) < 1_000_000) return `${Number((value / 1_000).toFixed(1))}k`;
-  return `${Number((value / 1_000_000).toFixed(1))}m`;
+  if (Math.abs(value) < 1_000_000_000) return `${Number((value / 1_000_000).toFixed(1))}m`;
+  return `${Number((value / 1_000_000_000).toFixed(1))}b`;
 }
 
 // Colors one request's token volume. Per the contract in session-conversation.ts
@@ -818,7 +846,7 @@ function ToolCallItem({ item, activity, tokenUsage, rawJsonl }: { activity: Tool
         >
           <span className="flex min-w-0 items-center gap-1.5">
             <Terminal className="h-3.5 w-3.5 shrink-0 text-cyan-700 dark:text-cyan-300" />
-            <span className="truncate">{item.name} · {item.status ?? "completed"} · {t("sessions.detail.tool_count", { count: batchActivities.length })}</span>
+            <span className="truncate">{item.name} · {toolStatusLabel(item.status, t)} · {t("sessions.detail.tool_count", { count: batchActivities.length })}</span>
           </span>
           <span className="flex shrink-0 items-center gap-3 font-sans text-muted-foreground">
             {tokenUsage ? <TokenMetadata usage={tokenUsage} /> : null}
@@ -933,7 +961,7 @@ function ToolCallItem({ item, activity, tokenUsage, rawJsonl }: { activity: Tool
       >
         <span className="flex min-w-0 items-center gap-1">
           <Terminal className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate">{displayToolName} {item.status ? `· ${item.status}` : ""}</span>
+          <span className="truncate">{displayToolName} {item.status ? `· ${toolStatusLabel(item.status, t)}` : ""}</span>
         </span>
         <span className="flex shrink-0 items-center gap-3">
           {tokenUsage ? <TokenMetadata usage={tokenUsage} /> : null}
@@ -1085,7 +1113,7 @@ function TimelineItem({ item, activity, tokenUsage, rawJsonlLines }: TimelineEnt
   return content;
 }
 
-export function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; rawJsonlLines: string[] }) {
+function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; rawJsonlLines: string[] }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (block.kind === "item") return <TimelineItem {...block.entry} rawJsonlLines={rawJsonlLines} />;
@@ -1123,17 +1151,51 @@ export function ConversationItem({ block, rawJsonlLines }: { block: Conversation
   );
 }
 
+/// #119：焦点陷阱里「这一句 Tab 该做什么」的判定，抽成纯函数是为了能被单测驱动
+/// （本仓库的 desktop 单测没有 DOM 装置，vitest 跑在 node 环境里）。
+/// 语义：在 last 上按 Tab → 回环到 first；在 first 上按 Shift+Tab → 回环到 last；
+/// 其余情况交给浏览器正常前进。空列表由调用方决定（它要 preventDefault 后自己兜底）。
+export function tabWrapTarget<T>(
+  focusable: readonly T[],
+  active: T | null,
+  shiftKey: boolean,
+): "first" | "last" | "none" {
+  if (focusable.length === 0) return "none";
+  if (shiftKey && active === focusable[0]) return "last";
+  if (!shiftKey && active === focusable[focusable.length - 1]) return "first";
+  return "none";
+}
+
+/// #119：把处于 `inert` 子树里的元素从可聚焦集合里剔掉。
+/// `inert` 只影响浏览器自己的 Tab 顺序，**不影响 `querySelectorAll` 的匹配**：
+/// 折叠头部（滚动后 `inert={isScrolled}`）里的按钮仍然会被查出来，于是陷阱算出的
+/// first/last 可能是头部元素，`document.activeElement === last` 永不成立，
+/// Tab 从最后一个内容元素继续时焦点就逃出对话框（body 已 overflow:hidden）。
+/// 判定用 `closest("[inert]")`，所以 React 渲染出的 `inert=""` 与手写 `inert="true"`
+/// 都能识别（属性存在即视为 inert，不看值）。
+export function withoutInerted<T extends { closest(selector: string): unknown }>(
+  elements: readonly T[],
+): T[] {
+  return elements.filter((element) => element.closest("[inert]") == null);
+}
+
 export function SessionDetailModal({ session, query, onClose }: SessionDetailModalProps) {
   const {money:formatCurrency}=useCurrency();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // The header's query-range strip is the panel's only timestamp that is not part of the
+  // replay body, and it used to fall back to the runtime default locale, which is neither
+  // the interface language nor a stable one (task #72).
+  const language = i18n.resolvedLanguage ?? i18n.language;
   const [loadedDetail, setDetail] = useState<SessionReplayDetail | null>(null);
   const [activePath, setActivePath] = useState(session.path);
   const detail = loadedDetail?.path === activePath ? loadedDetail : null;
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("timeline");
-  const [copied, setCopied] = useState(false);
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   const [copiedProjectPath, setCopiedProjectPath] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [rawLoadFailed, setRawLoadFailed] = useState(false);
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
   const [showFullRaw, setShowFullRaw] = useState(false);
   const [rawJsonlLines, setRawJsonlLines] = useState<string[]>([]);
@@ -1168,6 +1230,9 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     setDetail(null);
     setError(null);
     setActiveTab("timeline");
+    setCopiedLabel(null);
+    setCopyError(null);
+    setRawLoadFailed(false);
     setCopiedSessionId(false);
     setCopiedProjectPath(null);
     setExpandedTurns(new Set());
@@ -1209,26 +1274,37 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
       const dialog = dialogRef.current;
       if (!dialog) return;
 
-      const focusableElements = Array.from(
-        dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      const focusableElements = withoutInerted(
+        Array.from(
+          dialog.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
         ),
       );
 
       if (focusableElements.length === 0) {
+        // 一个可聚焦元素都不剩（整窗都被 inert 掉）：焦点留在对话框里，不让它跑到浏览器 UI。
         event.preventDefault();
         return;
       }
 
-      const first = focusableElements[0];
-      const last = focusableElements[focusableElements.length - 1];
-
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
+      switch (
+        tabWrapTarget<HTMLElement>(
+          focusableElements,
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          event.shiftKey,
+        )
+      ) {
+        case "first":
+          event.preventDefault();
+          focusableElements[0].focus();
+          break;
+        case "last":
+          event.preventDefault();
+          focusableElements[focusableElements.length - 1].focus();
+          break;
+        default:
+          break;
       }
     }
     window.addEventListener("keydown", handleKeyDown);
@@ -1248,7 +1324,9 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     path,
     displayName: path.split(/[\\/]/).filter(Boolean).pop() || path,
   });
-  const threadName = detail ? detail.threadName : t("sessions.detail.loading_replay");
+  // The header used to read "Loading replay…" forever after a failed load, even
+  // though the body had already replaced the spinner with the error.
+  const threadName = detail ? detail.threadName : error ? null : t("sessions.detail.loading_replay");
   const displayedSessionId = cleanSessionId(detail?.sessionId ?? session.sessionId);
   useEffect(() => {
     if (!detail) return;
@@ -1264,7 +1342,11 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
         setRawJsonlLines([...collected]);
       }
     })().catch(() => {
-      if (!cancelled) setRawJsonlLines([]);
+      if (cancelled) return;
+      // A failed page used to wipe the preview silently, so the tab looked like
+      // an empty transcript instead of a read error. Keep whatever arrived and
+      // say what happened.
+      setRawLoadFailed(true);
     });
     return () => {
       cancelled = true;
@@ -1275,24 +1357,50 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const conversation = useMemo(() => detail ? buildSessionConversation(detail.turns) : [], [detail]);
   const patchCounts = useMemo(() => detail?.turns.map(countTurnPatches) ?? [], [detail]);
 
+  function reportCopyFailure() {
+    const message = t("sessions.detail.copy_failed");
+    setCopyError(message);
+    window.setTimeout(() => setCopyError((current) => (current === message ? null : current)), COPY_FEEDBACK_MS);
+  }
+
   async function copySessionId() {
-    await navigator.clipboard?.writeText(displayedSessionId);
+    const outcome = await writeClipboard(displayedSessionId);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
     setCopiedSessionId(true);
-    window.setTimeout(() => setCopiedSessionId(false), 1400);
+    window.setTimeout(() => setCopiedSessionId(false), COPY_FEEDBACK_MS);
   }
 
   async function copyRawJsonl() {
     if (!detail) return;
-    await navigator.clipboard?.writeText(rawJsonlLines.join("\n"));
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    const text = rawJsonlLines.join("\n");
+    // Paging caps what reaches the clipboard, so claiming the whole transcript
+    // was copied would be a lie whenever the loaded set is shorter than the file.
+    const label = rawIsTruncated
+      ? t("sessions.detail.copy_loaded_lines", { lines: formatNumber(rawJsonlLines.length) })
+      : t("sessions.detail.copied");
+    const outcome = await writeClipboard(text);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
+    setCopiedLabel(label);
+    window.setTimeout(() => setCopiedLabel((current) => (current === label ? null : current)), COPY_FEEDBACK_MS);
   }
 
   async function copyProjectPath(path: string) {
-    if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(path);
+    const outcome = await writeClipboard(path);
+    if (!outcome.ok) {
+      reportCopyFailure();
+      return;
+    }
+    setCopyError(null);
     setCopiedProjectPath(path);
-    window.setTimeout(() => setCopiedProjectPath((current) => current === path ? null : current), 1400);
+    window.setTimeout(() => setCopiedProjectPath((current) => current === path ? null : current), COPY_FEEDBACK_MS);
   }
 
   function toggleTurn(key: string) {
@@ -1374,14 +1482,17 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             aria-hidden={isScrolled}
           >
           <section ref={summaryRef} aria-label={t("sessions.detail.session_summary")} className="min-h-0 overflow-hidden bg-surface">
-          {detail?.range && detail.rangeTotals ? <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs"><strong>当前查询范围</strong> · {new Date(detail.range.start).toLocaleString()} — {new Date(detail.range.end).toLocaleString()}（不含结束时刻）<div className="mt-1 flex flex-wrap gap-4"><span>Tokens <b>{formatNumber(detail.rangeTotals.totalTokens)}</b></span><span>用量记录 <b>{formatNumber(detail.rangeTotals.events)}</b></span><span>费用 <b>{formatCurrency(detail.rangeTotals.costUsd)}</b></span>{detail.rangeTotals.unpricedEvents>0 && <span>{detail.rangeTotals.unpricedEvents} 条记录缺少价格</span>}</div></div> : null}
-          <p className="pt-2 text-xs text-muted-foreground">以下为完整会话回放与父子关系，保留范围外对话上下文；完整会话统计与上方查询范围分别显示。</p>
+          {detail?.range && detail.rangeTotals ? <div className="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs"><strong>{t("sessions.detail.range_scope")}</strong> · {t("sessions.detail.range_between", { start: formatRangeTime(detail.range.start, language), end: formatRangeTime(detail.range.end, language) })}<div className="mt-1 flex flex-wrap gap-4"><span>{t("sessions.total_tokens")} <b>{formatNumber(detail.rangeTotals.totalTokens)}</b></span><span>{t("common.usage_records")} <b>{formatNumber(detail.rangeTotals.events)}</b></span><span>{t("sessions.detail.cost")} <b>{formatCurrency(detail.rangeTotals.costUsd)}</b></span>{detail.rangeTotals.unpricedEvents>0 && <span>{t("sessions.detail.unpriced_records", { records: formatNumber(detail.rangeTotals.unpricedEvents) })}</span>}</div></div> : null}
+          <p className="pt-2 text-xs text-muted-foreground">{t("sessions.detail.replay_scope_note")}</p>
           {detail && <div className="flex flex-wrap gap-1.5 pt-1 pb-0.5">
             {metric(t("sessions.detail.duration"), formatDuration(detail?.summary.durationMs), <Clock3 className="h-3.5 w-3.5" />, "blue")}
             {metric(t("sessions.detail.total_tokens"), formatNumber(detail?.summary.totalTokens ?? session.totalTokens), <Database className="h-3.5 w-3.5" />, "violet")}
             {metric(t("sessions.detail.input_tokens"), formatNumber(detail?.summary.inputTokens ?? session.inputTokens), <Database className="h-3.5 w-3.5" />, "blue")}
             {metric(t("sessions.detail.output_tokens"), formatNumber(detail?.summary.outputTokens ?? session.outputTokens), <Database className="h-3.5 w-3.5" />, "green")}
-            {metric(t("sessions.detail.cost"), detail ? formatCurrency(detail.summary.costUSD) : "加载中…", <Coins className="h-3.5 w-3.5" />, "emerald")}
+            {/* The whole strip is gated on `detail`, so the cost never had a state
+                to show while loading: the hardcoded "加载中…" fallback was both
+                unreachable and the only Chinese literal left in the row. */}
+            {metric(t("sessions.detail.cost"), formatCurrency(detail.summary.costUSD), <Coins className="h-3.5 w-3.5" />, "emerald")}
             {metric(t("sessions.detail.cache"), formatPercent(cacheRate), <Database className="h-3.5 w-3.5" />, "cyan")}
             {metric(t("sessions.detail.tool_calls"), formatNumber(detail?.summary.toolCallCount ?? 0), <Wrench className="h-3.5 w-3.5" />, "amber")}
             {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
@@ -1434,7 +1545,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
               <span>·</span>
               <span>{t("sessions.detail.first_token", { value: formatDuration(detail?.summary.timeToFirstTokenMs) })}</span>
               <span>·</span>
-              <span>{t("sessions.detail.cli", { value: detail?.summary.cliVersion ?? "--" })}</span>
+              <span>{detail?.summary.cliVersion ? t("sessions.detail.cli", { value: detail.summary.cliVersion }) : t("sessions.detail.cli_unrecorded")}</span>
             </div>
           ) : null}
           {detail && activePath === session.path ? <div className="mt-1.5 border-t border-border/50 pt-1.5"><SessionQuotaUsageView usage={session.quotaUsage} detailed /></div> : null}
@@ -1588,6 +1699,11 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                         })}
                       </span>
                     ) : null}
+                    {rawLoadFailed ? (
+                      <span role="alert" className="ml-2 font-semibold text-error">
+                        {t("sessions.detail.raw_load_failed")}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1598,12 +1714,15 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                   ) : null}
                   <Button variant="secondary" size="sm" onClick={() => void copyRawJsonl()}>
                     <Clipboard className="mr-2 h-4 w-4" />
-                    {copied ? t("sessions.detail.copied") : t("sessions.detail.copy")}
+                    {copiedLabel ?? t("sessions.detail.copy")}
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => void revealInFileManager(detail.path)}>
                     <FolderOpen className="mr-2 h-4 w-4" />
                     {t("sessions.detail.reveal_in_file_manager")}
                   </Button>
+                  {copyError ? (
+                    <span role="alert" className="text-xs font-semibold text-error">{copyError}</span>
+                  ) : null}
                 </div>
               </div>
               <pre className="min-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-surface p-4 font-mono text-xs leading-relaxed text-foreground">

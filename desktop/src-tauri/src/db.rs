@@ -570,7 +570,6 @@ pub fn query_session_rollup_record_with_prices(
             unpriced_events: 0,
             models: BTreeMap::new(),
             projects: BTreeMap::new(),
-            updated_at: String::new(),
         });
         // #83: saturating accumulation. A pathological/corrupt token total must
         // not silently wrap i64 negative and drag the day's cost/usage sign over.

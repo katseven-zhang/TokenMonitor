@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, withBaseMessages, type ReplayItem } from "./session-conversation";
+import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, sanitizeProcessText, withBaseMessages, type ReplayItem } from "./session-conversation";
 import type { SessionReplayDetail } from "./api";
 
 function detailWith(turns: SessionReplayDetail["turns"], baseMessages: SessionReplayDetail["baseMessages"]): SessionReplayDetail {
@@ -8,6 +8,29 @@ function detailWith(turns: SessionReplayDetail["turns"], baseMessages: SessionRe
     rawLineCount: 1, baseMessages, turns,
   } as unknown as SessionReplayDetail;
 }
+
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+
+describe("process text sanitizer", () => {
+  // Task #84: only stdout went through cleanExecOutput, so a failing CLI's stderr
+  // was pasted into the red block with its escape sequences and control bytes.
+  it("removes the bytes that cannot be shown as text without rewriting the message", () => {
+    expect(sanitizeProcessText(`${ESC}[31merror${ESC}[0m: no such file`)).toBe("error: no such file");
+    expect(sanitizeProcessText(`first line${BEL}still the first line`)).toBe("first linestill the first line");
+    expect(sanitizeProcessText("kept\ttab and\nnewline")).toBe("kept\ttab and\nnewline");
+  });
+
+  it("turns carriage returns into line breaks so later text cannot overwrite earlier text", () => {
+    expect(sanitizeProcessText("a\r\nb\rc")).toBe("a\nb\nc");
+  });
+
+  it("keeps an absent stream absent instead of inventing empty output", () => {
+    expect(sanitizeProcessText(null)).toBeNull();
+    expect(sanitizeProcessText(undefined)).toBeNull();
+    expect(sanitizeProcessText("")).toBe("");
+  });
+});
 
 function replayTurn(items: ReplayItem[]): SessionReplayDetail["turns"][number] {
   return { turnId: "1", startedAt: null, completedAt: null, durationMs: null, baseMessageCount: 0, systemMessages: [], userMessages: [], assistantMessages: [], reasoningSummaries: [], toolCalls: [], patchResults: [], tokenEvents: [], errors: [], items };

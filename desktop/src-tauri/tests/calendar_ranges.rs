@@ -22,6 +22,16 @@ fn calendar_groups_drilldowns_and_exports_agree_across_dst() {
         let selected=data["days"].as_array().unwrap().iter().find(|r|r["key"]==day).unwrap();
         assert_eq!(selected["rangeEnd"].as_i64().unwrap()-selected["rangeStart"].as_i64().unwrap(),hours*3_600_000);
         assert_eq!(selected["events"],hours*2);
+        // Task #88: the dashboard ships only what the interface reads. These three
+        // window-wide projections were produced per query and never displayed, and a
+        // per-row first timestamp was capped by the window's own start anyway.
+        for gone in ["eventCount","availableModels","availableProjects"] {
+            assert!(data.get(gone).is_none(),"{gone} must no longer be part of the response");
+        }
+        for row in data["models"].as_array().unwrap().iter().chain(data["days"].as_array().unwrap()) {
+            assert!(row.get("firstTs").is_none(),"rows must not carry firstTs");
+            assert!(row["lastTs"].is_number(),"lastTs is still read by the sessions table");
+        }
         for kind in ["days","months"] {
             for row in data[kind].as_array().unwrap() {
                 let mut drill=q.clone();drill.start=start.max(row["rangeStart"].as_i64().unwrap());drill.end=end.min(row["rangeEnd"].as_i64().unwrap());

@@ -29,7 +29,11 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {
-    target: "es2020",
+    // Must match `target`/`lib` in tsconfig.json: the code already uses
+    // `Array.prototype.at` (ES2022) and `String.replaceAll` (ES2021), so an
+    // "es2020" promise was false advertising, and an ES2023 lib let
+    // `findLast` (ES2023) slip in on top of it.
+    target: "es2022",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
   },

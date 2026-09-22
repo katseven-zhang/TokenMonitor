@@ -107,7 +107,7 @@ export function SessionQuotaUsageView({ usage, detailed = false }: SessionQuotaU
                   );
                 })}
               </span>
-            ) : <span className="min-w-0 text-right font-semibold text-muted-foreground">--</span>}
+            ) : <span className="min-w-0 text-right font-semibold text-muted-foreground">{t("sessions.quota.none")}</span>}
           </div>
         ))}
       </div>
@@ -126,11 +126,11 @@ export function SessionQuotaUsageView({ usage, detailed = false }: SessionQuotaU
           <div key={group.key} className="flex items-baseline gap-2 py-0.5">
             <div className="shrink-0 font-semibold text-muted-foreground">{group.label}</div>
             {group.windows.length === 0 ? (
-              <div className="font-bold text-muted-foreground">--</div>
+              <div className="font-bold text-muted-foreground">{t("sessions.quota.none")}</div>
             ) : (
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {group.windows.map((window, index) => (
-                  <div key={index} className="text-muted-foreground" title={`${formatTime(window.observedStartAt, i18n.language)} – ${formatTime(window.observedEndAt, i18n.language)}\n${t("sessions.quota.resets", { value: window.resetsAt ? formatTime(window.resetsAt, i18n.language) : "--" })}`}>
+                  <div key={index} className="text-muted-foreground" title={`${formatTime(window.observedStartAt, i18n.language)} – ${formatTime(window.observedEndAt, i18n.language)}\n${window.resetsAt ? t("sessions.quota.resets", { value: formatTime(window.resetsAt, i18n.language) }) : t("sessions.quota.resets_unknown")}`}>
                     <span className="font-bold text-foreground">
                       {t("sessions.quota.used_and_remaining_change", {
                         usage: formatDetailedUsage(window),

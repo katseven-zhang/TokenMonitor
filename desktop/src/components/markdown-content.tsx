@@ -1,4 +1,6 @@
-import { memo, type ComponentPropsWithoutRef, type MouseEvent } from "react";
+import { memo, useEffect, useRef, useState, type ComponentPropsWithoutRef, type MouseEvent } from "react";
+import { useTranslation } from "react-i18next";
+import { writeClipboard } from "@/lib/clipboard";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import css from "highlight.js/lib/languages/css";
@@ -68,20 +70,37 @@ function MarkdownCode({ className, children }: ComponentPropsWithoutRef<"code">)
   return (
     <code
       className={`${className ?? ""} hljs`}
-      dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language }).value }}
+      // The fenced text comes from a transcript the user did not write, and hljs
+      // throws on input its grammar cannot finish with; a throw here would take the
+      // whole replay tab down with it.
+      dangerouslySetInnerHTML={{ __html: hljs.highlight(code, { language, ignoreIllegals: true }).value }}
     />
   );
 }
 
-function openMarkdownLink(event: MouseEvent<HTMLAnchorElement>) {
-  const href = event.currentTarget.href;
-  if (!href) return;
-  event.preventDefault();
-  // Local-only product: display/copy URLs without navigating or making requests.
-  void navigator.clipboard.writeText(href);
-}
-
 function MarkdownContentComponent({ content }: MarkdownContentProps) {
+  const { t } = useTranslation();
+  const [feedback, setFeedback] = useState<{ text: string; failed: boolean } | null>(null);
+  const feedbackTimer = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (feedbackTimer.current !== null) window.clearTimeout(feedbackTimer.current);
+  }, []);
+
+  async function copyMarkdownLink(event: MouseEvent<HTMLAnchorElement>) {
+    const href = event.currentTarget.href;
+    if (!href) return;
+    event.preventDefault();
+    // Local-only product: display/copy URLs without navigating or making requests.
+    const outcome = await writeClipboard(href);
+    setFeedback({
+      text: outcome.ok ? t("sessions.detail.markdown_link_copied") : t("sessions.detail.markdown_copy_failed"),
+      failed: !outcome.ok,
+    });
+    if (feedbackTimer.current !== null) window.clearTimeout(feedbackTimer.current);
+    feedbackTimer.current = window.setTimeout(() => setFeedback(null), 1400);
+  }
+
   return (
     <div className="session-markdown">
       <ReactMarkdown
@@ -90,9 +109,15 @@ function MarkdownContentComponent({ content }: MarkdownContentProps) {
           [rehypeKatex, { strict: false }],
         ]}
         components={{
-          img: ({ alt }) => <span className="text-muted-foreground">[图片：{alt || "外部图片未加载"}]</span>,
+          img: ({ alt }) => (
+            <span className="text-muted-foreground">
+              {t("sessions.detail.markdown_image", {
+                alt: alt || t("sessions.detail.markdown_image_without_alt"),
+              })}
+            </span>
+          ),
           a: ({ children, ...props }: ComponentPropsWithoutRef<"a">) => (
-            <a {...props} title="复制链接（离线模式不会打开网页）" onClick={openMarkdownLink}>
+            <a {...props} title={t("sessions.detail.markdown_link_title")} onClick={(event) => void copyMarkdownLink(event)}>
               {children}
             </a>
           ),
@@ -106,6 +131,14 @@ function MarkdownContentComponent({ content }: MarkdownContentProps) {
       >
         {content}
       </ReactMarkdown>
+      {feedback ? (
+        <span
+          role={feedback.failed ? "alert" : "status"}
+          className={feedback.failed ? "block text-xs text-error" : "block text-xs text-muted-foreground"}
+        >
+          {feedback.text}
+        </span>
+      ) : null}
     </div>
   );
 }
