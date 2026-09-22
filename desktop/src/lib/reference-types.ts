@@ -282,6 +282,14 @@ export type ProjectReference = {
 };
 
 
+export type SessionReplayRawPage = {
+  lines: string[];
+  start: number;
+  totalLines: number;
+  modifiedAtMs: number;
+  sizeBytes: number;
+};
+
 export type SessionReplayDetail = {
   range?: { start:number; end:number };
   rangeTotals?: { totalTokens:number; costUsd:number|null; unpricedEvents:number; events:number };
@@ -290,7 +298,9 @@ export type SessionReplayDetail = {
   threadName: string | null;
   modifiedAtMs: number;
   sizeBytes: number;
-  rawJsonl: string;
+  rawLineCount: number;
+  /** Base instructions, stored once per session instead of once per turn. */
+  baseMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
   agents: Array<{
     path: string;
     sessionId: string;
@@ -326,12 +336,16 @@ export type SessionReplayDetail = {
     toolCallCount: number;
     patchCount: number;
     errorCount: number;
+    malformedLines: number;
+    unrecognizedEventCount: number;
   };
   turns: Array<{
     turnId: string;
     startedAt: string | null;
     completedAt: string | null;
     durationMs: number | null;
+    /** How many entries of the session's `baseMessages` applied when this turn started. */
+    baseMessageCount: number;
     systemMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
     userMessages: Array<{ timestamp: string | null; kind: string; text: string }>;
     assistantMessages: Array<{ timestamp: string | null; kind: string; text: string }>;

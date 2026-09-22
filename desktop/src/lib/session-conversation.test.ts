@@ -1,15 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, type ReplayItem } from "./session-conversation";
+import { buildConversation, buildSessionConversation, countTurnPatches, classifyExploration, summarizeOutput, withBaseMessages, type ReplayItem } from "./session-conversation";
 import type { SessionReplayDetail } from "./api";
 
+function detailWith(turns: SessionReplayDetail["turns"], baseMessages: SessionReplayDetail["baseMessages"]): SessionReplayDetail {
+  return {
+    path: "/tmp/session.jsonl", sessionId: "session", threadName: null, modifiedAtMs: 0, sizeBytes: 1,
+    rawLineCount: 1, baseMessages, turns,
+  } as unknown as SessionReplayDetail;
+}
+
 function replayTurn(items: ReplayItem[]): SessionReplayDetail["turns"][number] {
-  return { turnId: "1", startedAt: null, completedAt: null, durationMs: null, systemMessages: [], userMessages: [], assistantMessages: [], reasoningSummaries: [], toolCalls: [], patchResults: [], tokenEvents: [], errors: [], items };
+  return { turnId: "1", startedAt: null, completedAt: null, durationMs: null, baseMessageCount: 0, systemMessages: [], userMessages: [], assistantMessages: [], reasoningSummaries: [], toolCalls: [], patchResults: [], tokenEvents: [], errors: [], items };
 }
 function command(cmd: string, overrides: Partial<Extract<ReplayItem, { kind: "toolCall" }>> = {}): ReplayItem {
   return { kind: "toolCall", callId: cmd, name: "exec_command", arguments: JSON.stringify({ cmd }), output: JSON.stringify({ exit_code: 0, output: "result" }), stderr: null, startedAt: null, completedAt: "2026-09-09", durationMs: 100, status: "completed", isError: false, ...overrides };
 }
-function usage(totalTokens: number): ReplayItem {
-  return { kind: "tokenUsage", timestamp: null, model: "gpt-5", inputTokens: totalTokens - 10, cachedInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 0, totalTokens };
+function usage(totalTokens: number, model = "gpt-5"): ReplayItem {
+  return { kind: "tokenUsage", timestamp: null, model, inputTokens: totalTokens - 10, cachedInputTokens: 0, outputTokens: 10, reasoningOutputTokens: 0, totalTokens };
 }
 
 describe("conversation projection", () => {
@@ -36,19 +43,31 @@ describe("conversation projection", () => {
     const first = blocks[0];
     if (first.kind !== "exploration") throw new Error("Expected exploration");
     expect(first.entries.map((entry) => entry.tokenUsage?.totalTokens)).toEqual([100, 200, 300]);
-    expect(first.entries.map((entry) => entry.tokenUsage?.deltaTokens)).toEqual([undefined, 100, 100]);
     expect(first.entries[0].item.rawJsonlLineNumbers).toEqual([1, 2]);
     expect(first.actions[0]).toEqual([{ label: "Search", text: "shimmer in src" }]);
   });
 
-  it("keeps token deltas continuous across turns", () => {
+  it("displays every request's own token volume without differencing across turns", () => {
     const conversations = buildSessionConversation([
       replayTurn([command("cat a"), usage(100)]),
       replayTurn([command("cat b"), usage(130)]),
     ]);
 
-    expect(conversations[0][0].kind === "exploration" && conversations[0][0].entries[0].tokenUsage?.deltaTokens).toBeUndefined();
-    expect(conversations[1][0].kind === "exploration" && conversations[1][0].entries[0].tokenUsage?.deltaTokens).toBe(30);
+    expect(conversations[0][0].kind === "exploration" && conversations[0][0].entries[0].tokenUsage?.totalTokens).toBe(100);
+    expect(conversations[1][0].kind === "exploration" && conversations[1][0].entries[0].tokenUsage?.totalTokens).toBe(130);
+  });
+
+  // Same fixture as `calculates_token_deltas_from_running_totals` in
+  // session_replay.rs: the backend already emits per-request amounts, so a
+  // second, smaller request must never render as a negative step.
+  it("keeps a shrinking request positive, matching the Rust per-request contract", () => {
+    const blocks = buildConversation(replayTurn([command("cat a"), usage(150), command("cat b"), usage(120)]));
+    const volumes = blocks.flatMap((block) => (block.kind === "exploration"
+      ? block.entries.map((entry) => entry.tokenUsage?.totalTokens ?? null)
+      : [block.entry.tokenUsage?.totalTokens ?? null]));
+
+    expect(volumes).toEqual([150, 120]);
+    expect(volumes.every((volume) => volume === null || volume >= 0)).toBe(true);
   });
 
   it("keeps failures, running commands, writes and ambiguous shell scripts visible", () => {
@@ -90,6 +109,99 @@ describe("conversation projection", () => {
       { kind: "image", path: "/tmp/result.png", imageUrl: "data:image/png;base64,AA==" },
       { kind: "command", command: "git status --short", workdir: null, output: { stdout: "M src/a.ts", stderr: null, exitCode: 0, wallTimeSeconds: 0.1, sessionId: null } },
     ]);
+  });
+
+  it("stops attributing nested exec outputs once a call cannot be paired", () => {
+    const argumentsJson = [
+      'text(await tools.exec_command({workdir:"/x"}));',
+      'text(await tools.exec_command({cmd:"pnpm test"}));',
+      'text(await tools.exec_command({cmd:"git status --short"}));',
+    ].join(" ");
+    const nested = (output: string) => {
+      const block = buildConversation(replayTurn([command("", { name: "exec", arguments: argumentsJson, output })]))[0];
+      if (block.kind !== "item" || block.entry.item.kind !== "toolCall") throw new Error("Expected tool activity");
+      return block.entry.activity?.nestedActivities ?? [];
+    };
+    const results = (texts: string[]) => JSON.stringify(texts.map((text) => ({ type: "input_text", text })));
+
+    // Before the fix the second and third commands inherited the first result and
+    // its successor, so every command displayed another command's output.
+    expect(nested(results([
+      JSON.stringify({ exit_code: 1, output: "first call noise" }),
+      JSON.stringify({ exit_code: 0, output: "tests passed" }),
+      JSON.stringify({ exit_code: 0, output: "M src/a.ts" }),
+    ]))).toEqual([
+      { kind: "command", command: "pnpm test", workdir: null, output: null },
+      { kind: "command", command: "git status --short", workdir: null, output: null },
+    ]);
+    expect(nested(results([
+      JSON.stringify({ exit_code: 0, output: "M src/a.ts" }),
+      JSON.stringify({ exit_code: 0, output: "tests passed" }),
+    ]))).toEqual([
+      { kind: "command", command: "pnpm test", workdir: null, output: null },
+      { kind: "command", command: "git status --short", workdir: null, output: null },
+    ]);
+  });
+
+  it("folds adjacent usage events of the same model instead of dropping one", () => {
+    const blocks = buildConversation(replayTurn([command("cat a"), usage(100), usage(130)]));
+    expect(blocks).toHaveLength(1);
+    if (blocks[0].kind !== "exploration") throw new Error("Expected exploration");
+    expect(blocks[0].entries).toHaveLength(1);
+    expect(blocks[0].entries[0].tokenUsage?.totalTokens).toBe(230);
+    expect(blocks[0].entries[0].tokenUsage?.inputTokens).toBe(210);
+    expect(blocks[0].entries[0].tokenUsage?.outputTokens).toBe(20);
+  });
+
+  it("keeps adjacent usage events of different models as separate visible entries", () => {
+    const blocks = buildConversation(replayTurn([
+      command("cat a"), usage(100, "gpt-5"), usage(30, "claude-sonnet-4.5"),
+    ]));
+    const volumes = blocks.flatMap((block) => (block.kind === "exploration"
+      ? block.entries.map((entry) => entry.tokenUsage?.totalTokens ?? null)
+      : [block.entry.tokenUsage?.totalTokens ?? (block.entry.item.kind === "tokenUsage" ? block.entry.item.totalTokens : null)]));
+
+    expect(volumes).toEqual([100, 30]);
+  });
+
+  it("composes the turn's system snapshot into the timeline exactly once", () => {
+    const turn = {
+      ...replayTurn([command("cat a")]),
+      systemMessages: [
+        { timestamp: null, kind: "base_instructions", text: "Use the repository instructions." },
+        { timestamp: null, kind: "base_instructions", text: "Second rule." },
+      ],
+    };
+    const texts = buildConversation(turn)
+      .flatMap((block) => (block.kind === "exploration"
+        ? block.entries.map((entry) => entry.item)
+        : [block.entry.item]))
+      .filter((item) => item.kind === "message")
+      .map((item) => (item.kind === "message" ? `${item.role}:${item.text}` : ""));
+
+    expect(texts).toEqual([
+      "system:Use the repository instructions.",
+      "system:Second rule.",
+    ]);
+  });
+
+  it("expands the session-level base instructions into each turn's own range", () => {
+    const base = [
+      { timestamp: null, kind: "base_instructions", text: "Rule A." },
+      { timestamp: null, kind: "base_instructions", text: "Rule B." },
+    ];
+    const detail = detailWith([
+      { ...replayTurn([]), baseMessageCount: 1, systemMessages: [{ timestamp: null, kind: "message", text: "Live note." }] },
+      { ...replayTurn([]), baseMessageCount: 2, systemMessages: [] },
+      { ...replayTurn([]), baseMessageCount: 0, systemMessages: [] },
+    ], base);
+
+    const expanded = withBaseMessages(detail);
+    expect(expanded.turns[0].systemMessages.map((message) => message.text)).toEqual(["Rule A.", "Live note."]);
+    expect(expanded.turns[1].systemMessages.map((message) => message.text)).toEqual(["Rule A.", "Rule B."]);
+    expect(expanded.turns[2].systemMessages).toEqual([]);
+    // The prompt text is referenced, not re-copied per turn.
+    expect(expanded.turns[1].systemMessages[0]).toBe(base[0]);
   });
 
   it("recognizes literal RTK read, search and list commands", () => {

@@ -1,6 +1,6 @@
 import { useCurrency } from '../lib/currency';
 import {
-  buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
+  withBaseMessages, buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
   parseToolContentBlocks, parseUserInputAnswers, processExitCode, processSignal, splitWebSearchResults, summarizeOutput,
   type ConversationBlock, type DisplayTokenUsageItem, type NestedActivity, type ReplayItem, type TimelineEntry, type TokenUsageItem, type ToolActivity, type UserInputQuestion, type WebSearchResult,
 } from "@/lib/session-conversation";
@@ -8,7 +8,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } 
 import { AlertTriangle, Bot, Check, ChevronDown, ChevronRight, Clipboard, Clock3, Coins, Database, FileDiff, FileJson, FolderOpen, GitBranch, Info, List, Loader2, MessageSquare, Terminal, Wrench, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
-import { fetchSessionDetail, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
+import { fetchSessionDetail, fetchSessionRawPage, revealInFileManager, type SessionDetailRow, type SessionReplayDetail, type Query } from "@/lib/api";
 import { formatNumber, formatPercent } from "@/lib/formatters";
 import { projectLabel, sessionProjectReferences } from "@/lib/project-reference";
 import { SessionQuotaUsageView } from "./session-quota-usage";
@@ -25,6 +25,10 @@ const LONG_TEXT_THRESHOLD = 2000;
 const TEXT_PREVIEW_LENGTH = 1200;
 const RAW_PREVIEW_LINES = 12;
 const RAW_PREVIEW_LINE_LENGTH = 240;
+// The transcript is paged in after the replay opens and capped, so a 100 MB
+// session can no longer be copied whole into the IPC payload and then the DOM.
+const RAW_PAGE_LINES = 2_000;
+const RAW_RENDER_CAP_LINES = 20_000;
 const COLLAPSED_PREVIEW_LINE_LENGTH = 240;
 const COLLAPSED_AGENT_LIMIT = 3;
 const DISCLOSURE_BUTTON_CLASS = "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
@@ -108,11 +112,14 @@ function formatCompactTokenCount(value: number) {
   return `${Number((value / 1_000_000).toFixed(1))}m`;
 }
 
-function tokenDeltaTone(deltaTokens: number) {
-  if (deltaTokens <= 0) return "text-muted-foreground";
-  if (deltaTokens < 1_000) return "text-emerald-600 dark:text-emerald-400";
-  if (deltaTokens < 10_000) return "text-sky-600 dark:text-sky-400";
-  if (deltaTokens < 50_000) return "text-amber-600 dark:text-amber-400";
+// Colors one request's token volume. Per the contract in session-conversation.ts
+// the backend already reports per-request amounts, so a differenced (and
+// possibly negative) value must never reach this scale.
+function requestTokenTone(tokens: number) {
+  if (tokens <= 0) return "text-muted-foreground";
+  if (tokens < 1_000) return "text-emerald-600 dark:text-emerald-400";
+  if (tokens < 10_000) return "text-sky-600 dark:text-sky-400";
+  if (tokens < 50_000) return "text-amber-600 dark:text-amber-400";
   return "text-red-600 dark:text-red-400";
 }
 
@@ -135,12 +142,10 @@ function TokenMetadata({ usage }: { usage: DisplayTokenUsageItem }) {
         data-testid="token-metadata"
         title={tooltip}
       >
-        {formatCompactTokenCount(usage.totalTokens)}
-        {usage.deltaTokens === undefined ? null : (
-          <span className={`font-semibold ${tokenDeltaTone(usage.deltaTokens)}`}>
-            {` (${usage.deltaTokens >= 0 ? "+" : ""}${formatCompactTokenCount(usage.deltaTokens)})`}
-          </span>
-        )} tokens
+        <span className={`font-semibold ${requestTokenTone(usage.totalTokens)}`}>
+          {formatCompactTokenCount(usage.totalTokens)}
+        </span>{" "}
+        tokens
       </span>
       <span className="font-sans text-[10px] font-normal text-muted-foreground" title={tooltip}>
         {t("sessions.detail.token_breakdown", {
@@ -1131,6 +1136,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   const [copiedProjectPath, setCopiedProjectPath] = useState<string | null>(null);
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
   const [showFullRaw, setShowFullRaw] = useState(false);
+  const [rawJsonlLines, setRawJsonlLines] = useState<string[]>([]);
   const [showDetails, setShowDetails] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
   const [collapsedHeight, setCollapsedHeight] = useState(0);
@@ -1166,6 +1172,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     setCopiedProjectPath(null);
     setExpandedTurns(new Set());
     setShowFullRaw(false);
+    setRawJsonlLines([]);
     setShowDetails(false);
     setIsScrolled(false);
     setCollapsedHeight(0);
@@ -1174,12 +1181,12 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
 
     void fetchSessionDetail(activePath, query)
-      .then((data) => {
-        if (!cancelled) {
-          setDetail(data);
-          setExpandedTurns(new Set(data.turns.map((turn, index) => `${turn.turnId}-${index}`)));
-          setActiveTurnKey(data.turns.length > 0 ? `${data.turns[0].turnId}-0` : null);
-        }
+      .then((response) => {
+        if (cancelled) return;
+        const data = withBaseMessages(response);
+        setDetail(data);
+        setExpandedTurns(new Set(data.turns.map((turn, index) => `${turn.turnId}-${index}`)));
+        setActiveTurnKey(data.turns.length > 0 ? `${data.turns[0].turnId}-0` : null);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -1243,8 +1250,28 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
   });
   const threadName = detail ? detail.threadName : t("sessions.detail.loading_replay");
   const displayedSessionId = cleanSessionId(detail?.sessionId ?? session.sessionId);
-  const rawPreview = detail ? buildRawPreview(detail.rawJsonl) : "";
-  const rawJsonlLines = useMemo(() => detail?.rawJsonl.split("\n") ?? [], [detail?.rawJsonl]);
+  useEffect(() => {
+    if (!detail) return;
+    let cancelled = false;
+    void (async () => {
+      const collected: string[] = [];
+      const target = Math.min(detail.rawLineCount, RAW_RENDER_CAP_LINES);
+      while (collected.length < target) {
+        const page = await fetchSessionRawPage(detail.path, collected.length, RAW_PAGE_LINES, detail.sizeBytes);
+        if (cancelled) return;
+        if (page.lines.length === 0) break;
+        collected.push(...page.lines.slice(0, target - collected.length));
+        setRawJsonlLines([...collected]);
+      }
+    })().catch(() => {
+      if (!cancelled) setRawJsonlLines([]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [detail]);
+  const rawPreview = buildRawPreview(rawJsonlLines.join("\n"));
+  const rawIsTruncated = detail ? detail.rawLineCount > rawJsonlLines.length : false;
   const conversation = useMemo(() => detail ? buildSessionConversation(detail.turns) : [], [detail]);
   const patchCounts = useMemo(() => detail?.turns.map(countTurnPatches) ?? [], [detail]);
 
@@ -1256,7 +1283,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
 
   async function copyRawJsonl() {
     if (!detail) return;
-    await navigator.clipboard?.writeText(detail.rawJsonl);
+    await navigator.clipboard?.writeText(rawJsonlLines.join("\n"));
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1400);
   }
@@ -1360,6 +1387,18 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
             {metric(t("sessions.detail.patches"), formatNumber(patchCounts.reduce((sum, count) => sum + count, 0)), <FileDiff className="h-3.5 w-3.5" />, "green")}
             {metric(t("sessions.detail.errors"), formatNumber(detail?.summary.errorCount ?? 0), <AlertTriangle className="h-3.5 w-3.5" />, "red")}
           </div>}
+          {detail && detail.summary.malformedLines + detail.summary.unrecognizedEventCount > 0 ? (
+            <div
+              className="mt-1.5 flex items-center gap-1.5 rounded border border-amber-300/60 bg-amber-50/80 px-2 py-1 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+              role="alert"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>{t("sessions.detail.partial_replay", {
+                malformed: detail.summary.malformedLines,
+                unknown: detail.summary.unrecognizedEventCount,
+              })}</span>
+            </div>
+          ) : null}
           {detail && showDetails ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5 text-[11px] text-muted-foreground">
               {threadName ? (
@@ -1539,12 +1578,20 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                   <div className="text-xs text-muted-foreground">
                     {t("sessions.detail.raw_metadata", {
                       size: formatBytes(detail.sizeBytes),
-                      lines: formatNumber(detail.rawJsonl ? detail.rawJsonl.split("\n").length : 0),
+                      lines: formatNumber(detail.rawLineCount),
                     })}
+                    {rawIsTruncated ? (
+                      <span className="ml-2">
+                        {t("sessions.detail.raw_truncated", {
+                          loaded: formatNumber(rawJsonlLines.length),
+                          total: formatNumber(detail.rawLineCount),
+                        })}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {!showFullRaw && detail.rawJsonl !== rawPreview ? (
+                  {!showFullRaw && rawJsonlLines.length > RAW_PREVIEW_LINES ? (
                     <Button type="button" variant="secondary" size="sm" onClick={() => setShowFullRaw(true)}>
                       {t("sessions.detail.show_full_raw")}
                     </Button>
@@ -1560,7 +1607,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                 </div>
               </div>
               <pre className="min-h-[60vh] overflow-auto rounded-lg border border-border/60 bg-surface p-4 font-mono text-xs leading-relaxed text-foreground">
-                {showFullRaw ? detail.rawJsonl : rawPreview}
+                {showFullRaw ? rawJsonlLines.join("\n") : rawPreview}
               </pre>
             </div>
           )}

@@ -443,6 +443,11 @@ pub struct SessionReplaySummary {
     pub tool_call_count: usize,
     pub patch_count: usize,
     pub error_count: usize,
+    /// JSONL lines that could not be parsed, so a partial replay is never
+    /// presented as a complete one.
+    pub malformed_lines: usize,
+    /// Distinct payload types the parser has no rule for.
+    pub unrecognized_event_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -468,6 +473,10 @@ pub struct SessionReplayToolCall {
     pub completed_at: Option<String>,
     pub duration_ms: Option<i64>,
     pub is_error: bool,
+    /// Continuation chunks waiting for the single join at the end of parsing.
+    /// Never serialized: readers only ever see the merged `output`.
+    #[serde(skip, default)]
+    pub output_parts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -553,6 +562,10 @@ pub struct SessionReplayTurn {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub duration_ms: Option<i64>,
+    /// How many entries of `SessionReplayDetail::base_messages` were already known
+    /// when this turn started. The prompt text is stored once per session instead of
+    /// being cloned into every turn; readers expand it back per turn.
+    pub base_message_count: usize,
     pub system_messages: Vec<SessionReplayMessage>,
     pub user_messages: Vec<SessionReplayMessage>,
     pub assistant_messages: Vec<SessionReplayMessage>,
@@ -590,10 +603,25 @@ pub struct SessionReplayDetail {
     pub thread_name: Option<String>,
     pub modified_at_ms: i64,
     pub size_bytes: i64,
-    pub raw_jsonl: String,
+    /// Total JSONL lines in the source file. The transcript itself is deliberately
+    /// not part of this response — see `fetch_session_raw_page`, which pages it.
+    pub raw_line_count: usize,
+    /// Session-level base instructions, stored once. Each turn records how many of
+    /// these were already known when it started.
+    pub base_messages: Vec<SessionReplayMessage>,
     pub agents: Vec<SessionReplayAgent>,
     pub summary: SessionReplaySummary,
     pub turns: Vec<SessionReplayTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReplayRawPage {
+    pub lines: Vec<String>,
+    pub start: usize,
+    pub total_lines: usize,
+    pub modified_at_ms: i64,
+    pub size_bytes: i64,
 }
 
 #[cfg(test)]

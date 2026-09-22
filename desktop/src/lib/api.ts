@@ -1,9 +1,11 @@
 import type { QuotaObservation } from './quota-observations';
 import { invoke } from '@tauri-apps/api/core';
 export type * from './reference-types';
-import type { SessionReplayDetail } from './reference-types';
+import type { SessionReplayDetail, SessionReplayRawPage } from './reference-types';
 export const request = <T,>(method: string, args: unknown = {}) => invoke<T>('local_request', { method, args });
 export const fetchSessionDetail = (path: string, query?: Query) => request<SessionReplayDetail>('replay', { path, query });
+export const fetchSessionRawPage = (path: string, start: number, limit: number, expectedSizeBytes: number) =>
+  request<SessionReplayRawPage>('replay_raw', { path, start, limit, expectedSizeBytes });
 export const revealInFileManager = (path: string) => request<void>('reveal', { path });
 export type Tokens = { input:number; cached:number; cacheWrite:number; output:number; reasoning:number };
 export type Query = { start:number; end:number; agent:string|null; model:string|null; project:string|null; session:string|null; search:string; offsetMinutes:number; timeZone?:string };

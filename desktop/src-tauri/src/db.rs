@@ -5,7 +5,61 @@ use crate::{
 };
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+// Counters that make the replay hot path testable: opening one session used to
+// re-read `prices.json` per file and deserialize every event of every unrelated
+// session in the cache. They are thread-local so a test can measure exactly the
+// work its own call did while other tests run in parallel.
+thread_local! {
+    static PRICES_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EVENT_DESERIALIZE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub fn prices_parse_count() -> usize {
+    PRICES_PARSE_COUNT.with(|counter| counter.get())
+}
+
+pub fn event_deserialize_count() -> usize {
+    EVENT_DESERIALIZE_COUNT.with(|counter| counter.get())
+}
+
+pub fn prices_path(db: &Connection) -> PathBuf {
+    Path::new(db.path().unwrap_or(""))
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("prices.json")
+}
+
+/// Read and parse `prices.json` once; callers keep the result and pass it down by
+/// reference instead of paying one file read plus one parse per session.
+pub fn load_prices(db: &Connection) -> Result<Option<Prices>, String> {
+    PRICES_PARSE_COUNT.with(|counter| counter.set(counter.get() + 1));
+    let price_path = Path::new(db.path().unwrap_or(""))
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("prices.json");
+    // #76: a hand-edited prices.json can now fail Prices::parse at load (an alias
+    // colliding with a priced model is rejected). service.rs propagates that error,
+    // but this rollup path used `.ok().and_then(|s| Prices::parse(&s).ok())`, which
+    // reads "unparsable price table" as "no price table" and silently dropped every
+    // cost in the rollup while the dashboard told the user the file is broken. Both
+    // load sites now surface the failure; only a genuinely absent file keeps the
+    // "no pricing configured" meaning (each event then counts as unpriced, #83).
+    let prices = match std::fs::read_to_string(&price_path) {
+        Ok(text) => Some(Prices::parse(&text).map_err(|e| format!(
+            "无法解析价格文件 {}，会话汇总已中止：{e}",
+            price_path.display()
+        ))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("无法读取价格文件 {}：{e}", price_path.display())),
+    };
+    Ok(prices)
+}
 
 fn register_query_functions(db:&Connection)->Result<(),String> {
     let flags=rusqlite::functions::FunctionFlags::SQLITE_UTF8|rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC;
@@ -465,9 +519,14 @@ pub struct SessionHierarchyRecord {
     pub output_tokens: i64,
     pub cost_usd: f64,
 }
-pub fn query_session_rollup_record(
+pub fn query_session_rollup_record(db: &Connection, path: &str) -> Result<Option<SessionRollupRecord>, String> {
+    let prices = load_prices(db)?;
+    query_session_rollup_record_with_prices(db, path, prices.as_ref())
+}
+pub fn query_session_rollup_record_with_prices(
     db: &Connection,
     path: &str,
+    prices: Option<&Prices>,
 ) -> Result<Option<SessionRollupRecord>, String> {
     let meta = db.query_row(
         "SELECT size,mtime,title FROM source_files WHERE path=?1 AND agent='codex'",
@@ -491,27 +550,9 @@ pub fn query_session_rollup_record(
     let rows = stmt
         .query_map([path], |r| r.get::<_, String>(0))
         .map_err(|e| e.to_string())?;
-    let price_path = Path::new(db.path().unwrap_or(""))
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("prices.json");
-    // #76: a hand-edited prices.json can now fail Prices::parse at load (an alias
-    // colliding with a priced model is rejected). service.rs propagates that error,
-    // but this rollup path used `.ok().and_then(|s| Prices::parse(&s).ok())`, which
-    // reads "unparsable price table" as "no price table" and silently dropped every
-    // cost in the rollup while the dashboard told the user the file is broken. Both
-    // load sites now surface the failure; only a genuinely absent file keeps the
-    // "no pricing configured" meaning (each event then counts as unpriced, #83).
-    let prices = match std::fs::read_to_string(&price_path) {
-        Ok(text) => Some(Prices::parse(&text).map_err(|e| format!(
-            "无法解析价格文件 {}，会话汇总已中止：{e}",
-            price_path.display()
-        ))?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("无法读取价格文件 {}：{e}", price_path.display())),
-    };
     let mut days: BTreeMap<String, DailyUsageRow> = BTreeMap::new();
     for row in rows {
+        EVENT_DESERIALIZE_COUNT.with(|counter| counter.set(counter.get() + 1));
         let e: Event =
             serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         let date = chrono::DateTime::from_timestamp_millis(e.ts)
@@ -570,31 +611,63 @@ pub fn query_session_rollup_record(
         prompt_title: title,
     }))
 }
+/// Cost of one session file, priced with the caller's already-parsed table. Only
+/// called for the agents a replay keeps in its family, so pricing is proportional
+/// to the tree being displayed rather than to the whole cache.
+pub fn query_session_cost_usd(db: &Connection, path: &str, prices: Option<&Prices>) -> f64 {
+    let Ok(mut stmt) = db.prepare(
+        "SELECT data FROM raw_events WHERE path=?1 AND agent='codex' ORDER BY ts",
+    ) else {
+        return 0.0;
+    };
+    let Ok(rows) = stmt.query_map([path], |r| r.get::<_, String>(0)) else {
+        return 0.0;
+    };
+    rows.filter_map(|row| row.ok())
+        .filter_map(|data| {
+            EVENT_DESERIALIZE_COUNT.with(|counter| counter.set(counter.get() + 1));
+            serde_json::from_str::<Event>(&data).ok()
+        })
+        .filter_map(|event| prices?.cost(&event))
+        .sum::<f64>()
+}
+
+/// Per-session token totals computed by SQL. The previous version rebuilt a full
+/// daily rollup for *every* codex file — deserializing all of their events and
+/// re-parsing `prices.json` each time — just to open one replay.
 pub fn query_session_hierarchy_records(
     db: &Connection,
 ) -> Result<Vec<SessionHierarchyRecord>, String> {
     let mut stmt = db
-        .prepare("SELECT path FROM source_files WHERE agent='codex'")
+        .prepare(
+            "SELECT sf.path,
+                    sf.title,
+                    COALESCE(SUM(json_extract(re.data,'$.tokens.input')),0)
+                  + COALESCE(SUM(json_extract(re.data,'$.tokens.cached')),0)
+                  + COALESCE(SUM(json_extract(re.data,'$.tokens.cache_write')),0),
+                    COALESCE(SUM(json_extract(re.data,'$.tokens.cached')),0),
+                    COALESCE(SUM(json_extract(re.data,'$.tokens.output')),0)
+             FROM source_files AS sf
+             LEFT JOIN raw_events AS re ON re.path = sf.path AND re.agent = 'codex'
+             WHERE sf.agent = 'codex'
+             GROUP BY sf.path",
+        )
         .map_err(|e| e.to_string())?;
-    let paths = stmt
-        .query_map([], |r| r.get::<_, String>(0))
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(SessionHierarchyRecord {
+                path: r.get(0)?,
+                prompt_title: r.get(1)?,
+                input_tokens: r.get(2)?,
+                cached_input_tokens: r.get(3)?,
+                output_tokens: r.get(4)?,
+                cost_usd: 0.0,
+            })
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let mut out = vec![];
-    for p in paths {
-        if let Some(r) = query_session_rollup_record(db, &p)? {
-            out.push(SessionHierarchyRecord {
-                path: p,
-                prompt_title: r.prompt_title,
-                input_tokens: r.rows.iter().map(|r| r.input_tokens).sum(),
-                cached_input_tokens: r.rows.iter().map(|r| r.cached_input_tokens).sum(),
-                output_tokens: r.rows.iter().map(|r| r.output_tokens).sum(),
-                cost_usd: r.rows.iter().map(|r| r.cost_usd).sum(),
-            });
-        }
-    }
-    Ok(out)
+    Ok(rows)
 }
 
 #[cfg(test)]

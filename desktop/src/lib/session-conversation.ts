@@ -1,10 +1,33 @@
 import type { SessionReplayDetail } from "./api";
 
+// The backend keeps base instructions once per session and each turn records how
+// many of them applied. Expanding here costs a list of pointers per turn instead
+// of a copy of the whole prompt, which is what used to bloat both the Rust struct
+// and every replay response.
+export function withBaseMessages<T extends SessionReplayDetail>(detail: T): T {
+  return {
+    ...detail,
+    turns: detail.turns.map((turn) => turn.baseMessageCount === 0
+      ? turn
+      : {
+        ...turn,
+        systemMessages: [
+          ...detail.baseMessages.slice(0, turn.baseMessageCount),
+          ...turn.systemMessages,
+        ],
+      }),
+  };
+}
+
 const EXEC_TOOL_NAMES = new Set(["exec", "exec_command"]);
 
 export type ReplayItem = SessionReplayDetail["turns"][number]["items"][number];
 export type TokenUsageItem = Extract<ReplayItem, { kind: "tokenUsage" }>;
-export type DisplayTokenUsageItem = TokenUsageItem & { deltaTokens?: number };
+// Contract with `convert_to_delta` in `session_replay.rs`: every `tokenUsage`
+// item carries the token size of a single request, never a running session
+// total. The frontend must display it as-is; differencing adjacent events
+// turns an ordinary cache-hit drop into a misleading negative number.
+export type DisplayTokenUsageItem = TokenUsageItem;
 
 export type TimelineEntry = {
   item: ReplayItem;
@@ -13,10 +36,22 @@ export type TimelineEntry = {
 };
 
 function orderedItems(turn: SessionReplayDetail["turns"][number]): ReplayItem[] {
-  if (turn.items?.length) return turn.items;
+  // Base instructions are snapshotted once per turn on `systemMessages`; the
+  // backend no longer mirrors that prompt text into `items` for every turn. Live
+  // system/developer events still arrive as items so they keep their own role.
+  const systemMessages = turn.systemMessages
+    .filter((message) => message.kind === "base_instructions")
+    .map((message) => ({
+      kind: "message" as const,
+      timestamp: message.timestamp,
+      role: "system" as const,
+      source: message.kind,
+      text: message.text,
+    }));
+  if (turn.items?.length) return [...systemMessages, ...turn.items];
   return [
-    ...turn.systemMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "system", source: message.kind, text: message.text })),
-    ...turn.userMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "user", source: message.kind, text: message.text })),
+    ...systemMessages,
+    ...turn.userMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "user" as const, source: message.kind, text: message.text })),
     ...turn.assistantMessages.map((message) => ({ kind: "message" as const, timestamp: message.timestamp, role: "assistant", source: message.kind, text: message.text })),
     ...turn.reasoningSummaries.map((message) => ({ kind: "reasoning" as const, timestamp: message.timestamp, text: message.text })),
     ...turn.toolCalls.map((tool) => ({ kind: "toolCall" as const, ...tool })),
@@ -30,22 +65,33 @@ function isVisibleTimelineItem(item: ReplayItem) {
   return item.kind !== "patch" || item.isError || item.success === false;
 }
 
-function timelineEntries(items: ReplayItem[], previousTotalTokens: { value?: number }): TimelineEntry[] {
+function timelineEntries(items: ReplayItem[]): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
 
   for (const item of items) {
     if (item.kind === "tokenUsage") {
-      const tokenUsage = {
-        ...item,
-        deltaTokens: previousTotalTokens.value === undefined ? undefined : item.totalTokens - previousTotalTokens.value,
-      };
-      previousTotalTokens.value = item.totalTokens;
       const previousEntry = entries.findLast((entry) => isVisibleTimelineItem(entry.item));
-      if (previousEntry) {
-        previousEntry.tokenUsage = tokenUsage;
+      const attached = previousEntry?.tokenUsage;
+      if (attached && attached.model === item.model) {
+        // Adjacent usage events (parallel tools, legacy fallback tails) fold into one
+        // badge instead of overwriting each other, so no request's volume or raw
+        // provenance disappears from the timeline.
+        previousEntry!.tokenUsage = {
+          ...attached,
+          inputTokens: attached.inputTokens + item.inputTokens,
+          cachedInputTokens: attached.cachedInputTokens + item.cachedInputTokens,
+          outputTokens: attached.outputTokens + item.outputTokens,
+          reasoningOutputTokens: attached.reasoningOutputTokens + item.reasoningOutputTokens,
+          totalTokens: attached.totalTokens + item.totalTokens,
+          rawJsonlLineNumbers: [...(attached.rawJsonlLineNumbers ?? []), ...(item.rawJsonlLineNumbers ?? [])],
+        };
         continue;
       }
-      entries.push({ item: tokenUsage });
+      if (previousEntry && !attached) {
+        previousEntry.tokenUsage = item;
+        continue;
+      }
+      entries.push({ item });
       continue;
     }
     entries.push({ item, activity: item.kind === "toolCall" ? buildToolActivity(item) : undefined });
@@ -419,6 +465,7 @@ function parseNestedActivities(value: string | null, output: string | null): Nes
   const content = parseToolContentBlocks(output);
   const execResults = execResultsFromContent(content);
   let execIndex = 0;
+  let alignmentLost = false;
   let imageIndex = 0;
   const activities: NestedActivity[] = [];
   for (const call of nestedToolCalls(value)) {
@@ -426,9 +473,21 @@ function parseNestedActivities(value: string | null, output: string | null): Nes
     if (name === "exec_command") {
       const parsed = parseNestedToolCall(value.slice(callIndex), name);
       const command = typeof parsed?.cmd === "string" ? parsed.cmd : typeof parsed?.command === "string" ? parsed.command : null;
-      if (!command) continue;
+      if (!command) {
+        // Positional pairing is only trustworthy while every call is understood.
+        // Once one is not, we cannot know whether it consumed a result, so stop
+        // attributing outputs instead of shifting later commands onto the wrong
+        // result.
+        alignmentLost = true;
+        continue;
+      }
       const workdir = typeof parsed?.workdir === "string" ? parsed.workdir : typeof parsed?.cwd === "string" ? parsed.cwd : null;
-      activities.push({ kind: "command", command, workdir, output: execResults[execIndex++] ?? null });
+      activities.push({
+        kind: "command",
+        command,
+        workdir,
+        output: alignmentLost ? null : execResults[execIndex++] ?? null,
+      });
     } else if (name === "apply_patch") {
       const patch = parseStringArgument(value, argumentStart) ?? resolveStringVariable(value, argumentStart);
       if (patch) activities.push({ kind: "patch", patch });
@@ -722,9 +781,9 @@ export function classifyExploration(command: string): Exploration[] | null {
   return actions.length ? actions : null;
 }
 
-function buildTurnConversation(turn: SessionReplayDetail["turns"][number], previousTotalTokens: { value?: number }): ConversationBlock[] {
+function buildTurnConversation(turn: SessionReplayDetail["turns"][number]): ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
-  for (const entry of timelineEntries(orderedItems(turn), previousTotalTokens)) {
+  for (const entry of timelineEntries(orderedItems(turn))) {
     if (!isVisibleTimelineItem(entry.item)) continue;
     const activity = entry.activity;
     const tool = entry.item.kind === "toolCall" ? entry.item : null;
@@ -747,12 +806,11 @@ function buildTurnConversation(turn: SessionReplayDetail["turns"][number], previ
 }
 
 export function buildConversation(turn: SessionReplayDetail["turns"][number]): ConversationBlock[] {
-  return buildTurnConversation(turn, {});
+  return buildTurnConversation(turn);
 }
 
 export function buildSessionConversation(turns: SessionReplayDetail["turns"]): ConversationBlock[][] {
-  const previousTotalTokens: { value?: number } = {};
-  return turns.map((turn) => buildTurnConversation(turn, previousTotalTokens));
+  return turns.map((turn) => buildTurnConversation(turn));
 }
 
 export function summarizeOutput(text: string) {

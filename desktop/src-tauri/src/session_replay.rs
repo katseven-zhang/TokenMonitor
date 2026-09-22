@@ -1,12 +1,12 @@
 use crate::{
     db::{
-        query_session_hierarchy_records, query_session_rollup_record, SessionHierarchyRecord,
-        SessionRollupRecord,
+        load_prices, query_session_cost_usd, query_session_hierarchy_records,
+        query_session_rollup_record_with_prices, SessionHierarchyRecord, SessionRollupRecord,
     },
     types::{
         DailyUsageRow, ModelUsage, SessionReplayAgent, SessionReplayDetail, SessionReplayItem,
-        SessionReplayMessage, SessionReplayPatchResult, SessionReplaySummary,
-        SessionReplayTokenEvent, SessionReplayToolCall, SessionReplayTurn,
+        SessionReplayMessage, SessionReplayPatchResult, SessionReplayRawPage,
+        SessionReplaySummary, SessionReplayTokenEvent, SessionReplayToolCall, SessionReplayTurn,
     },
 };
 use chrono::{DateTime, Utc};
@@ -15,9 +15,15 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
+
+/// A Codex rollout writes `session_meta` at its head, so the hierarchy scan never
+/// needs the whole file.
+const SESSION_META_HEAD_BYTES: u64 = 256 * 1024;
+
+use crate::pricing::Prices;
 
 const LEGACY_FALLBACK_MODEL: &str = "unknown";
 const UNGROUPED_TURN_ID: &str = "Ungrouped";
@@ -53,14 +59,77 @@ struct ReplayParseState {
     process_exit_codes: BTreeMap<String, Vec<i64>>,
     active_exec_call_id: Option<String>,
     token_target_tool: Option<(String, String)>,
+    malformed_lines: usize,
+    unrecognized_events: BTreeSet<String>,
 }
 
 pub fn fetch_session_detail(db: &Connection, path: &str) -> Result<SessionReplayDetail, String> {
-    let record = query_session_rollup_record(db, path)?
-        .ok_or_else(|| "Session file is not indexed".to_string())?;
+    // One price table per open replay. Previously every session file in the
+    // hierarchy re-read and re-parsed prices.json.
+    let prices = load_prices(db)?;
+    let record = query_session_rollup_record_with_prices(db, path, prices.as_ref())?.ok_or_else(|| {
+        // Stable code first so the UI can translate it; the Chinese text keeps the
+        // message readable everywhere else it is shown raw.
+        "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
+    })?;
     let raw_jsonl = fs::read_to_string(&record.path).map_err(|error| error.to_string())?;
-    let agents = build_agent_hierarchy(db, path)?;
+    let agents = build_agent_hierarchy(db, path, prices.as_ref())?;
     Ok(parse_session_detail_with_agents(record, raw_jsonl, agents))
+}
+
+/// Largest raw page the backend will serve at once, so a viewer cannot ask for a
+/// whole multi-gigabyte transcript in one response.
+const RAW_PAGE_MAX_LINES: usize = 2_000;
+
+/// Paged raw JSONL. The default replay response no longer carries the transcript
+/// (a 100 MB session was duplicated into the IPC payload and then into the DOM);
+/// the viewer asks for slices and the backend refuses to serve a file that changed
+/// since the replay was opened.
+pub fn fetch_session_raw_page(
+    db: &Connection,
+    path: &str,
+    start: usize,
+    limit: usize,
+    expected_size_bytes: i64,
+) -> Result<SessionReplayRawPage, String> {
+    let limit = limit.clamp(1, RAW_PAGE_MAX_LINES);
+    let (indexed_mtime, indexed_size) = db
+        .query_row(
+            "SELECT mtime,size FROM source_files WHERE path=?1 AND agent='codex'",
+            [path],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|_| {
+            "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
+        })?;
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let size_bytes = metadata.len() as i64;
+    // Size, not mtime, is the guard: filesystem timestamp granularity and the
+    // scanner's own recorded value disagree often enough to produce false
+    // "changed" errors, while a transcript that grew, shrank or rotated always
+    // moves its size.
+    let stale = size_bytes != indexed_size
+        || (expected_size_bytes >= 0 && size_bytes != expected_size_bytes);
+    if stale {
+        return Err("E_SESSION_CHANGED: 会话文件自打开回放后已变化，请重新打开回放".to_string());
+    }
+
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut lines = Vec::with_capacity(limit);
+    let mut total_lines = 0usize;
+    for (index, line) in BufReader::new(file).lines().enumerate() {
+        if index >= start && lines.len() < limit {
+            lines.push(line.map_err(|error| error.to_string())?);
+        }
+        total_lines = index + 1;
+    }
+    Ok(SessionReplayRawPage {
+        lines,
+        start,
+        total_lines,
+        modified_at_ms: indexed_mtime,
+        size_bytes: indexed_size,
+    })
 }
 
 #[cfg(test)]
@@ -86,6 +155,7 @@ fn parse_session_detail_with_agents(
             continue;
         }
         let Ok(entry) = serde_json::from_str::<Value>(trimmed) else {
+            state.malformed_lines += 1;
             continue;
         };
         state.ingest(&entry, line_index + 1);
@@ -98,6 +168,7 @@ fn parse_session_detail_with_agents(
         .collect::<Vec<_>>();
 
     for turn in &mut turns {
+        finalize_tool_outputs(turn);
         turn.duration_ms =
             duration_between(turn.started_at.as_deref(), turn.completed_at.as_deref());
     }
@@ -113,6 +184,8 @@ fn parse_session_detail_with_agents(
         })
         .sum();
     summary.tool_call_count = turns.iter().map(|turn| turn.tool_calls.len()).sum();
+    summary.malformed_lines = state.malformed_lines;
+    summary.unrecognized_event_count = state.unrecognized_events.len();
     summary.patch_count = turns.iter().map(|turn| turn.patch_results.len()).sum();
     summary.error_count = turns.iter().map(|turn| turn.errors.len()).sum::<usize>()
         + turns
@@ -132,7 +205,8 @@ fn parse_session_detail_with_agents(
         thread_name: record.prompt_title.filter(|title| !title.is_empty()),
         modified_at_ms: record.modified_at_ms,
         size_bytes: record.size_bytes,
-        raw_jsonl,
+        raw_line_count: raw_jsonl.lines().count(),
+        base_messages: state.system_messages.clone(),
         agents,
         summary,
         turns,
@@ -142,6 +216,7 @@ fn parse_session_detail_with_agents(
 fn build_agent_hierarchy(
     db: &Connection,
     selected_path: &str,
+    prices: Option<&Prices>,
 ) -> Result<Vec<SessionReplayAgent>, String> {
     let mut agents = load_session_agents(db)?;
     let Some(selected) = agents.iter().find(|agent| agent.path == selected_path) else {
@@ -213,6 +288,12 @@ fn build_agent_hierarchy(
     for agent in &agents {
         visit_agent(&agent.session_id, &agents, &mut ordered_ids, &mut ordered);
     }
+    // Pricing is bounded by the family actually shown. The read service re-prices
+    // these rows with the same query tables and exports use; this value keeps the
+    // hierarchy honest for every other consumer of the struct.
+    for agent in &mut ordered {
+        agent.cost_usd = query_session_cost_usd(db, &agent.path, prices);
+    }
     Ok(ordered)
 }
 
@@ -225,7 +306,10 @@ pub fn load_session_agents(db: &Connection) -> Result<Vec<SessionReplayAgent>, S
 
 fn read_session_agent(record: SessionHierarchyRecord) -> Option<SessionReplayAgent> {
     let file = File::open(&record.path).ok()?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in BufReader::new(file.take(SESSION_META_HEAD_BYTES))
+        .lines()
+        .map_while(Result::ok)
+    {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -411,8 +495,14 @@ impl ReplayParseState {
             _ if is_system_message(event_type, event) => {
                 if let Some(text) = extract_message_text(event) {
                     let role = string_field(event, "role").unwrap_or_else(|| "system".to_string());
+                    // A live message that repeats a base instruction is already
+                    // visible through the turn's base range, so it must not appear a
+                    // second time.
+                    let repeats_base = self.system_messages.iter().any(|message| message.text == text);
                     let turn = self.turn_mut(&turn_id);
-                    if push_unique_message(
+                    if repeats_base {
+                        append_message_raw_jsonl_line(turn, &role, &text, line_number);
+                    } else if push_unique_message(
                         &mut turn.system_messages,
                         SessionReplayMessage {
                             timestamp: timestamp.clone(),
@@ -507,6 +597,7 @@ impl ReplayParseState {
                     completed_at: None,
                     duration_ms: None,
                     is_error: false,
+                    output_parts: Vec::new(),
                 };
                 let turn = self.turn_mut(&turn_id);
                 turn.tool_calls.push(tool.clone());
@@ -541,7 +632,15 @@ impl ReplayParseState {
                         raw_jsonl_line_numbers: vec![line_number],
                     })
             }
-            _ => {}
+            _ => {
+                // Nothing recognizes this payload. It is counted rather than pushed
+                // into `turn.items`, because a timeline entry would attribute an
+                // internal event to a conversation turn; the summary surfaces it so a
+                // partial replay can never look complete.
+                if !event_type.is_empty() {
+                    self.unrecognized_events.insert(event_type.to_string());
+                }
+            }
         }
     }
 
@@ -671,11 +770,14 @@ impl ReplayParseState {
                     usage,
                     raw_jsonl_line_numbers: vec![line_number],
                 };
-                if matches!(turn.items.get(tool_index + 1), Some(SessionReplayItem::TokenUsage { .. })) {
-                    turn.items[tool_index + 1] = token_item;
-                } else {
-                    turn.items.insert(tool_index + 1, token_item);
+                let mut insert_at = tool_index + 1;
+                while matches!(
+                    turn.items.get(insert_at),
+                    Some(SessionReplayItem::TokenUsage { .. })
+                ) {
+                    insert_at += 1;
                 }
+                turn.items.insert(insert_at, token_item);
                 return;
             }
         }
@@ -735,6 +837,7 @@ impl ReplayParseState {
         }
         let authoritative_exit_code =
             (recorded_exit_codes.len() == 1).then(|| recorded_exit_codes[0]);
+        let explicit_status = string_field(event, "status");
         let output_state = output
             .as_deref()
             .map(|output| parse_process_output(output, authoritative_exit_code))
@@ -762,11 +865,16 @@ impl ReplayParseState {
         } else if output_state.is_running {
             Some("running".to_string())
         } else {
-            string_field(event, "status").or_else(|| Some("completed".to_string()))
+            explicit_status.clone().or_else(|| Some("completed".to_string()))
         };
+        // Incidental stderr is not a failure verdict: `npm install`, `npx` and
+        // `pnpm` routinely write notices and progress to stderr while exiting 0,
+        // exactly like the stdout text that
+        // `trusts_command_execution_exit_code_over_incidental_stdout_text` already
+        // excuses. stderr only decides when nothing more authoritative exists.
         let is_error = !process_was_stopped
             && ((is_process_activity && output_state.is_error)
-                || status
+                || explicit_status
                     .as_deref()
                     .map(|status| {
                         !matches!(
@@ -775,10 +883,12 @@ impl ReplayParseState {
                         )
                     })
                     .unwrap_or(false)
-                || stderr
-                    .as_deref()
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false));
+                || (explicit_status.is_none()
+                    && !output_state.has_exit_verdict
+                    && stderr
+                        .as_deref()
+                        .map(|value| !value.trim().is_empty())
+                        .unwrap_or(false)));
 
         let turn = self.turn_mut(&turn_id);
         if let Some(call_id) = &call_id {
@@ -796,7 +906,12 @@ impl ReplayParseState {
                 } else {
                     output
                 };
-                tool.output = merge_process_output(tool.output.take(), output);
+                if let Some(output) = output {
+                    // Continuation output used to be re-merged into the whole
+                    // accumulated string on every event, which made a long-running
+                    // command quadratic; the chunks are joined once after parsing.
+                    tool.output_parts.push(output);
+                }
                 tool.stderr = stderr;
                 tool.status = status.clone();
                 tool.completed_at = if status.as_deref() == Some("running") {
@@ -823,6 +938,8 @@ impl ReplayParseState {
                     .find(|item| matches!(item, SessionReplayItem::ToolCall { tool, .. } if tool.call_id.as_ref() == Some(call_id)))
                 {
                     *item_tool = tool.clone();
+                    // The canonical tool entry keeps the pending chunks.
+                    item_tool.output_parts.clear();
                     raw_jsonl_line_numbers.push(line_number);
                 }
                 if let Some((cell_id, tool_ref)) = registered_cell {
@@ -872,6 +989,7 @@ impl ReplayParseState {
             completed_at: timestamp,
             duration_ms: None,
             is_error,
+            output_parts: Vec::new(),
         };
         turn.tool_calls.push(tool.clone());
         turn.items.push(SessionReplayItem::ToolCall {
@@ -914,19 +1032,11 @@ impl ReplayParseState {
         if !self.turns.contains_key(turn_id) {
             self.turn_order.push(turn_id.to_string());
             let mut turn = empty_turn(turn_id);
-            turn.system_messages = self.system_messages.clone();
-            turn.items
-                .extend(
-                    self.system_messages
-                        .iter()
-                        .map(|message| SessionReplayItem::Message {
-                            timestamp: message.timestamp.clone(),
-                            role: "system".to_string(),
-                            source: message.kind.clone(),
-                            text: message.text.clone(),
-                            raw_jsonl_line_numbers: message.raw_jsonl_line_numbers.clone(),
-                        }),
-                );
+            // Only the count is recorded: the prompt text lives once per session in
+            // `base_messages`. Cloning it into every turn — and previously mirroring
+            // it into timeline items too — cost tens of megabytes on long sessions
+            // and inflated every replay response by the same amount.
+            turn.base_message_count = self.system_messages.len();
             self.turns.insert(turn_id.to_string(), turn);
         }
         self.turns.get_mut(turn_id).expect("turn exists")
@@ -956,6 +1066,7 @@ fn empty_turn(turn_id: &str) -> SessionReplayTurn {
         completed_at: None,
         duration_ms: None,
         system_messages: Vec::new(),
+        base_message_count: 0,
         user_messages: Vec::new(),
         assistant_messages: Vec::new(),
         reasoning_summaries: Vec::new(),
@@ -1076,8 +1187,21 @@ fn is_system_message(event_type: &str, event: &Value) -> bool {
         )
 }
 
+/// Whitelist of reasoning/summary event types. The previous
+/// `contains("reasoning") || contains("summary")` also swallowed unrelated types
+/// such as `session_summary`, so a summary payload could silently masquerade as
+/// model reasoning.
 fn is_reasoning_message(event_type: &str) -> bool {
-    event_type.contains("reasoning") || event_type.contains("summary")
+    matches!(
+        event_type,
+        "reasoning"
+            | "reasoning_summary"
+            | "reasoning_summary_part"
+            | "agent_reasoning"
+            | "reasoning_output"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+    )
 }
 
 fn is_tool_call(event_type: &str) -> bool {
@@ -1244,15 +1368,30 @@ fn extract_tool_output(value: &Value) -> Option<String> {
         .or_else(|| string_field(value, "stdout"))
         .or_else(|| string_field(value, "stderr"))
         .or_else(|| string_field(value, "result"))
-        .or_else(|| value.get("results").map(value_to_pretty_string))
+        .or_else(|| {
+            value
+                .get("results")
+                .filter(|value| !value.is_null())
+                .map(value_to_pretty_string)
+        })
         .or_else(|| string_field(value, "saved_path"))
-        .or_else(|| value.get("output").map(value_to_pretty_string))
+        .or_else(|| {
+            value
+                .get("output")
+                .filter(|value| !value.is_null())
+                .map(value_to_pretty_string)
+        })
 }
 
 fn extract_error_text(value: &Value) -> Option<String> {
     string_field(value, "error")
         .or_else(|| string_field(value, "message"))
-        .or_else(|| value.get("error").map(value_to_compact_string))
+        .or_else(|| {
+            value
+                .get("error")
+                .filter(|value| !value.is_null())
+                .map(value_to_compact_string)
+        })
 }
 
 fn value_to_compact_string(value: &Value) -> String {
@@ -1285,6 +1424,9 @@ struct ProcessOutputState {
     output: Option<String>,
     process_result_count: usize,
     has_process_exit: bool,
+    /// An exit code was read from the event or its output, so the outcome is
+    /// already authoritative and incidental text such as stderr adds no evidence.
+    has_exit_verdict: bool,
     is_running: bool,
     is_stopped: bool,
     is_error: bool,
@@ -1377,6 +1519,7 @@ fn parse_process_output(output: &str, authoritative_exit_code: Option<i64>) -> P
 
     ProcessOutputState {
         cell_id,
+        has_exit_verdict: exit_code.is_some(),
         duration_ms,
         output: process_output,
         process_result_count,
@@ -1676,6 +1819,59 @@ fn merge_process_output(existing: Option<String>, new: Option<String>) -> Option
     }
 }
 
+/// Join a tool's accumulated output chunks once, after parsing finishes. Merging
+/// every continuation event into the growing string made a long-running command
+/// quadratic; this keeps `merge_process_output`'s rule that a chunk identical to
+/// what already accumulated adds nothing, and only compares content when the
+/// lengths already match.
+fn fold_output_parts(base: Option<String>, parts: Vec<String>) -> Option<String> {
+    let mut pieces: Vec<String> = Vec::with_capacity(parts.len() + 1);
+    let mut joined_len = 0usize;
+    if let Some(base) = base {
+        joined_len = base.len();
+        pieces.push(base);
+    }
+    for part in parts {
+        if joined_len == part.len() && pieces.join("\n") == part {
+            continue;
+        }
+        joined_len = if joined_len == 0 {
+            part.len()
+        } else {
+            joined_len + part.len() + 1
+        };
+        pieces.push(part);
+    }
+    (!pieces.is_empty()).then(|| pieces.join("\n"))
+}
+
+fn finalize_tool_outputs(turn: &mut SessionReplayTurn) {
+    let mut merged: BTreeMap<String, Option<String>> = BTreeMap::new();
+    for tool in &mut turn.tool_calls {
+        if tool.output_parts.is_empty() {
+            continue;
+        }
+        tool.output = fold_output_parts(tool.output.take(), std::mem::take(&mut tool.output_parts));
+        if let Some(call_id) = tool.call_id.as_ref() {
+            merged.insert(call_id.clone(), tool.output.clone());
+        }
+    }
+    if merged.is_empty() {
+        return;
+    }
+    for item in &mut turn.items {
+        if let SessionReplayItem::ToolCall { tool, .. } = item {
+            if let Some(output) = tool
+                .call_id
+                .as_ref()
+                .and_then(|call_id| merged.get(call_id))
+            {
+                tool.output = output.clone();
+            }
+        }
+    }
+}
+
 fn merge_payload_info(payload: &Value, info: &Value) -> Value {
     let mut merged = payload.as_object().cloned().unwrap_or_default();
     merged.insert("info".to_string(), info.clone());
@@ -1730,6 +1926,11 @@ fn subtract_raw_usage(current: &RawUsage, previous: Option<&RawUsage>) -> RawUsa
     }
 }
 
+/// Contract with `desktop/src/lib/session-conversation.ts`: the `TokenUsage`
+/// items produced here are per-request amounts (the delta between two
+/// `total_token_usage` snapshots), not running session totals. The frontend
+/// displays them as-is and must never difference adjacent events, because a
+/// later request legitimately costs fewer tokens when cache hits rise.
 fn convert_to_delta(raw: &RawUsage) -> ModelUsage {
     ModelUsage {
         input_tokens: raw.input_tokens,
@@ -1862,7 +2063,7 @@ mod tests {
             .unwrap()
             .contains(r#"\"exit_code\":1"#));
         assert!(!tool.is_error);
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, raw.lines().count());
     }
 
     #[test]
@@ -1987,7 +2188,7 @@ mod tests {
 
         let detail = parse_session_detail(record("/tmp/session.jsonl"), raw.clone());
 
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, raw.lines().count());
         assert_eq!(detail.summary.turn_count, 2);
         assert_eq!(detail.summary.message_count, 3);
         assert_eq!(detail.turns[0].turn_id, "turn-1");
@@ -2013,10 +2214,68 @@ mod tests {
 
         assert_eq!(detail.turns.len(), 2);
         assert_eq!(
-            detail.turns[0].system_messages[0].text,
+            detail.base_messages[0].text,
             "Use the repository instructions."
         );
-        assert_eq!(detail.turns[1].system_messages[0].kind, "base_instructions");
+        // Each turn points at the session-level prompt instead of owning a copy.
+        assert_eq!(detail.turns[0].base_message_count, 1);
+        assert_eq!(detail.turns[1].base_message_count, 1);
+        assert!(detail.turns[0].system_messages.is_empty());
+        assert!(detail.turns[1].system_messages.is_empty());
+        // Each turn keeps one snapshot; the timeline no longer carries a second
+        // copy of the same prompt text, which the reader composes from
+        // `system_messages` instead.
+        assert_eq!(
+            detail
+                .turns
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .filter(|item| matches!(
+                    item,
+                    SessionReplayItem::Message { source, .. } if source == "base_instructions"
+                ))
+                .count(),
+            0
+        );
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.base_message_count == 1));
+    }
+
+    #[test]
+    fn base_instructions_are_stored_once_per_session_not_per_turn() {
+        let base = "r".repeat(8 * 1024);
+        let mut lines = vec![session_meta_with_base_instructions(
+            "2026-06-01T00:00:00.000Z",
+            "/repo/app",
+            &base,
+        )];
+        for index in 0..200 {
+            lines.push(turn_context(
+                "2026-06-01T00:00:01.000Z",
+                &format!("turn-{index}"),
+                "gpt-5",
+                "/repo/app",
+            ));
+        }
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), lines.join("\n"));
+        let bytes = serde_json::to_vec(&detail).unwrap().len();
+
+        assert_eq!(detail.turns.len(), 200);
+        assert!(detail.turns.iter().all(|turn| turn.items.is_empty()));
+        assert_eq!(detail.base_messages.len(), 1);
+        assert!(detail
+            .turns
+            .iter()
+            .all(|turn| turn.base_message_count == 1));
+        // The 8 KB prompt appears exactly once. Carrying it per turn cost ~1.68 MB
+        // in the struct and in the response, and mirroring it as items doubled that.
+        assert!(
+            bytes < 200_000,
+            "replay response carried {bytes} bytes for 200 turns"
+        );
     }
 
     #[test]
@@ -2171,6 +2430,8 @@ mod tests {
         let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
         let turn = &detail.turns[0];
 
+        // A live developer message stays on its own turn; only the session-level
+        // base instructions are shared.
         assert_eq!(turn.system_messages[0].text, "Follow AGENTS.md");
         assert_eq!(turn.reasoning_summaries[0].text, "I should inspect first.");
         assert_eq!(turn.tool_calls[0].name, "exec_command");
@@ -2221,7 +2482,7 @@ mod tests {
         let temp_dir = tempfile_dir();
         let db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
         let error = fetch_session_detail(&db, "/tmp/not-indexed.jsonl").unwrap_err();
-        assert_eq!(error, "Session file is not indexed");
+        assert!(error.starts_with("E_SESSION_NOT_INDEXED"));
     }
 
     #[test]
@@ -2234,6 +2495,9 @@ mod tests {
         assert_eq!(detail.thread_name.as_deref(), Some("First real request"));
     }
 
+    // Fixture shared with the TypeScript side
+    // (`session-conversation.test.ts`: usage(150) then usage(120)): whatever the
+    // running totals do, each emitted event is one request's own volume.
     #[test]
     fn calculates_token_deltas_from_running_totals() {
         let raw = [
@@ -2306,6 +2570,162 @@ mod tests {
         );
         assert!(detail.turns[0].patch_results[0].is_error);
         assert_eq!(detail.summary.error_count, 2);
+    }
+
+    #[test]
+    fn trusts_exit_code_over_incidental_stderr_and_still_flags_stderr_without_evidence() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": "call-1",
+                    "name": "exec",
+                    "input": "const r = await tools.exec_command({\"cmd\":\"npm install\"}); text(r.output);"
+                }),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                serde_json::json!({
+                    "type": "item_completed",
+                    "item": { "type": "CommandExecution", "status": "completed", "exit_code": 0 }
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:04.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": "added 1 package",
+                    "stderr": "npm notice notice details"
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:05.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": "call-2",
+                    "name": "exec",
+                    "input": "const r = await tools.exec_command({\"cmd\":\"pnpm test\"}); text(r.output);"
+                }),
+            ),
+            response_item(
+                "2026-06-01T00:00:06.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-2",
+                    "stderr": "something on stderr"
+                }),
+            ),
+        ].join("\n");
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+
+        // Exit code 0 wins: the notice stays visible as extra output, but the
+        // command is no longer red and no longer inflates the session error count.
+        assert!(!detail.turns[0].tool_calls[0].is_error);
+        assert_eq!(
+            detail.turns[0].tool_calls[0]
+                .stderr
+                .as_deref(),
+            Some("npm notice notice details")
+        );
+        assert!(detail.turns[0].tool_calls[0]
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("added 1 package")));
+        assert_eq!(detail.summary.error_count, 1);
+        // Nothing authoritative at all: stderr still has to surface the failure.
+        assert!(detail.turns[0].tool_calls[1].is_error);
+    }
+
+    #[test]
+    fn surfaces_malformed_lines_null_output_and_unknown_event_types_instead_of_hiding_them() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            "{oops".to_string(),
+            response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": null,
+                    "error": null
+                }),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                serde_json::json!({"type":"session_summary","turn_id":"turn-1","summary":"weekly recap"}),
+            ),
+        ]
+        .join("\n");
+
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+
+        assert_eq!(detail.summary.malformed_lines, 1);
+        // `output: null` must stay absent rather than render the literal "null",
+        // and `error: null` must not invent an error entry.
+        assert_eq!(detail.turns[0].tool_calls[0].output, None);
+        assert!(detail.turns[0].errors.is_empty());
+        // A summary payload is no longer swallowed as reasoning; it is surfaced as
+        // an event this parser does not know.
+        assert!(detail.turns[0].reasoning_summaries.is_empty());
+        assert_eq!(detail.summary.unrecognized_event_count, 1);
+    }
+
+    #[test]
+    fn parses_five_thousand_tool_events_without_quadratic_output_merging() {
+        let mut lines = vec![turn_context(
+            "2026-06-01T00:00:00.000Z",
+            "turn-1",
+            "gpt-5",
+            "/repo/app",
+        )];
+        for index in 0..2_500 {
+            lines.push(response_item(
+                "2026-06-01T00:00:01.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call",
+                    "call_id": format!("call-{index}"),
+                    "name": "exec",
+                    "input": format!("const r = await tools.exec_command({{\"cmd\":\"step {index}\"}}); text(r.output);"),
+                }),
+            ));
+            lines.push(response_item(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({
+                    "type": "custom_tool_call_output",
+                    "call_id": format!("call-{index}"),
+                    "output": format!("Script completed\nWall time 0.1 seconds\nOutput:\nchunk {index}"),
+                }),
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), lines.join("\n"));
+        let elapsed = started.elapsed();
+
+        assert_eq!(detail.turns[0].tool_calls.len(), 2_500);
+        assert!(detail.turns[0]
+            .tool_calls
+            .iter()
+            .all(|tool| tool.output.as_deref().is_some_and(|output| output.ends_with("chunk 0") || output.contains("chunk"))));
+        assert_eq!(
+            detail
+                .turns
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .filter(|item| matches!(item, SessionReplayItem::ToolCall { .. }))
+                .count(),
+            2_500
+        );
+        let budget = if cfg!(debug_assertions) { 20 } else { 2 };
+        assert!(
+            elapsed.as_secs() < budget,
+            "parsed 5 000 tool events in {elapsed:?}, budget {budget}s (debug={})",
+            cfg!(debug_assertions)
+        );
     }
 
     #[test]
@@ -2413,7 +2833,16 @@ mod tests {
         let turn = &detail.turns[0];
 
         assert_eq!(turn.tool_calls.len(), 1);
-        assert_eq!(turn.items.len(), 3);
+        // Two usage events following the same call both stay on the timeline; they
+        // used to overwrite each other so one request's volume disappeared.
+        assert_eq!(turn.items.len(), 4);
+        assert_eq!(
+            turn.items
+                .iter()
+                .filter(|item| matches!(item, SessionReplayItem::TokenUsage { .. }))
+                .count(),
+            2
+        );
         assert_eq!(detail.summary.tool_call_count, 1);
         assert_eq!(turn.tool_calls[0].call_id.as_deref(), Some("call-exec"));
         assert_eq!(turn.tool_calls[0].status.as_deref(), Some("completed"));
@@ -2443,14 +2872,16 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("SESSION_ID="));
-        assert!(matches!(
-            turn.items.get(1),
-            Some(SessionReplayItem::TokenUsage { usage, .. }) if usage.total_tokens == 56_500
-        ));
-        assert!(matches!(
-            turn.items.get(2),
-            Some(SessionReplayItem::Message { text, .. }) if text == "Still waiting."
-        ));
+        // Indexed by content, not position: both usage events now keep their own
+        // slot instead of the later one replacing the earlier.
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            SessionReplayItem::TokenUsage { usage, .. } if usage.total_tokens == 56_500
+        )));
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            SessionReplayItem::Message { text, .. } if text == "Still waiting."
+        )));
     }
 
     #[test]
@@ -2699,7 +3130,146 @@ mod tests {
 
         let detail = fetch_session_detail(&db, &session_path.to_string_lossy()).unwrap();
         assert_eq!(detail.path, session_path.to_string_lossy());
-        assert_eq!(detail.raw_jsonl, raw);
+        assert_eq!(detail.raw_line_count, 1);
+        // The transcript no longer rides along with the replay response, so a large
+        // session cannot double its own memory through IPC.
+        assert!(serde_json::to_value(&detail)
+            .unwrap()
+            .get("rawJsonl")
+            .is_none());
+
+        let page = fetch_session_raw_page(
+            &db,
+            &session_path.to_string_lossy(),
+            0,
+            500,
+            detail.size_bytes,
+        )
+        .unwrap();
+        assert_eq!(page.lines.len(), 1);
+        assert_eq!(page.lines[0], raw);
+        assert_eq!(page.total_lines, 1);
+
+        // A file that changed after the replay was opened is refused rather than
+        // served with line numbers that no longer match what the reader sees.
+        fs::write(&session_path, format!("{raw}\nappended\n")).unwrap();
+        let error = fetch_session_raw_page(
+            &db,
+            &session_path.to_string_lossy(),
+            0,
+            500,
+            detail.size_bytes,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("E_SESSION_CHANGED"));
+    }
+
+    #[test]
+    fn a_fifty_megabyte_session_replays_without_shipping_its_transcript() {
+        let temp_dir = tempfile_dir();
+        let mut db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
+        let path = temp_dir.join("huge.jsonl");
+        // 50 MB of transcript that renders almost nothing: the point under test is
+        // that the raw file no longer rides along in the replay response.
+        let filler = "x".repeat(1024);
+        let line = serde_json::json!({
+            "timestamp": "2026-06-01T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": { "type": "raw_model_chunk", "data": filler },
+        })
+        .to_string();
+        let target_bytes = 50 * 1024 * 1024usize;
+        let mut written = String::new();
+        let mut line_count = 0usize;
+        while written.len() < target_bytes {
+            written.push_str(&line);
+            written.push('\n');
+            line_count += 1;
+        }
+        let size_bytes = written.len() as i64;
+        fs::write(&path, written).unwrap();
+        upsert_session_file_rollups(
+            &mut db,
+            &[SessionFileRollup {
+                path: path.to_string_lossy().to_string(),
+                modified_at_ms: 1,
+                size_bytes,
+                rows: vec![],
+                prompt_title: Some("Huge session".to_string()),
+                quota_usage: None,
+            }],
+            "2026-06-01T00:00:00.000Z",
+        )
+        .unwrap();
+
+        let detail = fetch_session_detail(&db, &path.to_string_lossy()).unwrap();
+        let response_bytes = serde_json::to_vec(&detail).unwrap().len();
+        assert!(line_count > 40_000);
+        assert_eq!(detail.raw_line_count, line_count);
+        assert!(
+            response_bytes < 1024 * 1024,
+            "replay response carried {response_bytes} bytes for a {size_bytes}-byte session"
+        );
+
+        let page = fetch_session_raw_page(&db, &path.to_string_lossy(), 0, 2_000, size_bytes).unwrap();
+        assert_eq!(page.lines.len(), 2_000);
+        assert_eq!(page.total_lines, line_count);
+        assert!(serde_json::to_vec(&page).unwrap().len() < 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn opening_one_replay_prices_and_deserializes_only_that_session() {
+        let temp_dir = tempfile_dir();
+        let mut db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
+        let records = (0..200usize)
+            .map(|index| {
+                let path = temp_dir.join(format!("session-{index}.jsonl"));
+                fs::write(
+                    &path,
+                    format!(
+                        "{}\n",
+                        turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app")
+                    ),
+                )
+                .unwrap();
+                SessionFileRollup {
+                    path: path.to_string_lossy().to_string(),
+                    modified_at_ms: 123 + index as i64,
+                    size_bytes: 64,
+                    rows: (0..3)
+                        .map(|day| DailyUsageRow {
+                            date: format!("2026-06-0{}", day + 1),
+                            input_tokens: 100,
+                            cached_input_tokens: 10,
+                            output_tokens: 20,
+                            reasoning_output_tokens: 5,
+                            total_tokens: 135,
+                            cost_usd: 0.5,
+                            models: BTreeMap::new(),
+                            projects: BTreeMap::new(),
+                            updated_at: String::new(),
+                        })
+                        .collect(),
+                    prompt_title: Some(format!("Session {index}")),
+                    quota_usage: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        upsert_session_file_rollups(&mut db, &records, "2026-06-01T00:00:00.000Z").unwrap();
+
+        let selected = records[7].path.clone();
+        let prices_before = crate::db::prices_parse_count();
+        let parses_before = crate::db::event_deserialize_count();
+        let detail = fetch_session_detail(&db, &selected).unwrap();
+        let prices_parsed = crate::db::prices_parse_count() - prices_before;
+        let events_parsed = crate::db::event_deserialize_count() - parses_before;
+
+        // 200 sessions sit in the cache and only one is opened: the price table is
+        // parsed once instead of per file, and no unrelated event is deserialized.
+        assert_eq!(prices_parsed, 1);
+        assert_eq!(events_parsed, 3);
+        assert!(detail.summary.total_tokens > 0);
+        assert_eq!(detail.agents.len(), 0);
     }
 
     #[test]

@@ -49,6 +49,14 @@ pub fn query_local(root: &Path, method: &str, args: &Value) -> Result<Value, Str
             args["limit"].as_u64().unwrap_or(100) as usize,
         ),
         "replay" => replay(&db, root, args),
+        "replay_raw" => crate::session_replay::fetch_session_raw_page(
+            &db,
+            args["path"].as_str().ok_or("缺少会话路径")?,
+            args["start"].as_u64().unwrap_or(0) as usize,
+            args["limit"].as_u64().unwrap_or(500) as usize,
+            args["expectedSizeBytes"].as_i64().unwrap_or(-1),
+        )
+        .and_then(|page| serde_json::to_value(page).map_err(|e| e.to_string())),
         "export" => export(&db, root, args),
         _ => Err(format!("未知只读方法: {method}")),
     }
@@ -58,13 +66,18 @@ fn replay(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
     let mut detail = serde_json::to_value(crate::session_replay::fetch_session_detail(db, path)?)
         .map_err(|e| e.to_string())?;
     let prices = prices(root)?;
+    // ORDER BY ts: without it SQLite may return the session id of any row in the
+    // file, so a resume/compaction file whose earliest event carries no session id
+    // used to yield an empty session, which then priced the whole replay at 0.0
+    // instead of reporting an unknown cost.
     let session: String = db
         .query_row(
-            "SELECT session FROM raw_events WHERE path=?1 AND agent='codex' LIMIT 1",
+            "SELECT session FROM raw_events WHERE path=?1 AND agent='codex' ORDER BY ts LIMIT 1",
             [path],
             |r| r.get(0),
         )
         .unwrap_or_default();
+    let priced = !session.is_empty();
     let lifetime = Query {
         start: 0,
         end: 32_503_680_000_000,
@@ -76,7 +89,9 @@ fn replay(db: &rusqlite::Connection, root: &Path, args: &Value) -> Result<Value,
         time_zone: None, offset_minutes: 0,
     };
     let totals = query::summarize(&db::events(db, &lifetime)?, &prices);
-    detail["summary"]["costUSD"] = json!(totals.cost_usd);
+    // An unknown session is not a free session: pricing 0.0 read as "this cost
+    // nothing" in the replay header.
+    detail["summary"]["costUSD"] = if priced { json!(totals.cost_usd) } else { Value::Null };
     // A replay deliberately preserves full conversation context. Selected-window usage is
     // separately computed from the same event cache as every table/export, never from daily rows.
     if !args["query"].is_null() {
