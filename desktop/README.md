@@ -1,4 +1,4 @@
-# TokenMonitor Desktop 2
+# TokenMonitor
 
 Windows 桌面版，本地读取 Agent 日志并统计用量。完整界面位于应用窗口内，运行不需要 Node，也不请求在线价格、账户额度或更新服务。
 
@@ -17,7 +17,7 @@ Windows 桌面版，本地读取 Agent 日志并统计用量。完整界面位�
 - CSV、Markdown、Excel 导出使用当前查询范围与筛选。费用是按本地价格表计算的估算值，不是账户账单。
 - Codex 详情上方显示所选范围用量，下方完整会话回放保留范围外上下文；本地额度是日志观测值，显示观测时间，不伪装为实时额度。没有兑换额度操作。
 
-默认配置、缓存、日志、WebView 数据保存在 `%LOCALAPPDATA%\TokenMonitor2`，与发布目录分离。设置中的路径字段可配置额外本地目录，包括 Codex 归档目录。原日志均以只读方式读取。工具或日志没有提供的字段不会凭空推算。
+默认配置、缓存、日志、WebView 数据保存在 `%LOCALAPPDATA%\TokenMonitor`，与发布目录分离。设置中的路径字段可配置额外本地目录，包括 Codex 归档目录。原日志均以只读方式读取。工具或日志没有提供的字段不会凭空推算。
 
 ## 构建
 
@@ -29,7 +29,7 @@ cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 pwsh -File desktop/scripts/build-windows.ps1
 ```
 
-需要 Node、Rust 和 Windows C++ 构建工具；这些只用于构建。脚本离线使用已经安装的依赖，固定覆盖 `dist/desktop-windows-x64` 和 `dist/TokenMonitor-desktop-windows-x64.zip`。这两个位置专用于新架构的发布物，旧版 `dist/windows-x64/data` 保留。压缩包严格使用文件清单，不收录缓存、数据库、日志、凭据或 Node。
+需要 Node、Rust 和 Windows C++ 构建工具；这些只用于构建。脚本离线使用已经安装的依赖，固定覆盖 `dist/desktop-windows-x64` 和 `dist/TokenMonitor-desktop-windows-x64.zip`。旧 Node 运行包不再构建。压缩包严格使用文件清单，不收录缓存、数据库、日志、凭据或 Node。
 
 ```powershell
 cd desktop
@@ -39,3 +39,5 @@ cargo test --offline --no-default-features
 ```
 
 本项目 MIT 许可见发布包中的 `LICENSE`；参考项目移植代码的许可见 `LICENSE.codex-usage-desktop`，分发依赖许可汇总见 `THIRD-PARTY-NOTICES.txt`。再分发时请保留这些许可文件。
+
+安装：PowerShell 7 运行包内 install-windows.ps1；卸载运行 uninstall-windows.ps1，默认保留全部用户数据。已有 TokenMonitor2 桌面数据且规范根无桌面设置时继续使用原目录。旧 Node 安装会整体存档到同级 TokenMonitor-legacy，新版从 Agent 原始记录重建缓存，不转换旧数据库。

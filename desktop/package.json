@@ -9,7 +9,7 @@
     "tauri": "tauri",
     "test": "vitest run",
     "desktop:dev": "tauri dev --no-default-features --features desktop",
-    "desktop:build": "tauri build"
+    "desktop:build": "pwsh -NoProfile -File scripts/build-windows.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

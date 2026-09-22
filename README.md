@@ -88,10 +88,10 @@ dist/TokenMonitor-desktop-windows-x64.zip
 首次运行会扫描本地历史记录。日志较多时，首次建立缓存可能需要一定时间。默认配置、事件缓存、日志、价格和 WebView 数据位于：
 
 ```text
-%LOCALAPPDATA%\TokenMonitor2
+%LOCALAPPDATA%\TokenMonitor
 ```
 
-所有 Agent 路径都可以在“设置”中修改或禁用。
+所有 Agent 路径都可以在“设置”中修改或禁用。已有 TokenMonitor2 桌面数据且规范目录无桌面设置时，继续使用原目录；不自动合并数据库。安装、升级和卸载说明见 [Windows 使用说明](docs/WINDOWS.md)。
 
 ### 从源码构建
 
@@ -152,7 +152,7 @@ desktop/scripts/build-windows.ps1        固定目录覆盖式打包
 - [桌面验收记录](docs/DESKTOP-VERIFICATION.md)
 - [Codex 参考功能迁移矩阵](docs/CODEX-MIGRATION-MATRIX.md)
 - [Windows 使用说明](docs/WINDOWS.md)
-- [旧版 Node CLI 说明](docs/LEGACY-CLI.md)（不适用于新桌面版）
+- [单一桌面产品迁移记录](docs/RETIRE-LEGACY-123.md)
 
 ## 测试
 

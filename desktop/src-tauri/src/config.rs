@@ -117,10 +117,20 @@ pub fn data_dir() -> PathBuf {
     std::env::var_os("TOKENMONITOR_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("TokenMonitor2")
+            default_data_dir(&dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")))
         })
+}
+pub fn default_data_dir(local: &Path) -> PathBuf {
+    let current = local.join("TokenMonitor");
+    let previous = local.join("TokenMonitor2");
+    // Existing desktop users keep their exact cache/settings. New installations
+    // use the canonical product root. Never merge incompatible Node databases.
+    if !current.join("settings.json").exists()
+        && (previous.join("settings.json").exists() || previous.join("events-v2.sqlite").exists()) {
+        previous
+    } else {
+        current
+    }
 }
 pub fn initialize(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| e.to_string())?;

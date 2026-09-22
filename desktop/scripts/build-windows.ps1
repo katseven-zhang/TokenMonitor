@@ -6,9 +6,10 @@ $desktopRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $desktopRoot '..'))
 $outputRoot = Join-Path $repositoryRoot 'dist\desktop-windows-x64'
 $archivePath = Join-Path $repositoryRoot 'dist\TokenMonitor-desktop-windows-x64.zip'
+. (Join-Path $repositoryRoot 'scripts\package-common.ps1')
 $exePath = Join-Path $desktopRoot 'src-tauri\target\release\TokenMonitor.exe'
 
-$inputs = @('src','src-tauri\src','src-tauri\icons','src-tauri\capabilities','config','src-tauri\tauri.conf.json','src-tauri\Cargo.toml','src-tauri\Cargo.lock','src-tauri\build.rs','package.json','package-lock.json','vite.config.ts','tailwind.config.ts','postcss.config.cjs','index.html')
+$inputs = @('src','src-tauri\src','src-tauri\icons','src-tauri\capabilities','config','src-tauri\tauri.conf.json','src-tauri\Cargo.toml','src-tauri\Cargo.lock','src-tauri\build.rs','package.json','package-lock.json','tsconfig.json','vite.config.ts','tailwind.config.ts','postcss.config.cjs','index.html')
 function Get-PackageFingerprint([string[]]$Paths) {
     $fingerprint = [Text.StringBuilder]::new()
     foreach ($inputPath in $Paths) {
@@ -47,6 +48,11 @@ try {
     } else {
         @{version=2;sourceHash=$sourceHash;binaryHash=$binaryHash} | ConvertTo-Json | Set-Content -LiteralPath $stampPath -Encoding utf8
     }
+    Assert-PlainTree $outputRoot
+    if (Test-Path -LiteralPath $outputRoot) {
+        $unexpected = @(Get-ChildItem -LiteralPath $outputRoot -Force | Where-Object { $_.Name -notin @($PackageFiles + 'manifest.json') -or $_.PSIsContainer })
+        if ($unexpected.Count) { throw 'Output contains unknown files or data; preserve them before rebuilding.' }
+    }
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
     # Fixed explicit distribution whitelist. Never enumerate runtime data into an archive.
     Copy-Item -LiteralPath $exePath -Destination (Join-Path $outputRoot 'TokenMonitor.exe') -Force
@@ -54,6 +60,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'README.md') -Destination (Join-Path $outputRoot 'README.md') -Force
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'LICENSE.codex-usage-desktop') -Destination (Join-Path $outputRoot 'LICENSE.codex-usage-desktop') -Force
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'config\prices.json') -Destination (Join-Path $outputRoot 'prices.example.json') -Force
+    foreach ($name in @('install-windows.ps1','uninstall-windows.ps1','package-common.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$name") -Destination (Join-Path $outputRoot $name) -Force
+    }
 
     $notices = [Text.StringBuilder]::new()
     [void]$notices.AppendLine('TokenMonitor Desktop — third-party licenses (including build dependencies)')
@@ -86,13 +95,13 @@ try {
         }
     }
     [IO.File]::WriteAllText((Join-Path $outputRoot 'THIRD-PARTY-NOTICES.txt'),$notices.ToString(),[Text.UTF8Encoding]::new($false))
-    $names = @('TokenMonitor.exe','LICENSE','README.md','LICENSE.codex-usage-desktop','prices.example.json','THIRD-PARTY-NOTICES.txt')
+    $names = $PackageFiles
     $files = foreach ($name in $names) {
         $path = Join-Path $outputRoot $name
         [pscustomobject][ordered]@{name=$name;bytes=(Get-Item -LiteralPath $path).Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
     }
     $revision = (& git rev-parse HEAD).Trim()
-    $manifest = [ordered]@{product='TokenMonitor Desktop';version='2.0.0';platform='windows-x64';revision=$revision;sourceHash=$sourceHash.ToLowerInvariant();builtAtUtc=[DateTime]::UtcNow.ToString('o');runtime='system WebView2; no bundled Node';files=@($files)}
+    $manifest = [ordered]@{product='TokenMonitor';version='2.0.0';platform='windows-x64';revision=$revision;sourceHash=$sourceHash.ToLowerInvariant();builtAtUtc=[DateTime]::UtcNow.ToString('o');runtime='system WebView2; no bundled Node';files=@($files)}
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot 'manifest.json') -Encoding utf8
     $archiveInputs = @($names + 'manifest.json') | ForEach-Object { Join-Path $outputRoot $_ }
     Compress-Archive -LiteralPath $archiveInputs -DestinationPath $archivePath -Force

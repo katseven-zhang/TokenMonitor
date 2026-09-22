@@ -1,4 +1,5 @@
 pub mod collectors;
+pub mod autostart;
 pub mod config;
 pub mod db;
 #[cfg(feature = "desktop")]

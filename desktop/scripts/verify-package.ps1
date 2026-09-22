@@ -2,7 +2,12 @@
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $directory = Join-Path $root 'dist/desktop-windows-x64'
-$expected = @('TokenMonitor.exe','LICENSE','README.md','LICENSE.codex-usage-desktop','prices.example.json','THIRD-PARTY-NOTICES.txt','manifest.json')
+. (Join-Path $root 'scripts/package-common.ps1')
+Assert-DesktopPackage $directory
+foreach ($name in @('install-windows.ps1','uninstall-windows.ps1','package-common.ps1')) {
+    if ((Get-FileHash -LiteralPath (Join-Path $directory $name)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $root "scripts/$name")).Hash) { throw "Packaged lifecycle script is stale: $name" }
+}
+$expected = @($PackageFiles + 'manifest.json')
 $actual = @(Get-ChildItem -LiteralPath $directory -Force | ForEach-Object Name)
 if (Compare-Object $expected $actual) { throw 'Distribution whitelist mismatch' }
 $manifest = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
@@ -21,4 +26,4 @@ try {
         if ($hash -ne (Get-FileHash (Join-Path $directory $entry.FullName)).Hash) { throw "ZIP content mismatch: $($entry.FullName)" }
     }
 } finally { $zip.Dispose() }
-Write-Output 'PASS: seven-file package, manifest hashes, ZIP bytes and project/reference/dependency licenses'
+Write-Output 'PASS: desktop-only package, lifecycle scripts, manifest hashes, ZIP bytes and licenses'

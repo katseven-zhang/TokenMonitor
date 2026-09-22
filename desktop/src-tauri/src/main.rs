@@ -9,6 +9,11 @@ compile_error!(
 );
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Package validation must not create user data or require WebView2.
+    if args.iter().any(|a| a == "--version") {
+        println!("TokenMonitor {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let root = tokenmonitor_core::config::data_dir();
     if let Err(e) = tokenmonitor_core::config::initialize(&root) {
         eprintln!("{e}");
