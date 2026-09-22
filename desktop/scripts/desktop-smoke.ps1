@@ -60,7 +60,7 @@ try {
     Until { try { -not (Rpc 'status').result.running } catch { $true } } 'service stops explicitly'
 } finally {
     try { $null = Rpc 'stop' } catch {}
-    if ($gui) { $gui.Refresh(); if (-not $gui.HasExited) { $gui.Kill(); $gui.WaitForExit() } }
+    if ($gui) { $gui.Refresh(); if (-not $gui.HasExited) { $gui.Kill($true); $gui.WaitForExit() } }
     $env:TOKENMONITOR_DATA_DIR=$priorRoot
     # Only this test's unique temp root. WebView descendants can close asynchronously.
     $full=[IO.Path]::GetFullPath($root)
