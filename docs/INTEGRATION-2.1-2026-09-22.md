@@ -40,3 +40,7 @@
 - desktop-smoke.ps1：后台隐藏、二次启动恢复、关窗驻留、服务停止与测试进程树清理通过。
 
 上述均为集成工作树本地证据。远程 CI 以本次 push 对应的 GitHub Actions 记录为准，不沿用旧分支结果。主工作区用户未跟踪资料保持原样；原 `.gitignore` 的 vendored 忽略项已包含在集成结果中。旧版被忽略的依赖/编译缓存和旧发行目录保存到 `.worktrees/legacy-retired-artifacts/`，不作为当前发布物。固定新版产物为 `dist/desktop-windows-x64/` 与 `dist/TokenMonitor-desktop-windows-x64.zip`。
+
+## 首次 push 后的 CI 修正
+
+GitHub Actions run 35716198165 的前端门禁发现 localized-format.test.ts 将 UTC 时间固定断言为 UTC+8。格式化函数按主机本地时区显示是预期行为；测试改用同一个本地墙钟时刻构造夹具。UTC 与 Asia/Singapore 两个进程环境下全套 183 项均通过。产品代码未修改；后续远程 CI 以修正提交对应的 run 为准。

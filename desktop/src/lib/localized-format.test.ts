@@ -11,7 +11,8 @@ import {
   formatTimestamp,
 } from "./localized-format";
 
-const moment = Date.UTC(2026, 8, 20, 12, 30, 0);
+// The formatter uses the host time zone; construct the same local wall time on every runner.
+const moment = new Date(2026, 8, 20, 20, 30, 0).getTime();
 
 describe("locale-aware formatting", () => {
   it("uses the same tags the document language sync picks", () => {
