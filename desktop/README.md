@@ -1,4 +1,4 @@
-# TokenMonitor Desktop 2
+# TokenMonitor
 
 Windows 桌面版，本地读取 Agent 日志并统计用量。完整界面位于应用窗口内，运行不需要 Node，也不请求在线价格、账户额度或更新服务。
 
@@ -17,7 +17,12 @@ Windows 桌面版，本地读取 Agent 日志并统计用量。完整界面位�
 - CSV、Markdown、Excel 导出使用当前查询范围与筛选。费用是按本地价格表计算的估算值，不是账户账单。
 - Codex 详情上方显示所选范围用量，下方完整会话回放保留范围外上下文；本地额度是日志观测值，显示观测时间，不伪装为实时额度。没有兑换额度操作。
 
-默认配置、缓存、日志、WebView 数据保存在 `%LOCALAPPDATA%\TokenMonitor2`，与发布目录分离。设置中的路径字段可配置额外本地目录，包括 Codex 归档目录。原日志均以只读方式读取。工具或日志没有提供的字段不会凭空推算。
+默认配置、缓存、日志、WebView 数据保存在 `%LOCALAPPDATA%\TokenMonitor`，与发布目录分离。设置中的路径字段可配置额外本地目录，包括 Codex 归档目录。原日志均以只读方式读取。工具或日志没有提供的字段不会凭空推算。
+
+2.1 新增 Qoder CN 和 Xiaomi MiMo Desktop，支持共 12 个本地来源。升级旧设置时自动补齐这两个来源；明确留空的路径和禁用状态保持不变。
+
+- Qoder CN 默认仅扫描 `~/.qoder-cn/projects`。真实 token 来自认证解密后的会话累计状态；解码使用本机标准安装目录中 Qoder CN SDK 随程序发布的格式常量，仅保留在内存，不读取 `.auth` 或凭据库。SDK 格式变化或状态认证失败时显示错误、保留上次数据并重试。首次扫描按状态时间记入累计基线，后续保存观测增量；无法恢复首次扫描前的逐请求时间分布。多模型累计会话归为 unknown，避免把全部用量分给某个模型。credits 来自转录请求，跨父子代理和归档副本去重，并按查询范围筛选；它不等于 token、货币或实时余额。
+- Xiaomi MiMo Desktop 默认读取 `~/.local/share/mimocode/mimocode.db` 的消息与工具活动，包含 SQLite WAL 的已提交变更。消息是 token 的唯一计数依据，step-finish 不重复累加；reasoning 并入输出且单独展示。未知模型保留未定价状态。账号和认证表不参与采集。
 
 ## 构建
 
@@ -29,7 +34,7 @@ cargo fetch --locked --manifest-path desktop/src-tauri/Cargo.toml
 pwsh -File desktop/scripts/build-windows.ps1
 ```
 
-需要 Node、Rust 和 Windows C++ 构建工具；这些只用于构建。脚本离线使用已经安装的依赖，固定覆盖 `dist/desktop-windows-x64` 和 `dist/TokenMonitor-desktop-windows-x64.zip`。这两个位置专用于新架构的发布物，旧版 `dist/windows-x64/data` 保留。压缩包严格使用文件清单，不收录缓存、数据库、日志、凭据或 Node。
+需要 Node、Rust 和 Windows C++ 构建工具；这些只用于构建。脚本离线使用已经安装的依赖，固定覆盖 `dist/desktop-windows-x64` 和 `dist/TokenMonitor-desktop-windows-x64.zip`。旧 Node 运行包不再构建。压缩包严格使用文件清单，不收录缓存、数据库、日志、凭据或 Node。
 
 ```powershell
 cd desktop
@@ -44,3 +49,5 @@ feature。`--no-default-features` 会关掉 `desktop`（即不编译 tauri 那�
 等于在本地测一个发不出去也从来不发布的构建，绿了也证明不了 CI 那一步。
 
 本项目 MIT 许可见发布包中的 `LICENSE`；参考项目移植代码的许可见 `LICENSE.codex-usage-desktop`，分发依赖许可汇总见 `THIRD-PARTY-NOTICES.txt`。再分发时请保留这些许可文件。
+
+安装：PowerShell 7 运行包内 install-windows.ps1；卸载运行 uninstall-windows.ps1，默认保留全部用户数据。已有 TokenMonitor2 桌面数据且规范根无桌面设置时继续使用原目录。旧 Node 安装会整体存档到同级 TokenMonitor-legacy，新版从 Agent 原始记录重建缓存，不转换旧数据库。

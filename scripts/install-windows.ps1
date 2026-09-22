@@ -1,372 +1,71 @@
-﻿#requires -Version 5.1
-<#
-.SYNOPSIS
-  TokenMonitor per-user (non-admin) installer.
-
-.DESCRIPTION
-  Installs the dist\windows-x64 runtime package (see scripts\build-windows.ps1,
-  layout v2: root TokenMonitor.exe + manifest.json + runtime\) into the FIXED
-  per-user location %LOCALAPPDATA%\Programs\TokenMonitor. User data lives
-  INSIDE the install folder at <install>\data (portable layout, product
-  contract v2 s.5) and is preserved across upgrades by moving it aside during
-  the swap and moving it back after the new install verifies.
-
-  Upgrade safety: the candidate is staged and validated (node --version and
-  tokenmonitor --version both run) BEFORE the existing install is replaced;
-  the old install is kept as a rollback copy until the new one verifies, and
-  is restored automatically if verification fails.  User data is moved to
-  <InstallRoot>\TokenMonitor-data and only ever moves back AFTER the new
-  install has verified, so it is never inside a directory that is about to be
-  recursively deleted; every recursive delete goes through one guarded helper
-  that stashes a data\ folder out of the tree first (#100).
-
-  Every root can be overridden (-InstallRoot/-StartMenuRoot/-DesktopRoot),
-  which is how automated dry-runs run entirely inside temp directories
-  without touching the real user profile.
-
-.EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1
-  powershell ... -File scripts\install-windows.ps1 -DesktopShortcut
-#>
-param(
-  # Candidate package directory; default <repo>\dist\windows-x64.
-  [string]$Source = '',
-  # Directory that will contain the TokenMonitor install folder.
-  [string]$InstallRoot = '',
-  # Directory that receives the Start Menu shortcut.
-  [string]$StartMenuRoot = '',
-  # Directory that receives the optional desktop shortcut.
-  [string]$DesktopRoot = '',
-  # Also create a desktop shortcut (Start Menu shortcut is always created).
-  [switch]$DesktopShortcut,
-  # Repo root; derived from this script's location by default.
-  [string]$Repo = ''
-)
-
+#requires -Version 7.2
+[CmdletBinding()]
+param([string]$Source = '', [string]$InstallRoot = '', [string]$StartMenuRoot = '', [string]$DesktopRoot = '', [switch]$DesktopShortcut, [switch]$SkipScheduledTask)
 $ErrorActionPreference = 'Stop'
-Set-StrictMode -Version 2.0
-
-function Fail([string]$Message) { throw $Message }
-function Info([string]$Message) { Write-Host "[install] $Message" }
-
-# --- roots ---------------------------------------------------------------------
-$localAppData = $env:LOCALAPPDATA
-if ([string]::IsNullOrEmpty($localAppData)) { Fail 'LOCALAPPDATA is not set' }
-if ([string]::IsNullOrEmpty($Repo)) { $Repo = Split-Path -Parent $PSScriptRoot }
-if (-not (Test-Path -LiteralPath $Repo)) { Fail "repo not found: $Repo" }
-$repoFull = (Resolve-Path -LiteralPath $Repo).Path
-
-if ([string]::IsNullOrEmpty($InstallRoot))  { $InstallRoot  = Join-Path $localAppData 'Programs' }
-if ([string]::IsNullOrEmpty($StartMenuRoot)) { $StartMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs' }
-if ([string]::IsNullOrEmpty($DesktopRoot))  { $DesktopRoot  = [Environment]::GetFolderPath('Desktop') }
-
-foreach ($rootName in @('InstallRoot')) {
-  $rootValue = Get-Variable $rootName -ValueOnly
-  # string-level guard first: the root may not exist yet on a fresh install
-  if ($rootValue -match '^[A-Za-z]:\\?$') { Fail "$rootName must not be a drive root (got $rootValue)" }
-  if (Test-Path -LiteralPath $rootValue) {
-    $resolvedRoot = (Resolve-Path -LiteralPath $rootValue).Path
-    if ($resolvedRoot -match '^[A-Za-z]:\\?$') { Fail "$rootName must not be a drive root (got $resolvedRoot)" }
-  }
+. (Join-Path $PSScriptRoot 'package-common.ps1')
+if (-not $InstallRoot) { $InstallRoot = Join-Path $env:LOCALAPPDATA 'Programs' }
+if (-not $StartMenuRoot) { $StartMenuRoot = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs' }
+if (-not $DesktopRoot) { $DesktopRoot = [Environment]::GetFolderPath('Desktop') }
+if (-not $Source) {
+    $Source = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'manifest.json')) { $PSScriptRoot } else { Join-Path $PSScriptRoot '..\dist\desktop-windows-x64' }
 }
-
-$installDir = Join-Path $InstallRoot 'TokenMonitor'
-$dataDir = Join-Path $installDir 'data'   # portable data dir (contract v2 s.5), travels with the install
-
-# --- candidate (layout v2) -------------------------------------------------------
-if ([string]::IsNullOrEmpty($Source)) { $Source = Join-Path $repoFull 'dist\windows-x64' }
-if (-not (Test-Path -LiteralPath $Source)) {
-  Fail "candidate package not found: $Source - build it first with scripts/build-windows.ps1"
-}
-$srcFull = (Resolve-Path -LiteralPath $Source).Path
-foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenmonitor.js', 'runtime\package.json', 'manifest.json', 'TokenMonitor.exe')) {
-  if (-not (Test-Path -LiteralPath (Join-Path $srcFull $rel))) { Fail "candidate is missing $rel" }
-}
-
-# --- manifest integrity (#101): the SHA-256 list finally gets a consumer ---------
-# build-windows.ps1 has always written sizes+SHA-256 for every file into
-# manifest.json, but nothing ever read them back: a truncated, hand-edited or
-# partially re-downloaded package installed exactly as happily as a intact one.
-# Verification is now mandatory (a manifest with no file list is a failure, not a
-# skip - otherwise "forget to hash" becomes the way to bypass this).
-$manifest = $null
+$install = Get-InstallDirectory $InstallRoot
+$stage = "$install.new"; $backup = "$install.old"
+$sourceFull = [IO.Path]::GetFullPath($Source).TrimEnd('\','/')
+if ($sourceFull -eq $install -or $sourceFull.StartsWith($install + '\',[StringComparison]::OrdinalIgnoreCase) -or $sourceFull -in @($stage,$backup)) { throw 'Source overlaps installation' }
+Assert-DesktopPackage $sourceFull
+Assert-InstallStopped $install
+foreach ($path in @($install,$stage,$backup)) { Assert-PlainTree $path }
+if (Test-Path -LiteralPath $backup) { throw "Previous rollback copy preserved at $backup; recover it before retrying" }
+if (Test-Path -LiteralPath $stage) { throw "Previous staging copy preserved at $stage; inspect it before retrying" }
+# Archive the old product with ALL portable data; never open its DB as desktop data.
+$legacy = Test-Path -LiteralPath (Join-Path $install 'runtime\node.exe')
+$archive = Join-Path ([IO.Path]::GetFullPath($InstallRoot)) 'TokenMonitor-legacy'
+if ($legacy -and (Test-Path -LiteralPath $archive)) { throw "Legacy archive already exists: $archive" }
+if ((Test-Path -LiteralPath $install) -and -not $legacy) { Assert-DesktopPackage $install }
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+$swapped = $false; $hadInstall = Test-Path -LiteralPath $install
 try {
-  $manifest = Get-Content -LiteralPath (Join-Path $srcFull 'manifest.json') -Raw | ConvertFrom-Json
-} catch {
-  Fail "candidate manifest.json cannot be parsed: $($_.Exception.Message)"
-}
-$fileProp = $manifest.PSObject.Properties['files']
-if ($null -eq $fileProp -or @($fileProp.Value).Count -eq 0) {
-  Fail 'candidate manifest.json carries no files[] hash list - rebuild it with scripts/build-windows.ps1'
-}
-$manifestEntries = @($fileProp.Value)
-$listedRel = New-Object System.Collections.Generic.HashSet[string]
-$hashChecks = 0
-$integrityProblems = @()
-foreach ($entry in $manifestEntries) {
-  $rel = [string]$entry.path
-  $normalized = $rel.Replace('/', '\')
-  [void]$listedRel.Add($normalized.ToLowerInvariant())
-  $target = Join-Path $srcFull $normalized
-  if (-not (Test-Path -LiteralPath $target)) { $integrityProblems += "listed in manifest but absent: $rel"; continue }
-  $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-  $expected = ([string]$entry.sha256).ToLowerInvariant()
-  if ($actual -ne $expected) { $integrityProblems += ("SHA-256 mismatch: {0} (manifest {1} != actual {2})" -f $rel, $expected, $actual) }
-  $hashChecks++
-}
-# Content that is not in the manifest would be installed unaccounted for.
-foreach ($f in @(Get-ChildItem -LiteralPath $srcFull -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-  $rel = $f.FullName.Substring($srcFull.Length + 1)
-  if ($rel -ieq 'manifest.json') { continue }
-  if (-not $listedRel.Contains($rel.ToLowerInvariant())) { $integrityProblems += "present but not in manifest: $rel" }
-}
-if ($integrityProblems.Count -gt 0) {
-  Fail ("candidate package does not match its own manifest - refusing to install it: " + ($integrityProblems -join '; '))
-}
-Info "candidate integrity verified: $hashChecks files, SHA-256 ok (manifest version=$($manifest.version))"
-
-$candNode = Join-Path $srcFull 'runtime\node.exe'
-$candScript = Join-Path $srcFull 'runtime\bin\tokenmonitor.js'
-$candVersion = (& $candNode $candScript --version)
-if ($LASTEXITCODE -ne 0) { Fail 'candidate failed --version validation before install' }
-Info "candidate version: $candVersion"
-
-# --- prepare directories --------------------------------------------------------
-New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-$logDir = Join-Path $InstallRoot 'install-logs'
-New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-$logFile = Join-Path $logDir ("install-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-function Log([string]$Message) { $Message | Out-File -LiteralPath $logFile -Append -Encoding utf8 }
-
-$isUpgrade = Test-Path -LiteralPath (Join-Path $installDir 'runtime\node.exe')
-$staging = "$installDir.new"
-$backup = "$installDir.old"
-$dataKeep = Join-Path $InstallRoot 'TokenMonitor-data'
-$backupActive = $false
-
-# During the upgrade swap the portable data moves to <InstallRoot>TokenMonitor-data
-# and moves back once the new install verifies; rollback moves it back too - data never
-function Move-DataAside {
-  if (Test-Path -LiteralPath (Join-Path $installDir 'data')) {
-    if (Test-Path -LiteralPath $dataKeep) { Fail "unexpected leftover data folder: $dataKeep - resolve it and retry" }
-    Move-Item -LiteralPath (Join-Path $installDir 'data') -Destination $dataKeep
-    return $true
-  }
-  return $false
-}
-function Move-DataBack {
-  if (Test-Path -LiteralPath $dataKeep) {
-    Move-Item -LiteralPath $dataKeep -Destination (Join-Path $installDir 'data')
-  }
-}
-# #122: the preserved folder can hold data rescued out of a tree that was about to be
-# deleted recursively. An upgrade hard-killed after the old install had been renamed
-# to TokenMonitor.old and before the data moved back leaves TokenMonitor.old\data as
-# the ONLY copy of the user's database, and the next install sees no TokenMonitor at
-# all, so it takes the first-install branch. Move that rescued copy into the install
-# we just verified - the app never reads <InstallRoot>TokenMonitor-data, so leaving
-# it there would be loss in every practical sense. Refuse to merge or overwrite when
-# the new install already has a data folder of its own.
-function Restore-RescuedData {
-  if (-not (Test-Path -LiteralPath $dataKeep)) { return }
-  $target = Join-Path $installDir 'data'
-  if (Test-Path -LiteralPath $target) {
-    Info "warning: $target already exists - rescued data kept at $dataKeep; stop the backend and move it there by hand"
-    Log "rescued data NOT restored, target occupied: $dataKeep -> $target"
-    return
-  }
-  Move-Item -LiteralPath $dataKeep -Destination $target
-  Info "user data restored into the verified install: $target"
-  Log "rescued data restored: $dataKeep -> $target"
-}
-# The single guarantee the installer README makes: 数据永不进入删除范围. Any tree
-# about to be recursively deleted is first searched for a data\ folder and that
-# folder is moved out to the preserved location. If the preserved location is
-# already occupied the delete is refused outright instead of silently clobbering
-# or discarding either copy (#100b: the upgrade-rollback path used to run
-# Remove-Item -Recurse over the new install directory *after* the restored user
-# data had been moved back into it, destroying the data on a failed upgrade).
-function Stash-UserData([string]$FromDir) {
-  $src = Join-Path $FromDir 'data'
-  if (-not (Test-Path -LiteralPath $src)) { return }
-  if (Test-Path -LiteralPath $dataKeep) {
-    Fail ("both {0} and {1} exist: refusing to delete {2} because it would destroy user data - resolve one of them and retry" -f $src, $dataKeep, $FromDir)
-  }
-  Move-Item -LiteralPath $src -Destination $dataKeep
-  Log "user data moved out of delete scope: $src -> $dataKeep"
-  Info "user data moved out of the delete scope: $dataKeep"
-}
-function Remove-InstallTree([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) { return }
-  $full = (Resolve-Path -LiteralPath $Path).Path
-  $leaf = Split-Path -Leaf $full
-  if ($leaf -cne 'TokenMonitor' -and $leaf -cne 'TokenMonitor.new' -and $leaf -cne 'TokenMonitor.old') {
-    Fail "refusing to delete unexpected path: $full"
-  }
-  Stash-UserData -FromDir $full
-  Remove-Item -LiteralPath $full -Recurse -Force
-}
-
-# Detect a running backend before any destructive operation (#31):
-# data	okenmonitor-<port>.lock carries the backend PID. A corrupted or
-# unparsable lock file is treated as "no running instance" (fault tolerance).
-function Assert-BackendStopped {
-  try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
-  $dataPath = Join-Path $installDir 'data'
-  if (-not (Test-Path -LiteralPath $dataPath)) { return }
-  $locks = Get-ChildItem -LiteralPath $dataPath -Filter 'tokenmonitor-*.lock' -ErrorAction SilentlyContinue
-  foreach ($lock in $locks) {
-    $backendPid = 0
-    try {
-      $raw = Get-Content -LiteralPath $lock.FullName -Raw -ErrorAction Stop
-      $parsed = $raw | ConvertFrom-Json
-      $backendPid = [int]$parsed.pid
-    } catch { continue }  # corrupted JSON: treat as no running instance
-    if ($backendPid -gt 0 -and (Get-Process -Id $backendPid -ErrorAction SilentlyContinue)) {
-      Write-Host ''
-      Write-Host ("检测到 TokenMonitor 后台正在运行（PID {0}，锁文件 {1}）。" -f $backendPid, $lock.Name)
-      Write-Host '请先停止后台，再执行安装/升级/卸载。'
-      Write-Host '可通过启动器 TokenMonitor.exe 的「停止」按钮停止后台。'
-      throw ("backend is running (pid {0}, lock {1}) - please stop the backend first" -f $backendPid, $lock.Name)
+    foreach ($name in @($PackageFiles + 'manifest.json')) { Copy-Item -LiteralPath (Join-Path $sourceFull $name) -Destination $stage }
+    Assert-DesktopPackage $stage
+    $probe = Start-Process -FilePath (Join-Path $stage 'TokenMonitor.exe') -ArgumentList '--version' -PassThru -WindowStyle Hidden
+    if (-not $probe.WaitForExit(15000)) { $probe.Kill(); throw 'Desktop version check timed out' }
+    if ($probe.ExitCode -ne 0) { throw 'Desktop version check failed' }
+    if ($hadInstall) { Move-Item -LiteralPath $install -Destination $backup }
+    Move-Item -LiteralPath $stage -Destination $install
+    $swapped = $true
+    Assert-DesktopPackage $install
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcutRoots = @($StartMenuRoot)
+    if ($DesktopShortcut) { $shortcutRoots += $DesktopRoot }
+    foreach ($directory in $shortcutRoots) {
+        Assert-PlainTree $directory
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        $link = $shell.CreateShortcut((Join-Path $directory 'TokenMonitor.lnk'))
+        $link.TargetPath = Join-Path $install 'TokenMonitor.exe'; $link.WorkingDirectory = $install
+        $link.Description = 'TokenMonitor'; $link.Save()
     }
-  }
+} catch {
+    if ($swapped) { Remove-ProgramTree $install $install }
+    if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $install }
+    if (Test-Path -LiteralPath $stage) { Remove-ProgramTree $stage $install }
+    throw
 }
-
-# #101: the lock-file guard above only sees the *backend*. The GUI launcher and the
-# tray are separate native exes that live inside the install tree and hold their own
-# image file open, so `Remove-Item -Recurse` over installDir/.new/.old fails halfway:
-# the old tree is already renamed away, the swap cannot finish, and the next
-# reinstall then trips over the leftover .old/.new - a wedged install that no
-# message explains. Anything still running *out of the trees about to be deleted* is
-# therefore detected before the first destructive step. Read-only: this reports and
-# aborts, it never kills a process it does not own.
-function Assert-InstallTreeIdle {
-  $blockers = @()
-  $roots = @($installDir, $staging, $backup) | Where-Object { -not [string]::IsNullOrEmpty($_) }
-  foreach ($procName in @('TokenMonitor', 'TokenMonitorTray', 'node')) {
-    foreach ($p in @(Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
-      $imagePath = ''
-      try { $imagePath = $p.Path } catch { continue }  # not ours to query: cannot conclude it is running there
-      if ([string]::IsNullOrEmpty($imagePath)) { continue }
-      foreach ($root in $roots) {
-        if ($imagePath.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-          $blockers += ("{0} (PID {1}) 从 {2} 运行" -f $p.ProcessName, $p.Id, $imagePath)
+if ($hadInstall) {
+    if ($legacy) {
+        Move-Item -LiteralPath $backup -Destination $archive
+        if (-not $SkipScheduledTask) {
+            $task = Get-ScheduledTask -TaskName 'TokenMonitor-Server' -ErrorAction SilentlyContinue
+            if ($task) {
+                $owned = @($task.Actions | Where-Object { $_.Execute -and ([IO.Path]::GetFullPath($_.Execute.Trim('"'))).StartsWith($install + '\',[StringComparison]::OrdinalIgnoreCase) })
+                if ($owned.Count -eq @($task.Actions).Count -and $owned.Count -gt 0) {
+                    Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath | Set-Content -LiteralPath (Join-Path $archive 'scheduled-task.xml')
+                    Unregister-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Confirm:$false
+                }
+            }
         }
-      }
+        Write-Output "Legacy installation and all data preserved at $archive. Enable desktop login startup in Settings."
     }
-  }
-  if ($blockers.Count -gt 0) {
-    Write-Host ''
-    Write-Host '检测到仍在使用安装目录的进程，安装/升级/卸载无法安全完成：'
-    foreach ($b in $blockers) { Write-Host ("  - {0}" -f $b) }
-    Write-Host '请先通过启动器 TokenMonitor.exe 的「停止」按钮停后台，并关闭托盘/启动器窗口后再重试。'
-    Write-Host '本脚本不会替你结束任何进程。'
-    throw ("install tree is in use by: {0} - stop it first" -f ($blockers -join '; '))
-  }
+    else { Remove-ProgramTree $backup $install }
 }
-
-try {
-  Assert-BackendStopped  # :41
-  Assert-InstallTreeIdle # :101 no launcher/tray/node still running out of the trees we are about to delete
-  # #122: these two were the only recursive deletes left that bypassed
-  # Remove-InstallTree, so the "move user data out of the delete scope first" rule
-  # silently did not apply to them. An upgrade killed after the old install was
-  # renamed to TokenMonitor.old and before the data moved back leaves the user's
-  # database inside that orphan backup; the next run deleted it with no message.
-  # Going through the same helper rescues data\ into the preserved folder first and
-  # fails loudly when that folder is already occupied. Both calls are no-ops when the
-  # path is absent, which is the ordinary case.
-  Remove-InstallTree -Path $staging
-  Remove-InstallTree -Path $backup
-
-  # --- stage + validate the candidate in final layout --------------------------
-  Info "staging candidate -> $staging"
-  Copy-Item -LiteralPath $srcFull -Destination $staging -Recurse
-  $stagedVersion = (& (Join-Path $staging 'runtime\node.exe') (Join-Path $staging 'runtime\bin\tokenmonitor.js') --version)
-  if ($LASTEXITCODE -ne 0) { Fail 'staged candidate failed --version validation' }
-  Log "staged candidate version=$stagedVersion"
-
-  if ($isUpgrade) {
-    # --- replace with rollback: old copy kept until the new install verifies ---
-    Info "upgrading existing install at $installDir"
-    $dataAside = Move-DataAside
-    Rename-Item -LiteralPath $installDir -NewName 'TokenMonitor.old'
-    $backup = Join-Path $InstallRoot 'TokenMonitor.old'
-    $backupActive = $true
-    $newActive = $false
-    try {
-      Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-      $newActive = $true
-      # #100(b): data stays in the preserved folder until the new install has
-      # verified. Moving it back before verification put it inside the very
-      # directory the rollback then deleted with Remove-Item -Recurse.
-      $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
-      if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }
-      Move-DataBack
-      Info "upgrade verified: $newVersion at $installDir"
-      Log "upgrade $candVersion verified"
-    } catch {
-      if ($newActive) { Remove-InstallTree -Path $installDir }
-      if ($backupActive -and (Test-Path -LiteralPath $backup)) {
-        Rename-Item -LiteralPath $backup -NewName 'TokenMonitor'
-        $backupActive = $false
-        Info 'post-verification failed; rolled back to the previous install'
-        Log 'upgrade failed; rolled back'
-      }
-      if ($dataAside) { Move-DataBack }
-      throw
-    }
-    # A verified upgrade is never voided by the rollback copy's cleanup: by now
-    # the new install works and the data is back in place, so a locked .old tree
-    # (a still-running launcher holds its exe) is reported, not fatal.
-    # #122: this delete goes through the same data guard as every other one instead
-    # of asserting in a message string that the tree holds no user data - if the
-    # crash window did leave data inside it, the guard moves that out first (and
-    # refuses to delete when the preserved folder is already occupied).
-    if (Test-Path -LiteralPath $backup) {
-      try { Remove-InstallTree -Path $backup; $backupActive = $false }
-      catch { Info "warning: rollback copy left at $backup (verified upgrade kept); nothing was deleted around it - remove it once no process runs from it" }
-    }
-  } else {
-    Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-    $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
-    if ($LASTEXITCODE -ne 0) {
-      Remove-InstallTree -Path $installDir
-      Fail 'post-install verification failed; broken first install removed'
-    }
-    Info "installed version: $newVersion at $installDir"
-    Log "first install version=$newVersion"
-  }
-
-  # --- portable data directory (created on install; app keeps everything here) ---
-  Restore-RescuedData   # #122: data rescued out of an orphan backup goes back in here
-  New-Item -ItemType Directory -Path (Join-Path $dataDir 'logs') -Force | Out-Null
-  Info "data dir ready: $dataDir (database/logs/settings; preserved on uninstall)"
-
-  # --- shortcuts (Start Menu always, desktop optional): target the GUI launcher ---
-  $shell = New-Object -ComObject WScript.Shell
-  function New-TokenMonitorShortcut([string]$Directory) {
-    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
-    $link = Join-Path $Directory 'TokenMonitor.lnk'
-    $sc = $shell.CreateShortcut($link)
-    $sc.TargetPath = Join-Path $installDir 'TokenMonitor.exe'
-    $sc.Arguments = ''
-    $sc.WorkingDirectory = $installDir
-    $sc.Description = 'TokenMonitor console (start/stop backend, port, logs)'
-    $sc.Save()
-    Info "shortcut created: $link"
-    Log "shortcut $link"
-  }
-  New-TokenMonitorShortcut $StartMenuRoot
-  if ($DesktopShortcut) { New-TokenMonitorShortcut $DesktopRoot }
-
-  Log "install complete"
-  Write-Host "[install] log: $logFile"
-  exit 0
-} catch {
-  if (Test-Path -LiteralPath $staging) {
-    try { Remove-InstallTree -Path $staging } catch {}
-  }
-  [Console]::Error.WriteLine(("[install] ERROR " + $_.Exception.Message))
-  exit 1
-}
+Write-Output "Installed desktop at $install. User data remains separate; enable login startup in Settings."

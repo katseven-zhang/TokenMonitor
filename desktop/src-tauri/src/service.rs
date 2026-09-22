@@ -693,7 +693,7 @@ mod tests {
             .port();
         let settings = config::Settings {
             port,
-            roots: Default::default(),
+            roots: std::collections::BTreeMap::from([("qoder".into(),vec![]),("xiaomi-mimo".into(),vec![])]),
             ..Default::default()
         };
         config::save_json(&root.join("settings.json"), &settings).unwrap();
@@ -975,7 +975,7 @@ mod tests_control_port {
         let path = root.join("settings.json");
         fs::write(
             &path,
-            r#"{"port":12345,"refreshSeconds":60,"roots":{},"disabledAgents":[]}"#,
+            r#"{"port":12345,"refreshSeconds":60,"roots":{"qoder":[],"xiaomi-mimo":[]},"disabledAgents":[]}"#,
         )
         .unwrap();
         let (port, note) = control_port_with_last(&root, 0);
@@ -995,7 +995,7 @@ mod tests_control_port {
         // 未知键不算降级：那正是修前会让 status/stop 全灭的输入。
         fs::write(
             &path,
-            r#"{"port":13579,"refreshSeconds":60,"roots":{},"disabledAgents":[],"fromNewerVersion":true}"#,
+            r#"{"port":13579,"refreshSeconds":60,"roots":{"qoder":[],"xiaomi-mimo":[]},"disabledAgents":[],"fromNewerVersion":true}"#,
         )
         .unwrap();
         let (port, note) = control_port_with_last(&root, 0);
@@ -1049,7 +1049,7 @@ mod tests_config_error_log {
             &root.join("settings.json"),
             &config::Settings {
                 port,
-                roots: Default::default(),
+                roots: [("qoder".into(), vec![]), ("xiaomi-mimo".into(), vec![])].into(),
                 ..Default::default()
             },
         )
@@ -1094,7 +1094,7 @@ mod tests_config_error_log {
             &root.join("settings.json"),
             &config::Settings {
                 port,
-                roots: Default::default(),
+                roots: [("qoder".into(), vec![]), ("xiaomi-mimo".into(), vec![])].into(),
                 ..Default::default()
             },
         )

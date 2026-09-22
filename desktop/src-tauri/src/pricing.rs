@@ -158,6 +158,15 @@ mod tests {
     use super::*;
     use crate::model::Tokens;
     #[test]
+    fn bundled_prices_accept_new_qwen_and_mimo_aliases() {
+        let prices = Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        for model in ["qwen3.8-max", "qwen3.7-max", "qwen3.8-flash", "mimo-v2.5-pro", "mimo-v2.6-pro", "mimo-v2.5", "mimo-v2.6-flash"] {
+            assert!(prices.models.contains_key(model), "{model}");
+        }
+        assert_eq!(prices.aliases["mimo-v2.5-flash"], "mimo-v2.5");
+        assert_eq!(prices.aliases["qmodel_38max"], "qwen3.8-max");
+    }
+    #[test]
     fn historical_prices_and_cache_are_independent() {
         let p=Prices::parse(r#"{"version":1,"currency":"USD","aliases":{"alias":"m"},"models":{"m":[{"input":1,"cached":0.1,"cacheWrite":2,"output":3},{"effectiveFrom":"2026-01-01T00:00:00Z","input":2,"cached":0.2,"cacheWrite":4,"output":6}]}}"#).unwrap();
         let mut e = Event {
@@ -356,7 +365,7 @@ mod tests {
         );
         // 空键走的是同一条分支的另一半。
         let empty = Prices::parse(&make(r#"{"":"real"}"#)).unwrap_err();
-        assert!(empty.contains("必须直接指向已配置模型"), "{empty}");
+        assert!(empty.contains("别名不能为空"), "{empty}");
         // 非空跑对照：合法别名照旧解析成功，并且真的路由到目标单价 2/百万。
         let ok = Prices::parse(&make(r#"{"nick":"real"}"#)).unwrap();
         assert_eq!(ok.cost(&event("nick")), Some(2.0));

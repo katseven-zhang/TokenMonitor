@@ -2,10 +2,19 @@
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $directory = Join-Path $root 'dist/desktop-windows-x64'
-$expected = @('TokenMonitor.exe','LICENSE','README.md','LICENSE.codex-usage-desktop','prices.example.json','THIRD-PARTY-NOTICES.txt','manifest.json')
+. (Join-Path $root 'scripts/package-common.ps1')
+Assert-DesktopPackage $directory
+foreach ($name in @('install-windows.ps1','uninstall-windows.ps1','package-common.ps1')) {
+    if ((Get-FileHash -LiteralPath (Join-Path $directory $name)).Hash -ne (Get-FileHash -LiteralPath (Join-Path $root "scripts/$name")).Hash) { throw "Packaged lifecycle script is stale: $name" }
+}
+$expected = @($PackageFiles + 'manifest.json')
 $actual = @(Get-ChildItem -LiteralPath $directory -Force | ForEach-Object Name)
 if (Compare-Object $expected $actual) { throw 'Distribution whitelist mismatch' }
 $manifest = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
+$packageVersion = (Get-Content -LiteralPath (Join-Path $root 'desktop/package.json') -Raw | ConvertFrom-Json).version
+$tauriVersion = (Get-Content -LiteralPath (Join-Path $root 'desktop/src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
+$binaryVersion = (& (Join-Path $directory 'TokenMonitor.exe') --version | Out-String).Trim()
+if ($manifest.version -ne $packageVersion -or $tauriVersion -ne $packageVersion -or $binaryVersion -ne "TokenMonitor $packageVersion") { throw 'Release version mismatch between package, manifest, Tauri and executable' }
 if (Compare-Object ($expected | Where-Object { $_ -ne 'manifest.json' }) @($manifest.files.name)) { throw 'Manifest whitelist mismatch' }
 # #102：包里的版本必须等于配置里声明的版本。build-windows.ps1 以前往 manifest 写的是
 # 一个硬编码的 '2.0.0'，与 src-tauri/tauri.conf.json 各说各话：改了配置、发出去的包
@@ -28,4 +37,4 @@ try {
         if ($hash -ne (Get-FileHash (Join-Path $directory $entry.FullName)).Hash) { throw "ZIP content mismatch: $($entry.FullName)" }
     }
 } finally { $zip.Dispose() }
-Write-Output 'PASS: seven-file package, manifest hashes, ZIP bytes and project/reference/dependency licenses'
+Write-Output 'PASS: desktop-only package, lifecycle scripts, manifest hashes, ZIP bytes and licenses'

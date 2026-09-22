@@ -22,3 +22,6 @@ dist/
 /codex-lb-main/
 /claude-codex-usage-dashboard-main/
 /codex-usage-desktop-main/
+
+# Isolated task checkouts
+.worktrees/

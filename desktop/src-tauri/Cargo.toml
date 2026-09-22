@@ -1,6 +1,6 @@
 [package]
 name = "tokenmonitor-desktop"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 # #102：MSRV 声明。取的是"代码与依赖真的要求多少"，不是 rust-toolchain.toml 钉的
 # 那个 channel（照抄钉住的版本等于把升级工具链和抬高下限这两件无关的事绑在一起，
@@ -45,6 +45,10 @@ walkdir = "2"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
 percent-encoding = "2"
+aes-gcm = "0.10.3"
+base64 = "0.22"
+sha2 = "0.10"
+regex = "1"
 rust_xlsxwriter = "0.94.1"
 tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
@@ -62,3 +66,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 opt-level = "s"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

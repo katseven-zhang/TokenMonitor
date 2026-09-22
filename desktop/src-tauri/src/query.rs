@@ -216,10 +216,9 @@ fn dashboard_snapshot(db: &Connection, q: &Query, prices: &Prices) -> Result<Val
     for a in &activities {
         *tools.entry(a.name.clone()).or_default() += 1;
     }
-    // #71: 同一观测在 sessions/ 与 archived_sessions/ 各存一份是常态；"最新配额"
-    // 列表与 quotaHistory 一样必须先按内容去重，否则 100 个名额被副本占满。
-    let mut stmt=db.prepare("SELECT DISTINCT agent,session,ts,payload FROM quota WHERE ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let quotas=stmt.query_map(params![q.end,q.agent],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.map(|row|{let(a,s,t,p)=row.map_err(|e|e.to_string())?;Ok(json!({"agent":a,"session":s,"ts":t,"payload":serde_json::from_str::<Value>(&p).map_err(|e|e.to_string())?}))}).collect::<Result<Vec<_>,String>>()?;
+    let mut stmt=db.prepare("SELECT DISTINCT agent,session,ts,payload FROM quota WHERE agent!='qoder' AND ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let mut quotas=stmt.query_map(params![q.end,q.agent],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.map(|row|{let(a,s,t,p)=row.map_err(|e|e.to_string())?;Ok(json!({"agent":a,"session":s,"ts":t,"payload":serde_json::from_str::<Value>(&p).map_err(|e|e.to_string())?}))}).collect::<Result<Vec<_>,String>>()?;
+    quotas.extend(qoder_credit_summary(db,q)?);
     let mut stmt = db
         .prepare("SELECT data FROM scan_status ORDER BY agent")
         .map_err(|e| e.to_string())?;
@@ -239,9 +238,48 @@ pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) ->
     let (total,items)=db::activity_page(db,q,offset,limit)?;
     Ok(json!({"total":total,"items":items}))
 }
+pub fn qoder_credit_summary(db: &Connection, q: &Query) -> Result<Vec<Value>, String> {
+    let mut groups:BTreeMap<String,Value>=BTreeMap::new();
+    for row in qoder_credits(db,q)? {
+        let session=row["session"].as_str().unwrap_or("").to_string();
+        let p=&row["payload"];
+        if let Some(group)=groups.get_mut(&session) {
+            let target=&mut group["payload"];
+            for key in ["requests","credits","original_credits","billable_requests"] {
+                target[key]=match (target[key].as_f64(),p[key].as_f64()) { (Some(a),Some(b))=>json!(a+b),_=>Value::Null };
+            }
+            target["context_usage_ratio"]=match(target["context_usage_ratio"].as_f64(),p["context_usage_ratio"].as_f64()) {(Some(a),Some(b))=>json!(a.max(b)),_=>Value::Null};
+            if let Some(models)=p["models"].as_object() {
+                for (model,n) in models {target["models"][model]=json!(target["models"][model].as_i64().unwrap_or(0)+n.as_i64().unwrap_or(0));}
+            }
+        } else {
+            let mut summary=row;
+            summary["payload"].as_object_mut().unwrap().remove("request_id");
+            groups.insert(session,summary);
+        }
+    }
+    Ok(groups.into_values().collect())
+}
+
+pub fn qoder_credits(db: &Connection, q: &Query) -> Result<Vec<Value>, String> {
+    if q.agent.as_deref().is_some_and(|a| a!="qoder") { return Ok(vec![]); }
+    // Dedupe globally BEFORE the half-open time filter, including archived and
+    // sidechain copies. The stored session column is the request identity.
+    let mut stmt=db.prepare("SELECT session,ts,payload FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,session ORDER BY ts,path) AS rank FROM quota WHERE agent='qoder' AND json_extract(payload,'$.request_id') IS NOT NULL) WHERE rank=1 AND ts>=?1 AND ts<?2 ORDER BY ts DESC").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![q.start,q.end],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?;
+    let mut out=vec![];
+    for row in rows {
+        let (id,ts,payload)=row.map_err(|e|e.to_string())?;
+        let p: Value=serde_json::from_str(&payload).map_err(|e|e.to_string())?;
+        let event=crate::model::Event { id,agent:"qoder".into(),session:p["session_id"].as_str().unwrap_or("").into(),project:p["project"].as_str().unwrap_or("").into(),model:p["model"].as_str().unwrap_or("").into(),ts,tokens:Default::default(),path:String::new(),line:0 };
+        if q.matches(&event) { out.push(json!({"agent":"qoder","session":event.session,"ts":ts,"payload":p})); }
+    }
+    Ok(out)
+}
+
 fn quota_history(db: &Connection, q: &Query) -> Result<Value, String> {
     // Archive copies of the same observation do not represent new observations.
-    let selection = "SELECT DISTINCT agent,session,ts,payload FROM quota WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR session=?4)";
+    let selection = "SELECT DISTINCT agent,session,ts,payload FROM quota WHERE agent!='qoder' AND ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR session=?4)";
     let total: i64 = db.query_row(&format!("SELECT COUNT(*) FROM ({selection})"), params![q.start,q.end,q.agent,q.session], |r|r.get(0)).map_err(|e|e.to_string())?;
     let mut stmt = db.prepare(&format!("{selection} ORDER BY ts DESC,session LIMIT 500")).map_err(|e|e.to_string())?;
     let items = stmt.query_map(params![q.start,q.end,q.agent,q.session], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?)))
@@ -555,15 +593,15 @@ mod tests {
             })
             .unwrap();
             let pinned = dashboard_snapshot(&tx, &q, &prices).unwrap();
-            let fresh_count = dashboard(&other, &q, &prices).unwrap()["eventCount"]
+            let fresh_count = dashboard(&other, &q, &prices).unwrap()["totals"]["events"]
                 .as_u64()
                 .unwrap();
             (before, pinned, fresh_count)
         };
-        assert_eq!(before["eventCount"], 2);
+        assert_eq!(before["totals"]["events"], 2);
         assert_eq!(
-            pinned["eventCount"],
-            before["eventCount"],
+            pinned["totals"]["events"],
+            before["totals"]["events"],
             "同一快照内两次分组读取的 eventCount 必须一致"
         );
         assert_eq!(pinned["totals"], before["totals"]);
@@ -638,7 +676,7 @@ mod tests {
         .unwrap();
         let reader = db::open(&root).unwrap();
         let baseline = dashboard(&reader, &q, &prices).unwrap();
-        assert_eq!(baseline["eventCount"], 1);
+        assert_eq!(baseline["totals"]["events"], 1);
         let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel::<()>(0);
         let (landed_tx, landed_rx) = std::sync::mpsc::sync_channel::<()>(0);
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -700,7 +738,7 @@ mod tests {
             // 反向对照：那次提交确实有效，未钉住快照的连接立刻看得到。
             let fresh = db::open(&root).unwrap();
             let after = dashboard(&fresh, &q, &prices).unwrap();
-            assert_eq!(after["eventCount"], 3);
+            assert_eq!(after["totals"]["events"], 3);
             assert_eq!(after["activityCount"], 2);
             assert_eq!(after["quotaHistory"]["total"], 2);
         });
@@ -731,10 +769,7 @@ mod tests {
         };
         // 事件计数按分组求和回核 eventCount；配额与活动跨语句自洽。
         let consistent = |data: &Value, label: &str| -> Option<String> {
-            let events = data["eventCount"].as_u64().unwrap_or(u64::MAX);
-            if data["totals"]["events"].as_u64() != Some(events) {
-                return Some(format!("{label}: totals.events 与 eventCount={events} 背离"));
-            }
+            let events = data["totals"]["events"].as_u64().unwrap_or(u64::MAX);
             for group in ["models", "projects", "sessions", "agents", "days", "months", "series"] {
                 let sum: u64 = data[group]
                     .as_array()

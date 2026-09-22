@@ -1,20 +1,52 @@
 //! Synthetic offline fixtures, using the established collectors' token accounting contracts.
-//! The fixtures themselves live in `tests/common/mod.rs` so `tests/parity.rs`
-//! drives the Node collectors over exactly the same files this test indexes.
+//! Shared synthetic fixtures live in `tests/common/mod.rs`. Legacy runtime parity
+//! was retired with #123; native golden accounting assertions remain here.
 mod common;
 
 use common::{sqlite, blob, number, Fixture, TS};
 use rusqlite::params;
 use std::collections::BTreeMap;
 use tokenmonitor_core::{pricing::Prices, query};
-use serde_json::json;
-use std::fs;
+use serde_json::{json, Value};
+use std::{fs,path::Path};
 use tokenmonitor_core::{config, db, model::Query, scanner, service};
 
 #[test]
-fn all_ten_sources_minute_filters_and_repeated_scans() {
+fn all_eleven_sources_minute_filters_and_repeated_scans() {
     let f = Fixture::new();
-    let roots = f.ten_sources();
+    let mut roots = f.ten_sources();
+    let qrecords = vec![
+        json!({"type":"assistant","timestamp":TS,"sessionId":"q-session","cwd":"D:\\我的 项目","isSidechain":false,"message":{"model":"m","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"credits":0.25,"original_credits":0.25,"billable":true,"request_id":"q-req-1","context_usage_ratio":0.2}}}),
+        // 同一 request_id 的第二份抄本不得再计一次
+        json!({"type":"assistant","timestamp":TS+1000,"sessionId":"q-session","message":{"model":"m","usage":{"credits":0.25,"request_id":"q-req-1"}}}),
+        // sidechain 抄本归 subagents/agent-*.jsonl，父转录跳过
+        json!({"type":"assistant","timestamp":TS+2000,"sessionId":"q-session","isSidechain":true,"message":{"model":"m","usage":{"credits":2,"request_id":"q-side-1"}}}),
+        json!({"type":"assistant","timestamp":TS+3000,"sessionId":"q-session","message":{"model":"<synthetic>","usage":{"credits":5,"request_id":"q-syn-1"}}}),
+    ];
+    let qdir = f.jsonl("qoder", &qrecords);
+    let qstate = Path::new(&qdir).join("session");
+    fs::create_dir_all(&qstate).unwrap();
+    let qupdated = chrono::DateTime::from_timestamp_millis(TS)
+        .unwrap()
+        .to_rfc3339();
+    fs::write(
+        qstate.join("state.json"),
+        json!({"sessionId":"q-session","revision":2,"createdAt":qupdated,"updatedAt":qupdated,
+               "model":"m","cwd":"D:\\我的 项目",
+               "total":{"input_tokens":120,"cache_read_input_tokens":50,
+                        "cache_creation_input_tokens":0,"output_tokens":40},
+               "credits":{"used":0,"remaining":0,"total":0}})
+            .to_string(),
+    )
+    .unwrap();
+    // 同名但非会话状态的文件（压缩状态）也躺在树里：本源必须认出并忽略它
+    fs::create_dir_all(qstate.join("compression-v2")).unwrap();
+    fs::write(
+        qstate.join("compression-v2").join("state.json"),
+        json!({"version":2,"state":{"seenFunctionResponseIds":[]}}).to_string(),
+    )
+    .unwrap();
+    roots.insert("qoder".into(), vec![qdir]);
     let settings = config::Settings {
         roots,
         ..Default::default()
@@ -30,6 +62,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         ("zcode", 860),
         ("opencode", 700),
         ("antigravity", 1136),
+        ("qoder", 160),
     ];
     for _ in 0..2 {
         let statuses = scanner::scan(&f.0, &settings).unwrap();
@@ -39,7 +72,8 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         // 七个源取的都是末段——同一份日志在两个 UI 里就是两个项目，分组与钻取全对不上。
         // 夹具里各源的项目来源不同（cwd / session.directory / workspace_uris / 目录名），
         // 所以逐个登记期望值。
-        const PROJECT_85: [(&str, &str); 10] = [
+        const PROJECT_85: [(&str, &str); 11] = [
+            ("qoder", "D:\\我的 项目"),
             ("codex", "我的 项目"),          // session_meta.payload.cwd 末段
             ("claude-code", "我的 项目"),    // rec.cwd 末段
             ("ccmr", "我的 项目"),
@@ -73,7 +107,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         }
     }
     // Exercise the same local query/export entry point used by the GUI. All sources
-    // coexist, so a missing agent filter would leak nine unrelated records.
+    // coexist, so a missing agent filter would leak ten unrelated records.
     for (agent, total) in expected {
         let mut query = Query {
             start: TS,
@@ -165,6 +199,29 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         .unwrap();
         assert_eq!(result["rows"], 0);
         assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
+    }
+    // credits 面：观测落 quota 表，且绝不携带 token 量（total 恒等式的另一半）。
+    {
+        let cache = db::open_read(&f.0).unwrap();
+        let mut stmt = cache
+            .prepare("SELECT session,payload FROM quota WHERE agent='qoder'")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].0, "q-req-1");
+        let payload: Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(payload["requests"], 1, "{payload}");
+        assert_eq!(payload["credits"], 0.25);
+        assert_eq!(payload["billable_requests"], 1);
+        assert_eq!(payload["context_usage_ratio"], 0.2);
+        assert!(
+            payload.get("input_tokens").is_none() && payload.get("total").is_none(),
+            "credits 观测不得携带 token 量：{payload}"
+        );
     }
     // Read changes committed only in WAL and replace existing records without double counting.
     let z = sqlite(&f.0.join("sources/zcode/db.sqlite"));
@@ -392,7 +449,6 @@ fn same_model_spelled_differently_across_sources_is_one_row() {
         (models[0]["knownCostUsd"].as_f64().unwrap() - 1.7412).abs() < 1e-9,
         "{models:?}"
     );
-    assert_eq!(dash["availableModels"], json!(["glm-5.3-flash"]));
     assert_eq!(dash["totals"]["totalTokens"], 1_741_200);
     // 钻取用的标签就是落库的归一名：按归一名过滤必须拿到全部三条
     q.model = Some("glm-5.3-flash".into());
@@ -519,7 +575,7 @@ fn antigravity_decoder_branches_and_project_match_node() {
 /// 但那个脚本原本只能对用户机器上的真实数据说话（`desktop/.dev-data/events-v2.sqlite`
 /// + `~/.codex` 日志），CI 与离线审查都拿它没办法。这里把它的两端拆开各自钉住：
 ///
-/// - **桌面端这一侧**就是下面这份黄金文件：`test/fixtures/codex-parity/desktop-events.json`
+/// - **桌面端这一侧**就是下面这份黄金文件：`desktop/src-tauri/tests/fixtures/codex-parity/desktop-events.json`
 ///   逐字段等于 `collectors.rs` 现场解析 `rollout.jsonl` 产出的 `Event` 序列化结果，
 ///   也就是 `raw_events.data` 落库的那段 JSON（db.rs 直接 `serde_json::to_string(e)`）。
 ///   改采集器不改黄金 → 本测试红；改黄金不改采集器 → 本测试红。
@@ -532,11 +588,11 @@ fn antigravity_decoder_branches_and_project_match_node() {
 /// 六条总量 [880000,440000,240000,230000,345000,223000] = 2,358,000，cached 合计 1,250,000。
 #[test]
 fn compare_local_golden_is_what_the_desktop_collector_produces() {
-    const REL: &str = "test/fixtures/codex-parity/rollout.jsonl";
+    const REL: &str = "desktop/src-tauri/tests/fixtures/codex-parity/rollout.jsonl";
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let text = fs::read_to_string(root.join(REL)).unwrap();
     let golden: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(root.join("test/fixtures/codex-parity/desktop-events.json")).unwrap())
+        serde_json::from_str(&fs::read_to_string(root.join("desktop/src-tauri/tests/fixtures/codex-parity/desktop-events.json")).unwrap())
             .unwrap();
     let parsed = tokenmonitor_core::collectors::parse_jsonl("codex", REL, &text);
     assert_eq!(parsed.malformed_lines, 0, "fixture 本身不能有坏行");
@@ -671,4 +727,57 @@ fn opencode_tool_part_timestamp_prefers_state_time_start() {
     );
     assert_eq!(parsed.malformed_lines, 1, "只有读不到时间的工具行才是坏行");
     let _ = fs::remove_dir_all(&root);
+}
+
+/// #105 的硬隐私边界：Qoder 只注册 ~/.qoder-cn，同族其它家目录一律不发现、
+/// 不扫描、不注册；`.auth`（密钥材料）永不进 roots。缺这一条断言，下一次改动
+/// 就可能顺手把 ~/.qoder / ~/.qoderwork 也加进来。
+#[test]
+fn qoder_registers_only_qoder_cn_never_the_legacy_family() {
+    assert!(
+        config::AGENTS
+            .iter()
+            .any(|(agent, label)| *agent == "qoder" && *label == "Qoder"),
+        "AGENTS 必须登记 qoder/Qoder：{:?}",
+        config::AGENTS
+    );
+    let settings = config::Settings::default();
+    let roots = settings.roots.get("qoder").expect("默认设置要有 qoder 根");
+    assert_eq!(roots.len(), 1, "{roots:?}");
+    for root in roots {
+        let path = Path::new(root);
+        assert!(path.is_absolute(), "{root}");
+        assert_eq!(path.file_name().unwrap(), "projects", "{root}");
+        if std::env::var_os("QODER_CN_HOME").is_none() {
+            assert_eq!(
+                path.parent().and_then(|p| p.file_name()).unwrap(),
+                ".qoder-cn",
+                "家目录相对根必须由 homedir 组装：{root}"
+            );
+        }
+    }
+    const FORBIDDEN: [&str; 6] = [
+        ".qwenworkcn",
+        ".qoderwork",
+        ".qoderworkcn",
+        ".qmind",
+        ".qoder",
+        ".qoder-cli",
+    ];
+    for (_, roots) in settings.roots {
+        for root in roots {
+            let path = Path::new(&root);
+            let below = path.ancestors().skip(1).any(|a| {
+                FORBIDDEN
+                    .iter()
+                    // .qoder-cn 以 .qoder 开头，但目录名必须整段相等才算同族
+                    .any(|d| a.file_name().is_some_and(|n| n == std::ffi::OsStr::new(d)))
+            });
+            assert!(!below, "roots 落进了被禁的同族目录：{root}");
+            assert!(
+                !root.contains(".auth"),
+                "密钥材料目录 .auth 永不进 roots：{root}"
+            );
+        }
+    }
 }

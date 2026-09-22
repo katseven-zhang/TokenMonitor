@@ -90,6 +90,12 @@ fn dedup_key(path: String) -> String {
 fn dedup_key(path: String) -> String {
     path
 }
+
+/// Qoder 的会话状态文件（与 `<会话id>.jsonl` 同名的兄弟目录里）。它不是 JSONL，
+/// 只有本源按文件名认领，其它源不会被它干扰。
+fn is_qoder_state(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "state.json")
+}
 fn collect_file(
     db: &mut Connection,
     agent: &str,
@@ -102,7 +108,7 @@ fn collect_file(
     let (size, mtime) = fingerprint(&path)?;
     s.files += 1;
     // SQLite may change only in WAL; never skip it using the main file fingerprint.
-    let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
+    let sqlite = matches!(agent, "opencode" | "xiaomi-mimo" | "zcode" | "antigravity");
     // #63: only reuse when the cached observation is intact *and* carries its
     // source_health row; a missing row forces the reparse that writes it back.
     // #110：负缓存只对指纹可信的源生效——sqlite 的主文件指纹代表不了 WAL，而它
@@ -123,6 +129,9 @@ fn collect_file(
     }
     let read = if agent == "antigravity" {
         collectors::read_antigravity(&path, project.unwrap_or(""))
+    } else if agent == "qoder" && is_qoder_state(&path) {
+        // 会话状态是第二个数据面（真实 token），与转录的 credits 面互不混用
+        crate::qoder::read_state(&path)
     } else if sqlite {
         collectors::read_sqlite(agent, &path)
     } else {
@@ -242,7 +251,7 @@ pub fn scan_cancellable(
                         _ => {}
                     }
                 }
-            } else if matches!(agent, "zcode" | "opencode") {
+            } else if matches!(agent, "zcode" | "opencode" | "xiaomi-mimo") {
                 if !seen.insert(dedup_key(indexed_path(path))) {
                     continue;
                 }
@@ -256,7 +265,7 @@ pub fn scan_cancellable(
                     }
                     match entry {
                         Ok(e) if e.file_type().is_file() => {
-                            if !e.path().extension().is_some_and(|ext| is_collectable_ext(agent, ext)) {
+                            if !e.path().extension().is_some_and(|ext| is_collectable_ext(agent, ext)) && !(agent == "qoder" && is_qoder_state(e.path())) {
                                 continue;
                             }
                             if !seen.insert(dedup_key(indexed_path(e.path()))) {

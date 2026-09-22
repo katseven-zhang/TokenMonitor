@@ -370,7 +370,7 @@
     "per_page_label": "每页"
   },
   "quota": {
-    "title": "Codex 额度 · 本地观测",
+    "title": "额度与计费 · 本地观测",
     "observed_at": "日志记录于 {{value}}",
     "none_yet": "尚无本地额度记录",
     "disclaimer": "卡片展示查询结束前最后一次日志观测，不是实时余额。账户额度无法按模型或项目拆分；Tokens 查询范围不等同于额度计费窗口。",
@@ -488,5 +488,22 @@
     "close_aria": "关闭放大趋势",
     "dialog_title": "用量趋势 · {{bucket}}聚合",
     "legend_note": "点击图例显示或隐藏系列；费用缺口表示该时段未完整定价。"
+  },
+  "credits": {
+    "title": "会话计费观测",
+    "sessions": "{{count}} 个会话 · 查询范围内逐请求累加",
+    "none_yet": "尚无本地额度或计费记录",
+    "disclaimer": "credits 是该产品的订阅计费刻度，不参与 ¥/$ 折算、不计入模型成本，也不会因未配价而告警；上下文比例按厂商给定的窗口分母取会话峰值。缺数据以 — 表示，不等同零。",
+    "source": "来源",
+    "recent": "最近请求",
+    "session": "会话",
+    "project": "项目",
+    "requests": "请求数",
+    "credits": "credits",
+    "original": "原始 credits",
+    "billable": "计费请求",
+    "context": "上下文峰值",
+    "models": "模型 / 降级",
+    "no_project": "未记录项目"
   }
 }

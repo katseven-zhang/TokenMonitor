@@ -6,7 +6,21 @@ use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+#[cfg(not(windows))]
 use tauri_plugin_autostart::ManagerExt;
+
+fn autostart_enabled(_app: &tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(windows)]
+    { crate::autostart::enabled(crate::autostart::RUN_KEY, &std::env::current_exe().map_err(|e|e.to_string())?) }
+    #[cfg(not(windows))]
+    { _app.autolaunch().is_enabled().map_err(|e|e.to_string()) }
+}
+fn set_autostart(_app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    { crate::autostart::set(crate::autostart::RUN_KEY, &std::env::current_exe().map_err(|e|e.to_string())?, enabled) }
+    #[cfg(not(windows))]
+    { if enabled { _app.autolaunch().enable() } else { _app.autolaunch().disable() }.map_err(|e|e.to_string()) }
+}
 
 #[derive(Default)]
 struct StartupError(std::sync::Mutex<Option<String>>);
@@ -48,7 +62,7 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
                 );
             }
             Ok(
-                json!({"settings":settings,"settingsWarnings":warnings,"prices":fs::read_to_string(root.join("prices.json")).map_err(|e|e.to_string())?,"dataDir":root,"agents":config::AGENTS,"autostart":app.autolaunch().is_enabled().map_err(|e|e.to_string())?}),
+                json!({"settings":settings,"settingsWarnings":warnings,"prices":fs::read_to_string(root.join("prices.json")).map_err(|e|e.to_string())?,"dataDir":root,"agents":config::AGENTS,"autostart":autostart_enabled(app)?}),
             )
         }
         "status" => {
@@ -79,13 +93,8 @@ fn dispatch(app: &tauri::AppHandle, method: &str, args: Value) -> Result<Value, 
             Ok(json!({"saved":true}))
         }
         "autostart" => {
-            if args["enabled"] == true {
-                app.autolaunch().enable()
-            } else {
-                app.autolaunch().disable()
-            }
-            .map_err(|e| e.to_string())?;
-            Ok(json!({"enabled":app.autolaunch().is_enabled().map_err(|e|e.to_string())?}))
+            set_autostart(app, args["enabled"] == true)?;
+            Ok(json!({"enabled":autostart_enabled(app)?}))
         }
         "logs" => {
             Ok(json!({"text":fs::read_to_string(root.join("service.log")).unwrap_or_default()}))
@@ -150,6 +159,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
+                .app_name("TokenMonitor")
                 .args(["--background"])
                 .build(),
         )

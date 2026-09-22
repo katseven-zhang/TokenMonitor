@@ -2,7 +2,13 @@
 use crate::model::{normalize_model, Activity, Event, Parsed, Quota, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, fs, io::Read, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Read,
+    path::Path,
+    time::Duration,
+};
 
 pub fn timestamp(v: &Value) -> Option<i64> {
     if let Some(n) = v.as_f64() {
@@ -650,6 +656,29 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
                     }
                 }
             }
+            "qoder" => {
+                session = first(&[string(&rec, "sessionId"), string(&rec, "session_id")], &session);
+                project = first(&[string(&rec, "cwd")], &project);
+                if kind != "assistant" { continue; }
+                let u = &msg["usage"];
+                let model = string(msg, "model");
+                if model == "<synthetic>" || !u.is_object() { continue; }
+                let Some(credits) = u["credits"].as_f64().filter(|n| n.is_finite() && *n >= 0.0) else { continue; };
+                let request_id = first(&[string(u, "request_id"), string(&rec["requestTokenAnchor"], "requestId")], "");
+                if request_id.is_empty() { out.malformed_lines += 1; continue; }
+                // Keep per-request timestamps and identity. Parent/sidechain/archive
+                // copies are deduplicated globally before range filtering, not dropped.
+                out.quotas.push(Quota {
+                    agent: agent.into(), session: request_id.clone(), ts,
+                    payload: json!({"session_id":session,"request_id":request_id,
+                        "model":model,"project":project,"requests":1,"credits":credits,
+                        "original_credits":u.get("original_credits"),
+                        "billable_requests":u["billable"].as_bool().map(i64::from),
+                        "context_usage_ratio":u.get("context_usage_ratio"),
+                        "models":if model.is_empty() {json!({})} else {json!({model:1})},
+                        "last_ts":ts}),
+                });
+            }
             _ => {}
         }
         if let Some(t) = tokens {
@@ -736,6 +765,85 @@ pub fn read_jsonl(agent: &str, path: &Path) -> Result<Parsed, String> {
     let text = decode_jsonl_bytes(&bytes);
     Ok(parse_jsonl(agent, &path.display().to_string(), &text))
 }
+/// 会话状态里的累计 token。**口径**：真机载荷把累计值放在 `total`
+/// （`{latest, total:{…}, credits}`），且 `total.input_tokens` 已经把
+/// `cache_read_input_tokens` 含在内（OpenAI 口径）——`usage` /
+/// `total_token_usage` 与挂在 `data` 下的同名位置只作兼容候选。
+/// 库内 `input` 列按 `docs/ARCHITECTURE.md` 只放"新输入"，故走 `openai()`
+/// 拆成 新输入 / 缓存命中 两列：拆完 `total = input + cached + cache_write +
+/// output` 恰等于真机的 `input_tokens + cache_creation + output_tokens`，
+/// 缓存读不会被算两遍。`credits` 子对象是计费刻度而非 token 量，不作为候选。
+fn qoder_state_tokens(v: &Value) -> Option<Tokens> {
+    let candidates: Vec<&Value> = [
+        v.get("total"),
+        v.get("usage"),
+        v.get("total_token_usage"),
+        v.get("data").and_then(|d| d.get("total")),
+        v.get("data").and_then(|d| d.get("usage")),
+        v.get("data").and_then(|d| d.get("total_token_usage")),
+        Some(v),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|c| c.is_object())
+    .collect();
+    for c in candidates {
+        if ["input_tokens", "output_tokens"].iter().any(|k| c[*k].as_i64().is_none_or(|n|n<0)) {
+            continue;
+        }
+        if ["cache_read_input_tokens","cache_creation_input_tokens","reasoning_output_tokens"].iter().any(|k| c.get(*k).is_some_and(|v|v.as_i64().is_none_or(|n|n<0))) {continue;}
+        if number(c,"cache_read_input_tokens")>number(c,"input_tokens") {continue;}
+        let t = openai(c);
+        return Some(t); // A valid zero is a counter-reset watermark, not corrupt data.
+    }
+    None
+}
+
+/// Normalized plaintext cumulative usage; authenticated reading lives in qoder.rs.
+pub fn parse_qoder_state(path: &str, text: &str) -> Parsed {
+    let mut out = Parsed::default();
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        out.malformed_lines += 1; // 写一半/坏 JSON：降级，不抛
+        return out;
+    };
+    let session = string(&v, "sessionId");
+    if session.is_empty() {
+        return out; // 不是会话状态（同名文件在别处也合法存在）
+    }
+    // 水位键：实测是 ISO 字符串，也容忍 epoch 数字——只认一种形态的代价是
+    // 整源静默零事件（与 Node 的 stateWatermarkOf 同口径）
+    let updated = match v.get("updatedAt") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    if updated.is_empty() {
+        out.malformed_lines += 1; // 没有水位就无法判重
+        return out;
+    }
+    let Some(tokens) = qoder_state_tokens(&v) else {
+        out.malformed_lines += 1; // 密文载荷或字段缺失：按缺数据降级
+        return out;
+    };
+    let ts = timestamp(&v["updatedAt"]).unwrap_or(0);
+    if ts <= 0 {
+        out.malformed_lines += 1;
+        return out;
+    }
+    out.events.push(Event {
+        id: format!("{session}|{updated}"),
+        agent: "qoder".into(),
+        session,
+        project: first(&[string(&v, "cwd"), string(&v["data"], "cwd")], ""),
+        model: first(&[string(&v, "model"), string(&v["data"], "model")], "unknown"),
+        ts,
+        tokens,
+        path: path.into(),
+        line: 0,
+    });
+    out
+}
+
 fn readonly(path: &Path) -> Result<Connection, String> {
     let db = Connection::open_with_flags(
         path,
@@ -748,6 +856,7 @@ fn readonly(path: &Path) -> Result<Connection, String> {
 }
 pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
     let db = readonly(path)?;
+    db.execute_batch("BEGIN").map_err(|e|e.to_string())?;
     let mut out = Parsed::default();
     let source = path.display().to_string();
     if agent == "zcode" {
@@ -813,7 +922,7 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
             };
             tool(&mut out, agent, &s, t, &n, &id.to_string(), &source, 0);
         }
-    } else if agent == "opencode" {
+    } else if agent == "opencode" || agent == "xiaomi-mimo" {
         let mut stmt=db.prepare("SELECT m.id,m.session_id,m.time_created,m.data,COALESCE(s.directory,'') FROM message m LEFT JOIN session s ON s.id=m.session_id").map_err(|e|e.to_string())?;
         let rows = stmt
             .query_map([], |r| {
@@ -840,13 +949,20 @@ pub fn read_sqlite(agent: &str, path: &Path) -> Result<Parsed, String> {
                 continue;
             }
             let t = &v["tokens"];
+            if !t.is_object() { continue; }
+            if ["input","output"].iter().any(|k| t[*k].as_i64().is_none_or(|n|n<0)) {out.malformed_lines+=1;continue;}
             let tokens = Tokens {
                 input: number(t, "input"),
                 cached: number(&t["cache"], "read"),
                 cache_write: number(&t["cache"], "write"),
-                output: number(t, "output"),
+                // MiMo reasoning is additional to its raw output.
+                output: number(t, "output") + if agent == "xiaomi-mimo" {number(t,"reasoning")} else {0},
                 reasoning: number(t, "reasoning"),
             };
+            if agent == "xiaomi-mimo" && t["total"].as_i64().is_some_and(|total| total>0 && total!=tokens.total()) {
+                out.malformed_lines += 1;
+                continue;
+            }
             if tokens.total() > 0 {
                 out.events.push(Event {
                     id,
@@ -1289,7 +1405,7 @@ mod tests {
         assert_eq!(p.malformed_lines, 0, "BOM 行不得计成畸形行");
         assert_eq!(p.events.len(), 1);
         assert_eq!(p.events[0].session, "bom-session");
-        assert_eq!(p.events[0].project, "Q:/fixture");
+        assert_eq!(p.events[0].project, "fixture");
     }
     /// #71: 浮点 token 字段（JS/Python 写手把 1000000 序列化成 1000000.0、5e3）
     /// 修前 as_i64→None，整列静默归零。现在向下取整接受；负数照旧钳 0（宁少不多）。
@@ -2115,5 +2231,76 @@ mod collector_parity_tests {
             let got = project_name(input);
             assert_eq!(got, want, "{input:?}");
         }
+    }
+
+    #[test]
+    fn qoder_transcript_feeds_credits_plane_never_token_events() {
+        // 转录里 token 字段恒 0（真机即如此）：这一面只能进 credits 观测。
+        let s = r#"{"type":"assistant","timestamp":1800000000000,"sessionId":"q-s","cwd":"D:\\我的 项目","message":{"model":"QF","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"credits":0.25,"original_credits":0.25,"billable":true,"request_id":"r1","context_usage_ratio":0.2}}}
+{"type":"assistant","timestamp":1800000001000,"sessionId":"q-s","message":{"model":"QF","usage":{"input_tokens":9999,"output_tokens":9999,"credits":0.25,"request_id":"r1"}}}
+{"type":"assistant","timestamp":1800000002000,"sessionId":"q-s","isSidechain":true,"message":{"model":"QF","usage":{"credits":2,"request_id":"side1"}}}
+{"type":"assistant","timestamp":1800000003000,"sessionId":"q-s","message":{"model":"<synthetic>","usage":{"credits":5,"request_id":"r2"}}}
+{"type":"assistant","timestamp":1800000004000,"sessionId":"q-s","message":{"model":"QF","usage":{"credits":0.125}}}"#;
+        let p = parse_jsonl("qoder", "q.jsonl", s);
+        assert!(p.events.is_empty(), "credits 面不得产 token 事件");
+        assert_eq!(p.quotas.len(), 3, "{:?}", p.quotas);
+        let payload = &p.quotas[0].payload;
+        assert_eq!(payload["requests"], 1, "{payload}");
+        assert_eq!(payload["credits"], 0.25, "{payload}");
+        assert_eq!(payload["billable_requests"], 1);
+        assert_eq!(payload["context_usage_ratio"], 0.2);
+        assert_eq!(payload["session_id"], "q-s");
+        assert_eq!(payload["project"], "D:\\我的 项目");
+        // 缺 request_id 的那条：想记而记不了，才是 health 的 warning
+        assert_eq!(p.malformed_lines, 1, "{:?}", p.malformed_lines);
+    }
+
+    #[test]
+    fn qoder_state_watermark_and_degradation() {
+        // 真机口径：total.input_tokens 已含 cache_read ⇒ 入库拆成 新输入/缓存命中
+        // （120 含 50 ⇒ 70/50/5/40 = 165，缓存不被算两遍）
+        let plain = r#"{"sessionId":"q1","revision":3,"updatedAt":"2026-09-20T00:00:00Z","model":"m","cwd":"D:\\repo","total":{"input_tokens":120,"cache_read_input_tokens":50,"cache_creation_input_tokens":5,"output_tokens":40,"reasoning_output_tokens":10,"credits":{"used":0,"remaining":0}}}"#;
+        let p = parse_qoder_state("state.json", plain);
+        assert_eq!(p.events.len(), 1, "{:?}", p.events);
+        assert_eq!(p.events[0].id, "q1|2026-09-20T00:00:00Z");
+        assert_eq!(p.events[0].tokens.input, 70, "新输入必须扣掉已含的缓存读");
+        assert_eq!(p.events[0].tokens.cached, 50);
+        assert_eq!(p.events[0].tokens.cache_write, 5);
+        assert_eq!(p.events[0].tokens.output, 40);
+        assert_eq!(p.events[0].tokens.total(), 165);
+        assert_eq!(p.events[0].tokens.reasoning, 10); // 单列，不重复计入 total
+        assert!(p.events[0].ts > 0);
+        assert_eq!(p.events[0].project, "D:\\repo");
+        assert_eq!(p.malformed_lines, 0);
+        // 兼容别名：早期版本把累计值放在 usage
+        let alias = plain.replace("\"total\":", "\"usage\":");
+        assert_eq!(
+            parse_qoder_state("state.json", &alias).events[0]
+                .tokens
+                .total(),
+            165
+        );
+        // 水位容忍 epoch 数字（只认 ISO 的后果是整源静默零事件）
+        let epoch = r#"{"sessionId":"q1e","updatedAt":1790000000000,"total":{"input_tokens":30,"output_tokens":6}}"#;
+        let e = parse_qoder_state("state.json", epoch);
+        assert_eq!(e.events.len(), 1, "{:?}", e.malformed_lines);
+        assert_eq!(e.events[0].id, "q1e|1790000000000");
+        assert_eq!(e.events[0].tokens.total(), 36);
+
+        // 真机形态：items.* 是 AES-GCM 密文。桌面端不碰密钥材料，只降级。
+        let sealed = r#"{"sessionId":"q2","updatedAt":"2026-09-20T00:00:00Z","items":{"s0":{"n":"AAAAAAAAAAAAAAAA","p":"Qg==","t":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}"#;
+        let s = parse_qoder_state("state.json", sealed);
+        assert!(s.events.is_empty());
+        assert_eq!(s.malformed_lines, 1);
+
+        // 坏 JSON / 缺水位 / 同名但非会话状态：都不抛，也不谎报降级
+        assert_eq!(parse_qoder_state("x", "{\"sessionId\":").malformed_lines, 1);
+        assert_eq!(parse_qoder_state("y", "{\"version\":2,\"state\":{}}").malformed_lines, 0);
+        assert!(parse_qoder_state("y", "{\"version\":2,\"state\":{}}").events.is_empty());
+        assert_eq!(
+            parse_qoder_state("z", "{\"sessionId\":\"q3\"}").malformed_lines,
+            1,
+            "缺 updatedAt 就无法判重"
+        );
     }
 }

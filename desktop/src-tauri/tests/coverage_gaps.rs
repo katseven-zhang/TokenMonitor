@@ -100,7 +100,7 @@ fn invalid_iana_time_zone_fails_every_read_path_that_accepts_one() {
     // 黄金数：codex 累计口径 input 100 含缓存 40 → input 60 + cached 40 + output 5。
     let ok = service::query_local(&root, "dashboard", &window("Asia/Shanghai")).unwrap();
     assert_eq!(ok["totals"]["totalTokens"], 105, "夹具本身要能出数");
-    assert_eq!(ok["eventCount"], 1);
+    assert_eq!(ok["totals"]["events"], 1);
     assert!(ok["days"].as_array().unwrap().len() >= 1, "日历/分桶没有可用行，下面的时区断言就是空跑：{}", ok["days"]);
     for zone in ["Mars/Olympus_Mons", "Asia/Shangai", "UTC+9"] {
         for method in ["dashboard", "events"] {

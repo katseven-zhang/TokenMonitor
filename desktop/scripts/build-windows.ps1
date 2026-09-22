@@ -6,6 +6,7 @@ $desktopRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $desktopRoot '..'))
 $outputRoot = Join-Path $repositoryRoot 'dist\desktop-windows-x64'
 $archivePath = Join-Path $repositoryRoot 'dist\TokenMonitor-desktop-windows-x64.zip'
+. (Join-Path $repositoryRoot 'scripts\package-common.ps1')
 $exePath = Join-Path $desktopRoot 'src-tauri\target\release\TokenMonitor.exe'
 # #102：产物版本只有一个真相来源——src-tauri/tauri.conf.json 的 `version`。
 # 它以前是这里写死的 '2.0.0'：改了 tauri.conf.json 发出去的包仍然自称 2.0.0，
@@ -13,14 +14,7 @@ $exePath = Join-Path $desktopRoot 'src-tauri\target\release\TokenMonitor.exe'
 # verify-package.ps1 现在拿 manifest 的 version 反查这个文件，漂移即红。
 $tauriConfigPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
 
-# #74：指纹必须覆盖所有会改变产物的输入。`tsconfig.json` 以前不在表里——改它
-# （strict、target、paths 等）会改变 vite/tsc 的产物，但 `-SkipBuild` 的 stamp 校验
-# 认为源码没动，于是把旧 exe 当成新配置的成果打包。test/run.mjs 的 [28] 段守住
-# "表里每个路径真实存在"，改名/漏项不会再静默缩小指纹。
-# #102：变量名从 `$inputs` 改为 `$fingerprintInputs`。`$input` 是 PowerShell 的自动
-# 变量（管道里当前对象的可枚举形式），`$inputs` 与它只差一个字母，在
-# `Set-StrictMode -Version Latest` 下这类"看着像自动变量"的名字就是雷（仓库里另一条
-# 打包脚本 scripts/build-windows.ps1 已经开了 Set-StrictMode），改名消除歧义。
+# Every input affecting frontend or native assets participates in the stale-build check.
 $fingerprintInputs = @('src','src-tauri\src','src-tauri\icons','src-tauri\capabilities','config','src-tauri\tauri.conf.json','src-tauri\Cargo.toml','src-tauri\Cargo.lock','src-tauri\build.rs','package.json','package-lock.json','tsconfig.json','vite.config.ts','tailwind.config.ts','postcss.config.cjs','index.html')
 function Get-PackageFingerprint([string[]]$Paths) {
     $fingerprint = [Text.StringBuilder]::new()
@@ -33,15 +27,27 @@ function Get-PackageFingerprint([string[]]$Paths) {
     try { return [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprint.ToString()))) } finally { $sha.Dispose() }
 }
 
-# #102：版本从这里读，不再写死。放在构建开始处而不是写 manifest 处，是为了 fail fast：
-# 宁可现在红，也不要花四十多分钟编完 Rust 再往 manifest 里写一个不诚实的版本号。
-if (-not (Test-Path -LiteralPath $tauriConfigPath)) { throw "Missing tauri config: $tauriConfigPath" }
-$tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
-$appVersion = [string]$tauriConfig.version
-if ([string]::IsNullOrWhiteSpace($appVersion)) { throw 'src-tauri/tauri.conf.json declares no version; refusing to write a manifest with a made-up one.' }
-
+$publishingStarted = $false
 Push-Location $desktopRoot
 try {
+    # Invalidate publishable artifacts before a build/stamp failure can leave a
+    # previous package looking current. Only these two fixed files are removed.
+    Assert-PlainTree (Split-Path $outputRoot -Parent)
+    Assert-InstallStopped $outputRoot
+    $publishingStarted = $true
+    foreach ($artifact in @((Join-Path $outputRoot 'manifest.json'),$archivePath)) {
+        if (Test-Path -LiteralPath $artifact) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw "Expected artifact file: $artifact" }
+            Remove-Item -LiteralPath $artifact -Force
+        }
+    }
+    # #102：版本从这里读，不再写死。放在构建开始处而不是写 manifest 处，是为了 fail fast：
+    # 宁可现在红，也不要花四十多分钟编完 Rust 再往 manifest 里写一个不诚实的版本号。
+    if (-not (Test-Path -LiteralPath $tauriConfigPath)) { throw "Missing tauri config: $tauriConfigPath" }
+    $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
+    $appVersion = [string]$tauriConfig.version
+    if ([string]::IsNullOrWhiteSpace($appVersion)) { throw 'src-tauri/tauri.conf.json declares no version; refusing to write a manifest with a made-up one.' }
+
     if (-not $SkipBuild) {
         $beforeBuild = Get-PackageFingerprint $fingerprintInputs
         & npm.cmd run build
@@ -67,17 +73,10 @@ try {
     } else {
         @{version=2;sourceHash=$sourceHash;binaryHash=$binaryHash} | ConvertTo-Json | Set-Content -LiteralPath $stampPath -Encoding utf8
     }
-    # #102：输出目录必须先清后建。以前这里只有 New-Item -Force（存在即放过），于是上一轮
-    # 构建留在 $outputRoot 里的文件会一起进包——verify-package.ps1 的白名单比对
-    # （Compare-Object $expected $actual）会把它报成 "Distribution whitelist mismatch"，
-    # 报的还是"包里有不该有的东西"这种看起来像白名单写错的样子，真实原因（没清理）
-    # 完全看不出来。清理范围就是这一个目录，不放宽到 dist\ 的其他内容
-    # （legacy dist\windows-x64 与它同级，属于旧版发布线，必须留着）。
-    # 删之前先核对解析出来的绝对路径，路径被改写时宁可失败也不误删。
+    Assert-PlainTree $outputRoot
     if (Test-Path -LiteralPath $outputRoot) {
-        $resolved = (Resolve-Path -LiteralPath $outputRoot).Path
-        if ($resolved -ine $outputRoot) { throw "Refusing to clean unexpected path: $resolved" }
-        Remove-Item -LiteralPath $outputRoot -Recurse -Force
+        $unexpected = @(Get-ChildItem -LiteralPath $outputRoot -Force | Where-Object { $_.Name -notin @($PackageFiles + 'manifest.json') -or $_.PSIsContainer })
+        if ($unexpected.Count) { throw 'Output contains unknown files or data; preserve them before rebuilding.' }
     }
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
     # Fixed explicit distribution whitelist. Never enumerate runtime data into an archive.
@@ -86,6 +85,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'README.md') -Destination (Join-Path $outputRoot 'README.md') -Force
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'LICENSE.codex-usage-desktop') -Destination (Join-Path $outputRoot 'LICENSE.codex-usage-desktop') -Force
     Copy-Item -LiteralPath (Join-Path $desktopRoot 'config\prices.json') -Destination (Join-Path $outputRoot 'prices.example.json') -Force
+    foreach ($name in @('install-windows.ps1','uninstall-windows.ps1','package-common.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $repositoryRoot "scripts\$name") -Destination (Join-Path $outputRoot $name) -Force
+    }
 
     $notices = [Text.StringBuilder]::new()
     [void]$notices.AppendLine('TokenMonitor Desktop — third-party licenses (including build dependencies)')
@@ -118,7 +120,7 @@ try {
         }
     }
     [IO.File]::WriteAllText((Join-Path $outputRoot 'THIRD-PARTY-NOTICES.txt'),$notices.ToString(),[Text.UTF8Encoding]::new($false))
-    $names = @('TokenMonitor.exe','LICENSE','README.md','LICENSE.codex-usage-desktop','prices.example.json','THIRD-PARTY-NOTICES.txt')
+    $names = $PackageFiles
     $files = foreach ($name in $names) {
         $path = Join-Path $outputRoot $name
         [pscustomobject][ordered]@{name=$name;bytes=(Get-Item -LiteralPath $path).Length;sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
@@ -132,9 +134,20 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed (exit $LASTEXITCODE); refusing to stamp a release with no revision." }
     $revision = ([string]$revisionOutput).Trim()
     if ($revision -notmatch '^[0-9a-f]{7,40}$') { throw "git rev-parse HEAD did not return a commit SHA (got '$revision')." }
-    $manifest = [ordered]@{product='TokenMonitor Desktop';version=$appVersion;platform='windows-x64';revision=$revision;sourceHash=$sourceHash.ToLowerInvariant();builtAtUtc=[DateTime]::UtcNow.ToString('o');runtime='system WebView2; no bundled Node';files=@($files)}
+    $manifest = [ordered]@{product='TokenMonitor';version=$appVersion;platform='windows-x64';revision=$revision;sourceHash=$sourceHash.ToLowerInvariant();builtAtUtc=[DateTime]::UtcNow.ToString('o');runtime='system WebView2; no bundled Node';files=@($files)}
     $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $outputRoot 'manifest.json') -Encoding utf8
     $archiveInputs = @($names + 'manifest.json') | ForEach-Object { Join-Path $outputRoot $_ }
     Compress-Archive -LiteralPath $archiveInputs -DestinationPath $archivePath -Force
     [pscustomobject]@{ExecutableBytes=(Get-Item -LiteralPath $exePath).Length;ApplicationBytes=($files | Measure-Object bytes -Sum).Sum;ArchiveBytes=(Get-Item -LiteralPath $archivePath).Length;Directory=$outputRoot;Archive=$archivePath} | ConvertTo-Json
+} catch {
+    # Also cover failures after manifest creation, such as ZIP compression.
+    if ($publishingStarted) {
+        foreach ($artifact in @((Join-Path $outputRoot 'manifest.json'),$archivePath)) {
+            if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+                Assert-PlainTree $artifact
+                Remove-Item -LiteralPath $artifact -Force
+            }
+        }
+    }
+    throw
 } finally { Pop-Location }

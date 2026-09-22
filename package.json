@@ -1,63 +1,16 @@
 {
   "name": "tokenmonitor",
-  "version": "1.4.3",
-  "description": "Local real-time token usage & quota dashboard for AI coding agents (Claude Code, ccmr, Codex, ZCode, dsh, WorkBuddy, Grok Build, Pi, OpenCode)",
-  "keywords": [
-    "token",
-    "usage",
-    "dashboard",
-    "quota",
-    "cost",
-    "llm",
-    "ai-agent",
-    "claude-code",
-    "codex",
-    "observability",
-    "cli",
-    "macos",
-    "windows"
-  ],
-  "homepage": "https://github.com/katseven-zhang/TokenMonitor#readme",
-  "bugs": {
-    "url": "https://github.com/katseven-zhang/TokenMonitor/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/katseven-zhang/TokenMonitor.git"
-  },
-  "license": "MIT",
-  "author": "TokenMonitor contributors",
+  "version": "2.1.0",
+  "private": true,
   "type": "module",
-  "bin": {
-    "tokenmonitor": "bin/tokenmonitor.js"
-  },
-  "main": "src/server.js",
+  "description": "Local Agent usage desktop application",
+  "license": "MIT",
   "scripts": {
-    "scan": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js scan",
-    "serve": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js serve",
-    "today": "node --disable-warning=ExperimentalWarning bin/tokenmonitor.js today",
-    "bar": "open bin/tokenmonitor.app",
-    "build-bar": "bash menubar/build.sh",
-    "install-agent": "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tokenmonitor.server.plist",
-    "uninstall-agent": "launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.tokenmonitor.server.plist",
-    "test": "node --disable-warning=ExperimentalWarning test/run.mjs",
-    "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
-    "prepack": "bash menubar/build.sh"
-  },
-  "engines": {
-    "node": ">=22.13"
-  },
-  "dependencies": {
-    "echarts": "^5.5.0",
-    "fzstd": "^0.1.1"
-  },
-  "files": [
-    "bin/tokenmonitor.js",
-    "bin/tokenmonitor.app/",
-    "src/",
-    "web/",
-    "README.md",
-    "LICENSE",
-    "docs/ARCHITECTURE.md"
-  ]
+    "dev": "npm run desktop:dev --prefix desktop",
+    "build": "npm run build --prefix desktop",
+    "test": "node desktop/scripts/retirement-check.mjs && npm test --prefix desktop",
+    "test:rust": "cargo test --offline --locked --manifest-path desktop/src-tauri/Cargo.toml",
+    "test:retirement": "node desktop/scripts/retirement-check.mjs",
+    "build:windows": "pwsh -NoProfile -File scripts/build-windows.ps1"
+  }
 }

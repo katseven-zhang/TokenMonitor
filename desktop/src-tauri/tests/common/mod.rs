@@ -1,7 +1,5 @@
-//! Shared synthetic ten-source fixtures (`tests/sources.rs` and
-//! `tests/parity.rs` both drive the *same* files through the *same* scanner, so
-//! the Node↔Rust comparison is over data the Rust side really indexed).
-//! Everything is synthetic: temp dirs under `%TEMP%` and fake drive letters.
+//! Synthetic ten-source fixtures for native scanner/accounting integration tests.
+//! All state stays in temporary directories. No user logs are read.
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use std::{

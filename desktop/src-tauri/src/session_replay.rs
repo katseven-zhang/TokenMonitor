@@ -2743,7 +2743,7 @@ mod tests {
             cost_usd: 0.0,
             models: BTreeMap::from([("glm-5.3-flash".to_string(), ModelUsage::default())]),
             projects: BTreeMap::new(),
-            updated_at: "2026-06-01T00:00:00.000Z".to_string(),
+            unpriced_events: 0,
         }];
         let detail = parse_session_detail(record, raw.clone());
         let events: Vec<_> = detail
@@ -3476,6 +3476,7 @@ mod tests {
                             reasoning_output_tokens: 5,
                             total_tokens: 135,
                             cost_usd: 0.5,
+                            unpriced_events: 0,
                             models: BTreeMap::new(),
                             projects: BTreeMap::new(),
                         })

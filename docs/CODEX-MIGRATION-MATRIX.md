@@ -1,3 +1,5 @@
+> 历史记录：本文保留原版本的设计或验收事实；当前单一桌面产品与旧版退役状态见 [迁移记录](RETIRE-LEGACY-123.md) 和 [Windows 说明](WINDOWS.md)。
+
 # Codex reference migration coverage
 
 Reference: local `codex-usage-desktop-main` v3.3.0. This is a coverage checklist, not a claim of complete parity. The user's pure-local requirement overrides reference features that need online accounts or services.

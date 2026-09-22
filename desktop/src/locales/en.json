@@ -363,7 +363,7 @@
     "per_page_label": "Per page"
   },
   "quota": {
-    "title": "Codex quota · observed locally",
+    "title": "Quota and billing · local observations",
     "observed_at": "Logged at {{value}}",
     "none_yet": "No local quota record yet",
     "disclaimer": "Each card shows the last log observation before the query end, not a live balance. Account quota cannot be split by model or project, and the token query range is not the quota billing window.",
@@ -481,5 +481,22 @@
     "close_aria": "Close the enlarged trend",
     "dialog_title": "Usage trend · {{bucket}} buckets",
     "legend_note": "Click a legend entry to show or hide a series; a gap in cost means that bucket was not fully priced."
+  },
+  "credits": {
+    "title": "Session billing observations",
+    "sessions": "{{count}} sessions · requests accumulated within query range",
+    "none_yet": "No local quota or billing records yet",
+    "disclaimer": "Credits are product subscription billing units, separate from currency and model costs. Missing prices do not trigger credit warnings. Context usage shows the session peak against the provider window. Missing values are shown as —, not zero.",
+    "source": "Source",
+    "recent": "Latest request",
+    "session": "Session",
+    "project": "Project",
+    "requests": "Requests",
+    "credits": "Credits",
+    "original": "Original credits",
+    "billable": "Billable requests",
+    "context": "Peak context",
+    "models": "Models / degradation",
+    "no_project": "No project recorded"
   }
 }

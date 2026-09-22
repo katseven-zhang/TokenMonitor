@@ -15,6 +15,8 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("pi", "Pi"),
     ("opencode", "OpenCode"),
     ("antigravity", "Antigravity"),
+    ("qoder", "Qoder"),
+    ("xiaomi-mimo", "Xiaomi MiMo Desktop"),
 ];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +92,15 @@ impl Default for Settings {
                 .map(|p| p.join("conversation_summaries.db").display().to_string())
                 .collect(),
         );
+        // Qoder CN：只注册 ~/.qoder-cn/projects（#105 的硬隐私边界）。同族的
+        // .qwenworkcn/.qoderwork/.qoderworkcn/.qmind/.qoder/.qoder-cli 一律不发现、
+        // 不扫描、不注册；.auth 永不进 roots。自定义目录由设置显式指定。
+        let qoder = home.join(".qoder-cn");
+        roots.insert(
+            "qoder".into(),
+            vec![qoder.join("projects").display().to_string()],
+        );
+        roots.insert("xiaomi-mimo".into(), vec![home.join(".local/share/mimocode/mimocode.db").display().to_string()]);
         Self {
             // #87：桌面版让位。旧版 Node 后台的默认端口是 8787（src/config.js::DEFAULT_PORT），
             // 两个产品同仓共存时抢同一个回环端口，谁先起谁赢，输的那个此前毫无提示。
@@ -131,10 +142,20 @@ pub fn data_dir() -> PathBuf {
     std::env::var_os("TOKENMONITOR_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("TokenMonitor2")
+            default_data_dir(&dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")))
         })
+}
+pub fn default_data_dir(local: &Path) -> PathBuf {
+    let current = local.join("TokenMonitor");
+    let previous = local.join("TokenMonitor2");
+    // Existing desktop users keep their exact cache/settings. New installations
+    // use the canonical product root. Never merge incompatible Node databases.
+    if !current.join("settings.json").exists()
+        && (previous.join("settings.json").exists() || previous.join("events-v2.sqlite").exists()) {
+        previous
+    } else {
+        current
+    }
 }
 pub fn initialize(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
@@ -159,8 +180,14 @@ pub fn settings(root: &Path) -> Result<Settings, String> {
     // #113: every failure here must say *which* file and *which* field, otherwise
     // the user gets "config error" with nothing to act on.
     let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let s: Settings = serde_json::from_str(&text)
+    let mut s: Settings = serde_json::from_str(&text)
         .map_err(|e| format!("{}: {e}{}", path.display(), top_level_types(&text)))?;
+    // Older settings predate these adapters. Preserve explicitly empty roots and
+    // disabled agents; only absent source keys receive the new defaults.
+    let defaults = Settings::default();
+    for agent in ["qoder", "xiaomi-mimo"] {
+        s.roots.entry(agent.into()).or_insert_with(|| defaults.roots[agent].clone());
+    }
     s.validate()
         .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(s)
@@ -231,7 +258,7 @@ mod tests_unknown_keys {
     #[test]
     fn unknown_keys_are_ignored_listed_and_round_tripped() {
         let root = root_with(
-            r#"{"port":9999,"refreshSeconds":60,"roots":{},"disabledAgents":[],"themeMode":"dark","nested":{"a":1}}"#,
+            r#"{"port":9999,"refreshSeconds":60,"roots":{"qoder":[],"xiaomi-mimo":[]},"disabledAgents":[],"themeMode":"dark","nested":{"a":1}}"#,
         );
         let s = settings(&root).expect("含未知键的 settings.json 必须仍能加载");
         assert_eq!(s.port, 9999);
@@ -252,7 +279,7 @@ mod tests_unknown_keys {
     /// 用户面对两个数据根（便携/源码）时无法知道改哪个文件。
     #[test]
     fn errors_name_the_file_and_the_field() {
-        let root = root_with(r#"{"port":"8787","refreshSeconds":60,"roots":{},"disabledAgents":[]}"#);
+        let root = root_with(r#"{"port":"8787","refreshSeconds":60,"roots":{"qoder":[],"xiaomi-mimo":[]},"disabledAgents":[]}"#);
         let err = settings(&root).unwrap_err();
         assert!(err.contains("settings.json"), "{err}");
         assert!(err.contains(&root.display().to_string()), "错误里必须有完整路径：{err}");
