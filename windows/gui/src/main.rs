@@ -72,6 +72,46 @@ pub const EMPTY_LOG_TEXT: &str = "（暂无日志）";
 /// #60：候选数据根（混用场景）：打包形态根优先，其后是源码形态 runtimeDir 根。
 /// GUI 与后台可能不同形态启动；主根优先，主根无日志时 refresh_log 切换到备用根，绝不混写游标
 /// （每个根独立 tail，切换时清空缓冲重来，#34/#39 语义不变）。
+/// #89：旧版源码形态运行数据目录的两个名字。新装机器用 `TokenMonitor-Server`——
+/// `TokenMonitor` 与桌面版 NSIS 在 installMode=currentUser 下的默认安装目录
+/// （`%LOCALAPPDATA%\<productName>`）完全同路径，卸载桌面版会把旧版的日志和运行锁
+/// 连根删掉。已经在旧目录里留过日志/锁的老用户继续用旧目录：改名会把他们的历史日志
+/// 变成孤儿。判据与 src/config.js::hasLegacyRunArtifacts 一一对应，改一侧必须改另一侧。
+pub const RUNTIME_DIR_NAME: &str = "TokenMonitor-Server";
+pub const LEGACY_SHARED_RUN_DIR_NAME: &str = "TokenMonitor";
+
+/// 这个目录看起来是不是旧版自己的运行数据（只认旧版会留下的两类文件）。
+/// 判错的代价不对称：误判成"是"会让旧版继续住在桌面版的卸载目录里，正是本函数要
+/// 避开的那个坑，所以读不动目录一律按"不是"处理。
+fn has_legacy_run_artifacts(dir: &std::path::Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("tokenmonitor-") && name.ends_with(".lock") {
+                return true;
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(dir.join("logs")) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("tokenmonitor") && name.ends_with(".log") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 源码形态下所有可能的运行数据根（新名字 + #89 改名前的旧名字），供候选根列表用：
+/// 旧版到底住在哪一个取决于本机有没有历史日志，GUI 两种都要能找到。
+fn candidate_runtime_roots(local_app_data: &str) -> Vec<PathBuf> {
+    [RUNTIME_DIR_NAME, LEGACY_SHARED_RUN_DIR_NAME]
+        .iter()
+        .map(|n| Path::new(local_app_data).join(n))
+        .collect()
+}
+
 pub fn candidate_data_roots(
     app_root: Option<&Path>,
     env_data_dir: Option<&str>,
@@ -85,9 +125,12 @@ pub fn candidate_data_roots(
     if is_windows {
         if let Some(la) = local_app_data {
             if !la.trim().is_empty() {
-                let alt = Path::new(la).join("TokenMonitor").to_path_buf();
-                if !roots.iter().any(|r| r == &alt) {
-                    roots.push(alt);
+                // #89：改名后新旧两个名字都可能是旧版实际在用的那个，两个都列为候选根，
+                // 主根没有日志时备用根仍然找得到日志（否则会静默显示"暂无日志"）。
+                for alt in candidate_runtime_roots(la) {
+                    if !roots.iter().any(|r| r == &alt) {
+                        roots.push(alt);
+                    }
                 }
             }
         }
@@ -143,7 +186,14 @@ pub fn resolve_data_root(
     if is_windows {
         if let Some(la) = local_app_data {
             if !la.trim().is_empty() {
-                return Path::new(la).join("TokenMonitor").to_path_buf();
+                // 与 src/config.js::resolveDataLocations 同一条规则（#89）：
+                // 老用户原地继续，新装机器不再住进桌面版的卸载目录。
+                let shared = Path::new(la).join(LEGACY_SHARED_RUN_DIR_NAME);
+                return if has_legacy_run_artifacts(&shared) {
+                    shared
+                } else {
+                    Path::new(la).join(RUNTIME_DIR_NAME)
+                };
             }
         }
     }

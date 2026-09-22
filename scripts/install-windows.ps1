@@ -14,7 +14,11 @@
   Upgrade safety: the candidate is staged and validated (node --version and
   tokenmonitor --version both run) BEFORE the existing install is replaced;
   the old install is kept as a rollback copy until the new one verifies, and
-  is restored automatically if verification fails.
+  is restored automatically if verification fails.  User data is moved to
+  <InstallRoot>\TokenMonitor-data and only ever moves back AFTER the new
+  install has verified, so it is never inside a directory that is about to be
+  recursively deleted; every recursive delete goes through one guarded helper
+  that stashes a data\ folder out of the tree first (#100).
 
   Every root can be overridden (-InstallRoot/-StartMenuRoot/-DesktopRoot),
   which is how automated dry-runs run entirely inside temp directories
@@ -79,6 +83,48 @@ foreach ($rel in @('runtime\node.exe', 'runtime\bin\tokenmonitor.js', 'runtime\p
   if (-not (Test-Path -LiteralPath (Join-Path $srcFull $rel))) { Fail "candidate is missing $rel" }
 }
 
+# --- manifest integrity (#101): the SHA-256 list finally gets a consumer ---------
+# build-windows.ps1 has always written sizes+SHA-256 for every file into
+# manifest.json, but nothing ever read them back: a truncated, hand-edited or
+# partially re-downloaded package installed exactly as happily as a intact one.
+# Verification is now mandatory (a manifest with no file list is a failure, not a
+# skip - otherwise "forget to hash" becomes the way to bypass this).
+$manifest = $null
+try {
+  $manifest = Get-Content -LiteralPath (Join-Path $srcFull 'manifest.json') -Raw | ConvertFrom-Json
+} catch {
+  Fail "candidate manifest.json cannot be parsed: $($_.Exception.Message)"
+}
+$fileProp = $manifest.PSObject.Properties['files']
+if ($null -eq $fileProp -or @($fileProp.Value).Count -eq 0) {
+  Fail 'candidate manifest.json carries no files[] hash list - rebuild it with scripts/build-windows.ps1'
+}
+$manifestEntries = @($fileProp.Value)
+$listedRel = New-Object System.Collections.Generic.HashSet[string]
+$hashChecks = 0
+$integrityProblems = @()
+foreach ($entry in $manifestEntries) {
+  $rel = [string]$entry.path
+  $normalized = $rel.Replace('/', '\')
+  [void]$listedRel.Add($normalized.ToLowerInvariant())
+  $target = Join-Path $srcFull $normalized
+  if (-not (Test-Path -LiteralPath $target)) { $integrityProblems += "listed in manifest but absent: $rel"; continue }
+  $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+  $expected = ([string]$entry.sha256).ToLowerInvariant()
+  if ($actual -ne $expected) { $integrityProblems += ("SHA-256 mismatch: {0} (manifest {1} != actual {2})" -f $rel, $expected, $actual) }
+  $hashChecks++
+}
+# Content that is not in the manifest would be installed unaccounted for.
+foreach ($f in @(Get-ChildItem -LiteralPath $srcFull -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+  $rel = $f.FullName.Substring($srcFull.Length + 1)
+  if ($rel -ieq 'manifest.json') { continue }
+  if (-not $listedRel.Contains($rel.ToLowerInvariant())) { $integrityProblems += "present but not in manifest: $rel" }
+}
+if ($integrityProblems.Count -gt 0) {
+  Fail ("candidate package does not match its own manifest - refusing to install it: " + ($integrityProblems -join '; '))
+}
+Info "candidate integrity verified: $hashChecks files, SHA-256 ok (manifest version=$($manifest.version))"
+
 $candNode = Join-Path $srcFull 'runtime\node.exe'
 $candScript = Join-Path $srcFull 'runtime\bin\tokenmonitor.js'
 $candVersion = (& $candNode $candScript --version)
@@ -113,6 +159,53 @@ function Move-DataBack {
     Move-Item -LiteralPath $dataKeep -Destination (Join-Path $installDir 'data')
   }
 }
+# #122: the preserved folder can hold data rescued out of a tree that was about to be
+# deleted recursively. An upgrade hard-killed after the old install had been renamed
+# to TokenMonitor.old and before the data moved back leaves TokenMonitor.old\data as
+# the ONLY copy of the user's database, and the next install sees no TokenMonitor at
+# all, so it takes the first-install branch. Move that rescued copy into the install
+# we just verified - the app never reads <InstallRoot>TokenMonitor-data, so leaving
+# it there would be loss in every practical sense. Refuse to merge or overwrite when
+# the new install already has a data folder of its own.
+function Restore-RescuedData {
+  if (-not (Test-Path -LiteralPath $dataKeep)) { return }
+  $target = Join-Path $installDir 'data'
+  if (Test-Path -LiteralPath $target) {
+    Info "warning: $target already exists - rescued data kept at $dataKeep; stop the backend and move it there by hand"
+    Log "rescued data NOT restored, target occupied: $dataKeep -> $target"
+    return
+  }
+  Move-Item -LiteralPath $dataKeep -Destination $target
+  Info "user data restored into the verified install: $target"
+  Log "rescued data restored: $dataKeep -> $target"
+}
+# The single guarantee the installer README makes: 数据永不进入删除范围. Any tree
+# about to be recursively deleted is first searched for a data\ folder and that
+# folder is moved out to the preserved location. If the preserved location is
+# already occupied the delete is refused outright instead of silently clobbering
+# or discarding either copy (#100b: the upgrade-rollback path used to run
+# Remove-Item -Recurse over the new install directory *after* the restored user
+# data had been moved back into it, destroying the data on a failed upgrade).
+function Stash-UserData([string]$FromDir) {
+  $src = Join-Path $FromDir 'data'
+  if (-not (Test-Path -LiteralPath $src)) { return }
+  if (Test-Path -LiteralPath $dataKeep) {
+    Fail ("both {0} and {1} exist: refusing to delete {2} because it would destroy user data - resolve one of them and retry" -f $src, $dataKeep, $FromDir)
+  }
+  Move-Item -LiteralPath $src -Destination $dataKeep
+  Log "user data moved out of delete scope: $src -> $dataKeep"
+  Info "user data moved out of the delete scope: $dataKeep"
+}
+function Remove-InstallTree([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) { return }
+  $full = (Resolve-Path -LiteralPath $Path).Path
+  $leaf = Split-Path -Leaf $full
+  if ($leaf -cne 'TokenMonitor' -and $leaf -cne 'TokenMonitor.new' -and $leaf -cne 'TokenMonitor.old') {
+    Fail "refusing to delete unexpected path: $full"
+  }
+  Stash-UserData -FromDir $full
+  Remove-Item -LiteralPath $full -Recurse -Force
+}
 
 # Detect a running backend before any destructive operation (#31):
 # data	okenmonitor-<port>.lock carries the backend PID. A corrupted or
@@ -139,10 +232,52 @@ function Assert-BackendStopped {
   }
 }
 
+# #101: the lock-file guard above only sees the *backend*. The GUI launcher and the
+# tray are separate native exes that live inside the install tree and hold their own
+# image file open, so `Remove-Item -Recurse` over installDir/.new/.old fails halfway:
+# the old tree is already renamed away, the swap cannot finish, and the next
+# reinstall then trips over the leftover .old/.new - a wedged install that no
+# message explains. Anything still running *out of the trees about to be deleted* is
+# therefore detected before the first destructive step. Read-only: this reports and
+# aborts, it never kills a process it does not own.
+function Assert-InstallTreeIdle {
+  $blockers = @()
+  $roots = @($installDir, $staging, $backup) | Where-Object { -not [string]::IsNullOrEmpty($_) }
+  foreach ($procName in @('TokenMonitor', 'TokenMonitorTray', 'node')) {
+    foreach ($p in @(Get-Process -Name $procName -ErrorAction SilentlyContinue)) {
+      $imagePath = ''
+      try { $imagePath = $p.Path } catch { continue }  # not ours to query: cannot conclude it is running there
+      if ([string]::IsNullOrEmpty($imagePath)) { continue }
+      foreach ($root in $roots) {
+        if ($imagePath.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $blockers += ("{0} (PID {1}) 从 {2} 运行" -f $p.ProcessName, $p.Id, $imagePath)
+        }
+      }
+    }
+  }
+  if ($blockers.Count -gt 0) {
+    Write-Host ''
+    Write-Host '检测到仍在使用安装目录的进程，安装/升级/卸载无法安全完成：'
+    foreach ($b in $blockers) { Write-Host ("  - {0}" -f $b) }
+    Write-Host '请先通过启动器 TokenMonitor.exe 的「停止」按钮停后台，并关闭托盘/启动器窗口后再重试。'
+    Write-Host '本脚本不会替你结束任何进程。'
+    throw ("install tree is in use by: {0} - stop it first" -f ($blockers -join '; '))
+  }
+}
+
 try {
   Assert-BackendStopped  # :41
-  if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
-  if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+  Assert-InstallTreeIdle # :101 no launcher/tray/node still running out of the trees we are about to delete
+  # #122: these two were the only recursive deletes left that bypassed
+  # Remove-InstallTree, so the "move user data out of the delete scope first" rule
+  # silently did not apply to them. An upgrade killed after the old install was
+  # renamed to TokenMonitor.old and before the data moved back leaves the user's
+  # database inside that orphan backup; the next run deleted it with no message.
+  # Going through the same helper rescues data\ into the preserved folder first and
+  # fails loudly when that folder is already occupied. Both calls are no-ops when the
+  # path is absent, which is the ordinary case.
+  Remove-InstallTree -Path $staging
+  Remove-InstallTree -Path $backup
 
   # --- stage + validate the candidate in final layout --------------------------
   Info "staging candidate -> $staging"
@@ -158,32 +293,45 @@ try {
     Rename-Item -LiteralPath $installDir -NewName 'TokenMonitor.old'
     $backup = Join-Path $InstallRoot 'TokenMonitor.old'
     $backupActive = $true
+    $newActive = $false
     try {
       Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
-      if ($dataAside) { Move-DataBack }
+      $newActive = $true
+      # #100(b): data stays in the preserved folder until the new install has
+      # verified. Moving it back before verification put it inside the very
+      # directory the rollback then deleted with Remove-Item -Recurse.
       $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
       if ($LASTEXITCODE -ne 0) { Fail 'post-install verification failed for the upgraded install' }
-      Remove-Item -LiteralPath $backup -Recurse -Force
-      $backupActive = $false
-      Info "upgrade verified: $newVersion at $installDir (old version removed)"
-      Log "upgrade $candVersion verified; old copy removed"
+      Move-DataBack
+      Info "upgrade verified: $newVersion at $installDir"
+      Log "upgrade $candVersion verified"
     } catch {
-      if (Test-Path -LiteralPath $installDir) { Remove-Item -LiteralPath $installDir -Recurse -Force }
+      if ($newActive) { Remove-InstallTree -Path $installDir }
       if ($backupActive -and (Test-Path -LiteralPath $backup)) {
         Rename-Item -LiteralPath $backup -NewName 'TokenMonitor'
-        Move-DataBack
+        $backupActive = $false
         Info 'post-verification failed; rolled back to the previous install'
         Log 'upgrade failed; rolled back'
-      } elseif ($dataAside) {
-        Move-DataBack
       }
+      if ($dataAside) { Move-DataBack }
       throw
+    }
+    # A verified upgrade is never voided by the rollback copy's cleanup: by now
+    # the new install works and the data is back in place, so a locked .old tree
+    # (a still-running launcher holds its exe) is reported, not fatal.
+    # #122: this delete goes through the same data guard as every other one instead
+    # of asserting in a message string that the tree holds no user data - if the
+    # crash window did leave data inside it, the guard moves that out first (and
+    # refuses to delete when the preserved folder is already occupied).
+    if (Test-Path -LiteralPath $backup) {
+      try { Remove-InstallTree -Path $backup; $backupActive = $false }
+      catch { Info "warning: rollback copy left at $backup (verified upgrade kept); nothing was deleted around it - remove it once no process runs from it" }
     }
   } else {
     Rename-Item -LiteralPath $staging -NewName 'TokenMonitor'
     $newVersion = (& (Join-Path $installDir 'runtime\node.exe') (Join-Path $installDir 'runtime\bin\tokenmonitor.js') --version)
     if ($LASTEXITCODE -ne 0) {
-      Remove-Item -LiteralPath $installDir -Recurse -Force
+      Remove-InstallTree -Path $installDir
       Fail 'post-install verification failed; broken first install removed'
     }
     Info "installed version: $newVersion at $installDir"
@@ -191,6 +339,7 @@ try {
   }
 
   # --- portable data directory (created on install; app keeps everything here) ---
+  Restore-RescuedData   # #122: data rescued out of an orphan backup goes back in here
   New-Item -ItemType Directory -Path (Join-Path $dataDir 'logs') -Force | Out-Null
   Info "data dir ready: $dataDir (database/logs/settings; preserved on uninstall)"
 
@@ -216,7 +365,7 @@ try {
   exit 0
 } catch {
   if (Test-Path -LiteralPath $staging) {
-    try { Remove-Item -LiteralPath $staging -Recurse -Force } catch {}
+    try { Remove-InstallTree -Path $staging } catch {}
   }
   [Console]::Error.WriteLine(("[install] ERROR " + $_.Exception.Message))
   exit 1

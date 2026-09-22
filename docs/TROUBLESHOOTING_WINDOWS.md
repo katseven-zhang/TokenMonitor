@@ -16,11 +16,12 @@ schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST   # 核对自启任务（�
 | 运行形态 | 日志目录 |
 |---|---|
 | 打包/安装（应用根存在 `manifest.json`） | `<应用根>\data\logs` |
-| 源码运行（Windows） | `%LOCALAPPDATA%\TokenMonitor\logs` |
+| 源码运行（Windows，#89 起） | `%LOCALAPPDATA%\TokenMonitor-Server\logs` |
+| 源码运行（Windows，#89 前有历史日志的老机器） | `%LOCALAPPDATA%\TokenMonitor\logs` |
 | 设了 `TOKENMONITOR_DATA_DIR` | `%TOKENMONITOR_DATA_DIR%\logs` |
 | 非 Windows 或缺 `LOCALAPPDATA` 的源码运行 | `~\.tokenmonitor\logs` |
 
-- `status` 输出的 `data_dir` 是**数据库**目录。打包与强制形态下它与日志同根，可直接拼 `\logs\tokenmonitor.log`；**源码形态下数据库在 `~\.tokenmonitor` 而日志在 `%LOCALAPPDATA%\TokenMonitor`，两者不同根**，请按上表取日志路径。
+- `status` 输出的 `data_dir` 是**数据库**目录。打包与强制形态下它与日志同根，可直接拼 `\logs\tokenmonitor.log`；**源码形态下数据库在 `~\.tokenmonitor` 而日志在 `%LOCALAPPDATA%\TokenMonitor-Server`（#89 前的老机器仍在 `%LOCALAPPDATA%\TokenMonitor`），两者不同根**——直接拼会找错目录，请按上表取，或以 `status` 输出的 `run_dir` 行为准。
 - 只有真正执行动作的命令才写日志（`scan`/`serve`/`today`/`install-agent`/`uninstall-agent`/`bar`）；`--help`/`--version`/`status` 是零副作用的只读诊断，不会创建日志目录。因此刚装好就看到日志不存在，通常只是还没跑过后台。
 - 日志按 5 MiB 轮转，最多留 5 份备份（`tokenmonitor.log.1` … `.5`）。
 - 日志中的敏感信息统一显示为 `[REDACTED]`，这是**预期行为**，不是日志损坏（见第 8 节）。
@@ -98,11 +99,11 @@ npm ci        # 或 npm install
 
 - 安装自启、扫描、面板均为**普通用户权限**操作，不要用管理员身份运行任务计划（LeastPrivilege 设计）。
 - `EPERM`：单实例锁探测 PID 时，`EPERM` 表示进程仍在（权限不足以发信号），按“已在运行”处理而非误判为死进程（[../src/platform/runtime.js](../src/platform/runtime.js)）。
-- 数据库/日志目录位于用户目录（`%USERPROFILE%\.tokenmonitor`、`%LOCALAPPDATA%\TokenMonitor`），不需要对仓库目录或系统目录写权限；若被重定向到受保护目录，检查 `LOCALAPPDATA`/`USERPROFILE` 环境变量。
+- 数据库/日志目录位于用户目录（`%USERPROFILE%\.tokenmonitor`、`%LOCALAPPDATA%\TokenMonitor-Server`），不需要对仓库目录或系统目录写权限；若被重定向到受保护目录，检查 `LOCALAPPDATA`/`USERPROFILE` 环境变量。
 
 ## 8. 日志里出现 [REDACTED]
 
-预期脱敏行为（🟡 #11 评审通过待集成，[../src/platform/runtime.js](../src/platform/runtime.js) `sanitizeLogMessage`）：`Authorization`/`Bearer` 头、`sk-ant-`/`sk-`/`key-` API Key、`token`/`auth_token`/`access_token` 字段及会话正文片段统一替换为 `[REDACTED]`。日志固定在 `%LOCALAPPDATA%\TokenMonitor\logs\`，单文件 5 MiB、最多 5 个备份轮转，不会无限增长。日志位置本身没有可配置项；如需完整排障，请携带**已脱敏**的日志片段反馈。
+预期脱敏行为（🟡 #11 评审通过待集成，[../src/platform/runtime.js](../src/platform/runtime.js) `sanitizeLogMessage`）：`Authorization`/`Bearer` 头、`sk-ant-`/`sk-`/`key-` API Key、`token`/`auth_token`/`access_token` 字段及会话正文片段统一替换为 `[REDACTED]`。日志位置由运行形态决定（见上表；源码运行 #89 起在 `%LOCALAPPDATA%\TokenMonitor-Server\logs\`），单文件 5 MiB、最多 5 个备份轮转，不会无限增长。日志位置本身没有可配置项；如需完整排障，请携带**已脱敏**的日志片段反馈。
 
 ## 9. 已知遗留问题（非阻断）
 

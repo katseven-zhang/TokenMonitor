@@ -62,6 +62,27 @@ TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用
 - `Ctrl + 加号/减号` 缩放界面，`Ctrl + 0` 恢复；
 - 本地端口可配置，服务只面向本机使用。
 
+## 版本线与产品身份（#68）
+
+同一个仓库里有**两个独立产品**，各自一条版本号，**不是**同一版本线的新旧两级：
+
+| 产品 | 版本号来源（必须彼此一致） | 当前 |
+| --- | --- | --- |
+| 旧版 Node 后台（CLI / 打包安装形态 / GUI 启动器 / 托盘） | `package.json`、`windows/gui/Cargo.toml`+`.lock`、`windows/tray/Cargo.toml`+`.lock` | `1.4.3` |
+| 桌面版（Rust + Tauri） | `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml` | `2.0.0` |
+
+- GitHub tag `vX.Y.Z` 指的是**桌面版**那一条线；旧版后台的发行版本看它自己 `package.json`
+  与构建清单 `manifest.json` 的 `version`（由 [scripts/build-windows.ps1](scripts/build-windows.ps1)
+  从根 `package.json` 取）。两者数字相同只是巧合，不代表同一次发行。
+- 两个产品的可执行文件都叫 `TokenMonitor.exe`，`--version` 又只打印裸版本号，**不能**据此
+  区分你跑的是哪一个；产品身份看安装路径与数据目录（见
+  [docs/WINDOWS.md](docs/WINDOWS.md) 第 3、3b 节，`tokenmonitor status` 会打印 `run_dir`）。
+- 家族内不许漂移：`test/run.mjs` 的 `[28]` 段逐个比对上面两列，任一文件漏改即失败；
+  同时断言两条线**故意不同**，防止有人把"统一版本号"当成修复手段顺手同步。
+- 待产品裁定（本轮没有擅自改动）：是否把旧版后台升到 2.x 与桌面版对齐、或显式改名
+  版本线（如 `1.x-legacy`）。合并会让 `v2.0.0` 这个已发布的 tag 变得指代不清，
+  属于发行决策，不是 bug 修复。
+
 ## 快速使用
 
 ### 运行已构建版本

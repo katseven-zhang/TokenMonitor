@@ -164,6 +164,56 @@ console.log('\n[#96-10] --force 真的分叉：冲突要先判、再让 --force 
   ok('查询返回非 XML 时不误判冲突', !garbled.err && !!garbled.create, garbled.err?.message);
 }
 
+console.log('\n[uninstall-agent #86] 只有"任务确实不存在"才算无事可做；退出码 1 的一切真失败必须抛出');
+{
+  // schtasks 对"任务不存在""拒绝访问""服务未运行""任务受策略保护"都返回退出码 1，
+  // 唯一可区分的事实是 stderr 原文。修前的 `|| err.status === 1` 把四者都说成
+  // "was not present" 并静默返回 0，用户以为卸载干净、下次登录服务照样起来。
+  const failWith = (stderr) => {
+    const err = new Error('Command failed: schtasks.exe');
+    err.status = 1;
+    err.stderr = stderr;
+    throw err;
+  };
+  const logs = [];
+  const mk = (stderr) => (file, args) => {
+    if (file !== 'schtasks.exe' || !args.includes('/Delete')) throw new Error('unexpected call');
+    return failWith(stderr);
+  };
+
+  // 1) 任务不存在（英文系统消息）→ 正常返回，只记一行
+  let threw = null;
+  try { uninstallWindowsAgent({ log: (m) => logs.push(m), run: mk('ERROR: The system cannot find the file specified.\r\n') }); }
+  catch (e) { threw = e; }
+  ok('1 "cannot find the file specified" 视为任务本就不存在', threw === null && logs.some((l) => /was not present/.test(l)), String(threw));
+
+  // 2) "cannot find the task" 措辞 → 同样正常返回
+  threw = null; logs.length = 0;
+  try { uninstallWindowsAgent({ log: (m) => logs.push(m), run: mk('ERROR: cannot find the task "TokenMonitor-Server".\r\n') }); }
+  catch (e) { threw = e; }
+  ok('2 "cannot find the task" 变体也视为不存在', threw === null && logs.some((l) => /was not present/.test(l)), String(threw));
+
+  // 3) 拒绝访问 → 抛出，不再冒充"本就不存在"
+  threw = null; logs.length = 0;
+  try { uninstallWindowsAgent({ log: (m) => logs.push(m), run: mk('ERROR: Access is denied.\r\n') }); }
+  catch (e) { threw = e; }
+  ok('3 拒绝访问抛出而非静默成功', !!threw && !logs.some((l) => /was not present/.test(l)), String(threw));
+
+  // 4) Task Scheduler 服务未运行 → 抛出
+  threw = null; logs.length = 0;
+  try { uninstallWindowsAgent({ log: (m) => logs.push(m), run: mk('ERROR: The Task Scheduler service is not running.\r\n') }); }
+  catch (e) { threw = e; }
+  ok('4 调度服务未运行抛出', !!threw && !logs.some((l) => /was not present/.test(l)), String(threw));
+
+  // 5) 组策略锁住任务 → 抛出，且错误原文随异常带出（否则用户再也看不到原因）
+  threw = null; logs.length = 0;
+  try { uninstallWindowsAgent({ log: (m) => logs.push(m), run: mk('ERROR: This task is protected and cannot be deleted.\r\n') }); }
+  catch (e) { threw = e; }
+  ok('5 策略保护抛出并保留 schtasks 原文与任务名',
+    !!threw && /protected and cannot be deleted/.test(threw.message) && threw.message.includes(WINDOWS_TASK_NAME)
+    && !/was not present/.test(threw.message), String(threw));
+}
+
 console.log('\n[agent.js] Windows 走任务计划；macOS plist 回归仍可生成');
 {
   const plist = buildPlist({ node: '/usr/local/bin/node', script: '/opt/pkg/bin/tokenmonitor.js', port: 9001, logDir: '/tmp/l' });

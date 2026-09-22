@@ -50,7 +50,12 @@ console.log('\n[source contract] src/main.rs 契约断言（Rust 原生实现）
   ok('应用根标记校验 name+os', source.includes('"TokenMonitor"') && source.includes('"windows"'));
   ok('ResolveDataRoot 先看 env 覆盖', /if let Some\(d\) = env_data_dir/.test(source));
   ok('打包形态落 <根>\\data', /root\.join\("data"\)/.test(source));
-  ok('源码默认 %LOCALAPPDATA%\\TokenMonitor', /join\("TokenMonitor"\)/.test(source));
+  ok('源码默认运行目录 = 新名字，且与 config.js 同源（#89：旧名字与桌面版卸载目录同路径）',
+    /RUNTIME_DIR_NAME:\s*&str\s*=\s*"TokenMonitor-Server"/.test(source)
+      && /join\(RUNTIME_DIR_NAME\)/.test(source)
+      && /join\(LEGACY_SHARED_RUN_DIR_NAME\)/.test(source));
+  ok('#89 老用户原地继续：有历史日志/锁时才留在旧目录',
+    /fn has_legacy_run_artifacts/.test(source) && /has_legacy_run_artifacts\(&shared\)/.test(source));
   ok('后端解析优先 runtime\\node.exe（新布局）', /join\("runtime"\)\s*\n?\s*\.join\("node\.exe"\)/.test(source));
   ok('CLI 脚本名统一为 tokenmonitor.js',
     /const SCRIPT_NAME: &str = "tokenmonitor\.js";/.test(source) && !source.includes('SCRIPT_NAMES'));
@@ -228,8 +233,9 @@ console.log('\n[#60] 空态显示完整 tail 路径 + 多候选根探测（混�
   ok('#60 空态提示带完整日志路径（与 selfcheck 同源 log_path_for）',
     /EMPTY_LOG_TEXT/.test(ph60) && /log_path_for\(&root\)/.test(ph60) && /当前 tail 的日志路径/.test(ph60));
   const cand60 = source.slice(source.indexOf('fn candidate_data_roots'), source.indexOf('pub fn parse_port'));
-  ok('#60 候选根 = 主根 + %LOCALAPPDATA%\\TokenMonitor（源码形态 runtimeDir）',
-    cand60.includes('fn candidate_data_roots') && /join\("TokenMonitor"\)/.test(cand60));
+  ok('#60 候选根 = 主根 + 源码形态运行目录；#89 后新旧两个名字都要在候选里',
+    cand60.includes('fn candidate_data_roots') && /candidate_runtime_roots\(la\)/.test(cand60)
+      && /RUNTIME_DIR_NAME,\s*LEGACY_SHARED_RUN_DIR_NAME/.test(source));
   ok('#60 App 记录备用根与实际 tail 来源字段',
     /alt_log_root: Option<PathBuf>/.test(source) && /log_source: Option<PathBuf>/.test(source));
   const refresh60 = source.slice(source.indexOf('fn refresh_log'), source.indexOf('fn poll_status'));
@@ -303,13 +309,38 @@ if (!existsSync(exe) && process.env.SKIP_GUI_ARTIFACT === '1') {
           && pkgInfo.logPath === join(pkg, 'data', 'logs', 'tokenmonitor.log'),
         pkgInfo.logPath);
       const laRoot = join(process.env.LOCALAPPDATA || '', 'TokenMonitor');
-      ok('#60 打包形态自检列出备用根（%LOCALAPPDATA%\\TokenMonitor）',
-        pkgInfo.altDataRoot === laRoot, pkgInfo.altDataRoot);
-      ok('#60 源码形态主根即 runtimeDir：无第二候选（空态完整路径+§0 文档兜底诊断）',
-        bareInfo.altDataRoot === '(none)' && bareInfo.dataRoot === laRoot,
+      // #89 之后主根取决于本机 %LOCALAPPDATA% 里有没有旧版的历史日志，直接读真机环境
+      // 会得到两种都算对的结果。改为注入两个隔离的 LOCALAPPDATA 沙箱，把两种情形都钉死。
+      const la = mkdtempSync(join(tmpdir(), 'gui89-'));
+      const laFresh = join(la, 'fresh');
+      const laOld = join(la, 'old');
+      mkdirSync(laFresh, { recursive: true });
+      mkdirSync(join(laOld, 'TokenMonitor', 'logs'), { recursive: true });
+      writeFileSync(join(laOld, 'TokenMonitor', 'logs', 'tokenmonitor.log'), '');
+      const freshRoot = join(laFresh, 'TokenMonitor-Server');
+      const oldShared = join(laOld, 'TokenMonitor');
+      const freshInfo = parse(run({ LOCALAPPDATA: laFresh }, null).stdout);
+      ok('#89 新机器（运行目录无旧版历史）：主根用新名字 TokenMonitor-Server',
+        freshInfo.dataRoot === freshRoot, freshInfo.dataRoot);
+      ok('#89 新机器仍把改名前的旧目录列为备用根（桌面版卸载后日志仍找得回来）',
+        freshInfo.altDataRoot === join(laFresh, 'TokenMonitor'), freshInfo.altDataRoot);
+      const oldInfo = parse(run({ LOCALAPPDATA: laOld }, null).stdout);
+      ok('#89 老用户原地继续：主根仍是改名前的旧目录',
+        oldInfo.dataRoot === oldShared, oldInfo.dataRoot);
+      ok('#89 老用户的备用根是新名字目录',
+        oldInfo.altDataRoot === join(laOld, 'TokenMonitor-Server'), oldInfo.altDataRoot);
+      const pkg89 = parse(run({ LOCALAPPDATA: laFresh }, pkg).stdout);
+      ok('#89 打包形态主根不受改名影响（仍是包内 data\\）',
+        pkg89.dataRoot === join(pkg, 'data'), pkg89.dataRoot);
+      ok('#89 打包形态备用根给出可切换的源码形态运行目录',
+        pkg89.altDataRoot === freshRoot, pkg89.altDataRoot);
+      rmSync(la, { recursive: true, force: true });
+      ok('#60 源码形态主根即 runtimeDir（空态提示带完整路径 + §0 文档兜底诊断）',
+        /log_path_for\(&root\)/.test(source) && bareInfo.dataRoot === laRoot,
         bareInfo.dataRoot + ' | ' + bareInfo.altDataRoot);
-      ok('#60 env 覆盖主根时备用根不受影响',
-        parse(forced.stdout).altDataRoot === laRoot, parse(forced.stdout).altDataRoot);
+      ok('#60 env 覆盖主根时备用根仍指向某个源码形态运行目录',
+        parse(forced.stdout).altDataRoot.startsWith(join(process.env.LOCALAPPDATA || '', 'TokenMonitor')),
+        parse(forced.stdout).altDataRoot);
     }
 
 

@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 <#
 .SYNOPSIS
   TokenMonitor Windows x64 runtime package builder (task #12 Win-Package; layout v2 by #25).
@@ -19,6 +19,9 @@
   - Only dist\windows-x64 is ever cleaned; the exact path is validated first.
   - A failed build removes the partial output so stale artifacts can never pose
     as a fresh build; exit code is non-zero on failure.
+  - The two native exes taken from windows\*\publish\ are rebuilt when missing OR
+    when older than any source they build from, so a leftover publish artifact can
+    never be packaged silently (#101).
   - Output is scanned for secrets/runtime artifacts (.agentchatroom, .workbuddy,
     acr.credential_ tokens, *.db/*.log); any hit fails the build.
   - #74: bin\ is copied entry by entry so the macOS bundle (bin\tokenmonitor.app,
@@ -105,14 +108,120 @@ if (-not ((Test-Path -LiteralPath $echartsMin) -and (Test-Path -LiteralPath $fzs
 }
 if (-not (Test-Path -LiteralPath $echartsMin)) { Fail "missing $echartsMin after npm ci" }
 
-# --- 4b. GUI launcher exe (#28, native Rust Win32): use the published artifact, else build via windows\gui\build.ps1 ---
-$guiExe = Join-Path $repoFull 'windows\gui\publish\TokenMonitorGui.exe'
-if (-not (Test-Path -LiteralPath $guiExe)) {
-  Write-Host '[build] GUI exe missing, building windows\gui (Rust toolchain required)...'
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoFull 'windows\gui\build.ps1')
-  if ($LASTEXITCODE -ne 0) { Fail 'GUI build failed (Rust toolchain required; or run windows\gui\build.ps1 first)' }
+# --- 4b. native Rust exes (#28 GUI launcher, #32 tray): never ship a stale artifact ----
+# Both are consumed from windows\<app>\publish\ and are only rebuilt when MISSING.
+# Before this change a leftover publish exe from an earlier commit was packaged
+# silently, so the shipped exe could lag the source it was built from - and nothing
+# in the package (or its manifest) said so. Staleness is now decided by comparing
+# the exe against the newest source the build actually reads, and a stale exe is
+# rebuilt through its own build.ps1 (same entry point a human would run).
+function Get-NewestSourceWrite([string]$AppDir) {
+  $dir = Join-Path $repoFull "windows\$AppDir"
+  $newest = [datetime]::MinValue
+  foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+    # publish\ is the artifact itself and target\ is cargo's scratch space - neither
+    # is a source input, and including them would make the exe look newer than itself.
+    $rel = $f.FullName.Substring($dir.Length + 1)
+    if ($rel -match '^(publish|target)[\\]') { continue }
+    if ($f.LastWriteTime -gt $newest) { $newest = $f.LastWriteTime }
+  }
+  return $newest
 }
-if (-not (Test-Path -LiteralPath $guiExe)) { Fail "GUI launcher missing after build: $guiExe" }
+function Resolve-PublishedExe([string]$AppDir, [string]$ExeName, [string]$Label) {
+  $exe = Join-Path $repoFull "windows\$AppDir\publish\$ExeName"
+  $why = ''
+  if (-not (Test-Path -LiteralPath $exe)) {
+    $why = 'missing'
+  } else {
+    $srcNewest = Get-NewestSourceWrite $AppDir
+    if ($srcNewest -gt (Get-Item -LiteralPath $exe).LastWriteTime) {
+      $why = ("stale (newest source {0} is newer than the exe {1})" -f `
+        $srcNewest.ToString('yyyy-MM-dd HH:mm:ss'), (Get-Item -LiteralPath $exe).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))
+    }
+  }
+  if ($why -ne '') {
+    Write-Host ("[build] {0} exe {1}, building windows\{2} (Rust toolchain required)..." -f $Label, $why, $AppDir)
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoFull "windows\$AppDir\build.ps1")
+    if ($LASTEXITCODE -ne 0) { Fail "$Label build failed ($why; or run windows\$AppDir\build.ps1 first)" }
+  }
+  if (-not (Test-Path -LiteralPath $exe)) { Fail "$Label missing after build: $exe" }
+  return $exe
+}
+$guiExe = Resolve-PublishedExe 'gui' 'TokenMonitorGui.exe' 'GUI launcher'
+
+# --- 4c. packaged source whitelist: only git-tracked files may ship ----------------
+# Step 6 used to do `Copy-Item -Recurse` over bin\, src\ and web\. Everything living
+# in those trees therefore rode along - including local build leftovers that git has
+# never seen. Step 7's content scan only looks for credential tokens and
+# *.db/*.log, so "one extra file that is not a source file" was invisible: the
+# shipped package could contain content nobody reviewed. The package face is now
+# defined by git's index: tracked files are copied one by one, a file present in the
+# tree that git neither tracks nor ignores fails the build by name, and
+# .gitignore-excluded content is reported as not packaged.
+$PACKAGED_DIRS = @('bin', 'src', 'web')
+
+function New-RelativePathSet([string[]]$Paths) {
+  $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($p in $Paths) { if ($p) { [void]$set.Add($p.Replace('\', '/')) } }
+  return ,$set
+}
+
+# $null means "git could not tell us what the source tree is" (no git on PATH, or a
+# source export rather than a checkout). Callers must fail rather than fall back to
+# the old whole-directory copy - a silent fallback is exactly the hole being closed.
+function Get-PackagedFileSets {
+  Push-Location $repoFull
+  try {
+    $preference = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    $tracked = @(& git -c core.quotePath=false ls-files -- $PACKAGED_DIRS)
+    $trackedCode = $LASTEXITCODE
+    $others = @(& git -c core.quotePath=false ls-files --others --exclude-standard -- $PACKAGED_DIRS)
+    $othersCode = $LASTEXITCODE
+    $ErrorActionPreference = $preference
+  } finally { Pop-Location }
+  if ($trackedCode -ne 0 -or $othersCode -ne 0) { return $null }
+  return @{ tracked = (New-RelativePathSet $tracked); untracked = (New-RelativePathSet $others) }
+}
+
+function Copy-TrackedSourceTree([string]$Dir, [string]$Runtime, $Sets) {
+  $source = Join-Path $repoFull $Dir
+  if (-not (Test-Path -LiteralPath $source)) { Fail "packaged source directory is missing: $source" }
+  $prefix = "$Dir/"
+  $copied = 0
+  $ignored = 0
+  $strays = @()
+  foreach ($file in @(Get-ChildItem -LiteralPath $source -Recurse -File -Force)) {
+    $rel = $prefix + $file.FullName.Substring($source.Length + 1).Replace('\', '/')
+    if ($Sets.tracked.Contains($rel)) {
+      $target = Join-Path $Runtime $rel
+      $parent = Split-Path -Parent $target
+      if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+      Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+      $copied++
+    } elseif ($Sets.untracked.Contains($rel)) {
+      $strays += $rel
+    } else {
+      $ignored++
+    }
+  }
+  # git's index says a file belongs to the source tree but it is not on disk: the
+  # whitelist copy would otherwise hand out a package that quietly lacks a source
+  # file (staged-but-not-committed deletion, half-finished checkout).
+  $absent = @()
+  foreach ($rel in $Sets.tracked) {
+    if (-not $rel.StartsWith($prefix)) { continue }
+    $probe = Join-Path $source $rel.Substring($prefix.Length).Replace('/', '\')
+    if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) { $absent += $rel }
+  }
+  Write-Host ("[build] packaged {0} git-tracked file(s) from {1}\ (.gitignore-excluded, not packaged: {2})" -f $copied, $Dir, $ignored)
+  if ($strays.Count -gt 0) {
+    Fail ("untracked local files are sitting in the packaged tree " + $Dir + "\ (they would ship without ever being committed or reviewed): " + ($strays -join '; ') + ' - delete them, or git add them and rebuild')
+  }
+  if ($absent.Count -gt 0) {
+    Fail ("git tracks these files under " + $Dir + "\ but they are missing from this checkout: " + ($absent -join '; '))
+  }
+}
 
 # --- 5. clean ONLY the fixed output directory (path validated first) -----------
 $dist = Join-Path $repoFull 'dist\windows-x64'
@@ -134,14 +243,9 @@ try {
   # --- tray (#32): native Rust tray exe into the package at tray\TokenMonitorTray.exe,
   # matching src/bar.js trayExeCandidates' second candidate (<root>\tray\). Before this
   # task the packager never built/copied the tray, so the packaged `bar` command could
-  # never find it. Use the published artifact, else build via windows\tray\build.ps1.
-  $trayExe = Join-Path $repoFull 'windows\tray\publish\TokenMonitorTray.exe'
-  if (-not (Test-Path -LiteralPath $trayExe)) {
-    Write-Host '[build] tray exe missing, building windows\tray (Rust toolchain required)...'
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoFull 'windows\tray\build.ps1')
-    if ($LASTEXITCODE -ne 0) { Fail 'tray build failed (Rust toolchain required; or run windows\tray\build.ps1 first)' }
-  }
-  if (-not (Test-Path -LiteralPath $trayExe)) { Fail "tray missing after build: $trayExe" }
+  # never find it. Missing *or stale* -> rebuilt (4b), so the packaged tray always
+  # matches the source tree it was cut from.
+  $trayExe = Resolve-PublishedExe 'tray' 'TokenMonitorTray.exe' 'tray'
   New-Item -ItemType Directory -Path (Join-Path $dist 'tray') -Force | Out-Null
   Copy-Item -LiteralPath $trayExe -Destination (Join-Path $dist 'tray\TokenMonitorTray.exe')
 
@@ -194,7 +298,8 @@ try {
 
   $scanHits = @()
   # scan text content only (.exe files are self-contained binaries; ReadAllText on 161MB is slow and pointless)
-  $appFiles = Get-ChildItem -LiteralPath $dist -Recurse -File | Where-Object { $_.Extension -ine '.exe' }
+  # -Force: hidden files ship too (they are in the manifest), so they get scanned as well.
+  $appFiles = Get-ChildItem -LiteralPath $dist -Recurse -File -Force | Where-Object { $_.Extension -ine '.exe' }
   foreach ($f in $appFiles) {
     $text = [System.IO.File]::ReadAllText($f.FullName)
     if ($text -match 'acr\.credential_[a-f0-9]') { $scanHits += "credential token -> $($f.FullName)" }
@@ -218,8 +323,11 @@ try {
   if ($badFiles) { Fail ("forbidden artifact files in output: " + (($badFiles | ForEach-Object FullName) -join '; ')) }
 
   # --- 8. manifest with sizes and SHA-256 --------------------------------------
+  # -Force: the installer (#101) verifies EVERY file in the package against this
+  # list and refuses unlisted content; a hidden file skipped here would make a
+  # legitimately built package fail its own integrity check on install.
   $fileEntries = @()
-  $allFiles = Get-ChildItem -LiteralPath $dist -Recurse -File | Sort-Object FullName
+  $allFiles = Get-ChildItem -LiteralPath $dist -Recurse -File -Force | Sort-Object FullName
   foreach ($f in $allFiles) {
     $rel = $f.FullName.Substring($dist.Length + 1).Replace('\', '/')
     $hash = Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256
