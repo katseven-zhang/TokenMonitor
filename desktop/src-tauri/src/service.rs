@@ -530,7 +530,7 @@ mod tests {
             .port();
         let settings = config::Settings {
             port,
-            roots: Default::default(),
+            roots: std::collections::BTreeMap::from([("qoder".into(),vec![]),("xiaomi-mimo".into(),vec![])]),
             ..Default::default()
         };
         config::save_json(&root.join("settings.json"), &settings).unwrap();

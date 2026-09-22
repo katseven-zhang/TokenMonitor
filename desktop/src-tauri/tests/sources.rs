@@ -67,7 +67,7 @@ fn sqlite(path: &Path) -> Connection {
 }
 
 #[test]
-fn all_ten_sources_minute_filters_and_repeated_scans() {
+fn all_eleven_sources_minute_filters_and_repeated_scans() {
     let f = Fixture::new();
     let mut roots = BTreeMap::new();
     let mut add = |agent: &str, records: Vec<Value>| {
@@ -176,6 +176,43 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         )
         .unwrap();
     roots.insert("antigravity".into(), vec![index_path.display().to_string()]);
+
+    // Qoder：转录只喂 credits 面（token 字段服务端恒 0），真实 token 来自兄弟
+    // 目录里同名的 <会话id>/state.json。两个面写在同一棵目录下，扫描必须各归各。
+    // 明文载荷按真机形状 {latest, total:{…}, credits}，且 total.input_tokens
+    // 已含 cache_read ⇒ 落库拆成 70/50/0/40，total=160（不是 210 也不是 120）。
+    let qrecords = vec![
+        json!({"type":"assistant","timestamp":TS,"sessionId":"q-session","cwd":"D:\\我的 项目","isSidechain":false,"message":{"model":"m","usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"credits":0.25,"original_credits":0.25,"billable":true,"request_id":"q-req-1","context_usage_ratio":0.2}}}),
+        // 同一 request_id 的第二份抄本不得再计一次
+        json!({"type":"assistant","timestamp":TS+1000,"sessionId":"q-session","message":{"model":"m","usage":{"credits":0.25,"request_id":"q-req-1"}}}),
+        // sidechain 抄本归 subagents/agent-*.jsonl，父转录跳过
+        json!({"type":"assistant","timestamp":TS+2000,"sessionId":"q-session","isSidechain":true,"message":{"model":"m","usage":{"credits":2,"request_id":"q-side-1"}}}),
+        json!({"type":"assistant","timestamp":TS+3000,"sessionId":"q-session","message":{"model":"<synthetic>","usage":{"credits":5,"request_id":"q-syn-1"}}}),
+    ];
+    let qdir = f.jsonl("qoder", &qrecords);
+    let qstate = Path::new(&qdir).join("session");
+    fs::create_dir_all(&qstate).unwrap();
+    let qupdated = chrono::DateTime::from_timestamp_millis(TS)
+        .unwrap()
+        .to_rfc3339();
+    fs::write(
+        qstate.join("state.json"),
+        json!({"sessionId":"q-session","revision":2,"createdAt":qupdated,"updatedAt":qupdated,
+               "model":"m","cwd":"D:\\我的 项目",
+               "total":{"input_tokens":120,"cache_read_input_tokens":50,
+                        "cache_creation_input_tokens":0,"output_tokens":40},
+               "credits":{"used":0,"remaining":0,"total":0}})
+            .to_string(),
+    )
+    .unwrap();
+    // 同名但非会话状态的文件（压缩状态）也躺在树里：本源必须认出并忽略它
+    fs::create_dir_all(qstate.join("compression-v2")).unwrap();
+    fs::write(
+        qstate.join("compression-v2").join("state.json"),
+        json!({"version":2,"state":{"seenFunctionResponseIds":[]}}).to_string(),
+    )
+    .unwrap();
+    roots.insert("qoder".into(), vec![qdir]);
     let settings = config::Settings {
         roots,
         ..Default::default()
@@ -191,6 +228,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         ("zcode", 860),
         ("opencode", 700),
         ("antigravity", 1136),
+        ("qoder", 160),
     ];
     for _ in 0..2 {
         let statuses = scanner::scan(&f.0, &settings).unwrap();
@@ -216,7 +254,7 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         }
     }
     // Exercise the same local query/export entry point used by the GUI. All sources
-    // coexist, so a missing agent filter would leak nine unrelated records.
+    // coexist, so a missing agent filter would leak ten unrelated records.
     for (agent, total) in expected {
         let mut query = Query {
             start: TS,
@@ -309,6 +347,29 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
         assert_eq!(result["rows"], 0);
         assert_eq!(fs::read_to_string(path).unwrap().lines().count(), 1);
     }
+    // credits 面：观测落 quota 表，且绝不携带 token 量（total 恒等式的另一半）。
+    {
+        let cache = db::open_read(&f.0).unwrap();
+        let mut stmt = cache
+            .prepare("SELECT session,payload FROM quota WHERE agent='qoder'")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].0, "q-req-1");
+        let payload: Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(payload["requests"], 1, "{payload}");
+        assert_eq!(payload["credits"], 0.25);
+        assert_eq!(payload["billable_requests"], 1);
+        assert_eq!(payload["context_usage_ratio"], 0.2);
+        assert!(
+            payload.get("input_tokens").is_none() && payload.get("total").is_none(),
+            "credits 观测不得携带 token 量：{payload}"
+        );
+    }
     // Read changes committed only in WAL and replace existing records without double counting.
     z.execute("UPDATE model_usage SET output_tokens=70 WHERE id='z-1'", [])
         .unwrap();
@@ -327,4 +388,57 @@ fn all_ten_sources_minute_filters_and_repeated_scans() {
     let rows = db::events(&cache, &q).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].tokens.total(), 870);
+}
+
+/// #105 的硬隐私边界：Qoder 只注册 ~/.qoder-cn，同族其它家目录一律不发现、
+/// 不扫描、不注册；`.auth`（密钥材料）永不进 roots。缺这一条断言，下一次改动
+/// 就可能顺手把 ~/.qoder / ~/.qoderwork 也加进来。
+#[test]
+fn qoder_registers_only_qoder_cn_never_the_legacy_family() {
+    assert!(
+        config::AGENTS
+            .iter()
+            .any(|(agent, label)| *agent == "qoder" && *label == "Qoder"),
+        "AGENTS 必须登记 qoder/Qoder：{:?}",
+        config::AGENTS
+    );
+    let settings = config::Settings::default();
+    let roots = settings.roots.get("qoder").expect("默认设置要有 qoder 根");
+    assert_eq!(roots.len(), 1, "{roots:?}");
+    for root in roots {
+        let path = Path::new(root);
+        assert!(path.is_absolute(), "{root}");
+        assert_eq!(path.file_name().unwrap(), "projects", "{root}");
+        if std::env::var_os("QODER_CN_HOME").is_none() {
+            assert_eq!(
+                path.parent().and_then(|p| p.file_name()).unwrap(),
+                ".qoder-cn",
+                "家目录相对根必须由 homedir 组装：{root}"
+            );
+        }
+    }
+    const FORBIDDEN: [&str; 6] = [
+        ".qwenworkcn",
+        ".qoderwork",
+        ".qoderworkcn",
+        ".qmind",
+        ".qoder",
+        ".qoder-cli",
+    ];
+    for (_, roots) in settings.roots {
+        for root in roots {
+            let path = Path::new(&root);
+            let below = path.ancestors().skip(1).any(|a| {
+                FORBIDDEN
+                    .iter()
+                    // .qoder-cn 以 .qoder 开头，但目录名必须整段相等才算同族
+                    .any(|d| a.file_name().is_some_and(|n| n == std::ffi::OsStr::new(d)))
+            });
+            assert!(!below, "roots 落进了被禁的同族目录：{root}");
+            assert!(
+                !root.contains(".auth"),
+                "密钥材料目录 .auth 永不进 roots：{root}"
+            );
+        }
+    }
 }

@@ -1,4 +1,5 @@
 pub mod collectors;
+pub mod qoder;
 pub mod autostart;
 pub mod config;
 pub mod db;

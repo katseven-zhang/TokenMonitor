@@ -18,7 +18,7 @@ await writeFile(join(source, 'session.jsonl'), [
   {type:'turn_context',payload:{model:'smoke-model'}},
   {timestamp:1800000000000,type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:100,cached_input_tokens:80,output_tokens:20}}}}
 ].map(JSON.stringify).join('\n')+'\n');
-await writeFile(join(root,'settings.json'), JSON.stringify({port,refreshSeconds:86400,roots:{codex:[source]},disabledAgents:[]}));
+await writeFile(join(root,'settings.json'), JSON.stringify({port,refreshSeconds:86400,roots:{codex:[source],qoder:[],'xiaomi-mimo':[]},disabledAgents:[]}));
 const child = spawn(resolve('dist/desktop-windows-x64/TokenMonitor.exe'), ['--service'], {env:{...process.env,TOKENMONITOR_DATA_DIR:root},windowsHide:true,stdio:'ignore'});
 let terminal=false;
 const exited = new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',code=>{terminal=true;resolve(code);});});

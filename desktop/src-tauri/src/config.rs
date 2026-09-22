@@ -15,6 +15,8 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("pi", "Pi"),
     ("opencode", "OpenCode"),
     ("antigravity", "Antigravity"),
+    ("qoder", "Qoder"),
+    ("xiaomi-mimo", "Xiaomi MiMo Desktop"),
 ];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +84,15 @@ impl Default for Settings {
                 .map(|p| p.join("conversation_summaries.db").display().to_string())
                 .collect(),
         );
+        // Qoder CN：只注册 ~/.qoder-cn/projects（#105 的硬隐私边界）。同族的
+        // .qwenworkcn/.qoderwork/.qoderworkcn/.qmind/.qoder/.qoder-cli 一律不发现、
+        // 不扫描、不注册；.auth 永不进 roots。自定义目录由设置显式指定。
+        let qoder = home.join(".qoder-cn");
+        roots.insert(
+            "qoder".into(),
+            vec![qoder.join("projects").display().to_string()],
+        );
+        roots.insert("xiaomi-mimo".into(), vec![home.join(".local/share/mimocode/mimocode.db").display().to_string()]);
         Self {
             port: 8787,
             refresh_seconds: 60,
@@ -151,10 +162,16 @@ pub fn initialize(root: &Path) -> Result<(), String> {
     Ok(())
 }
 pub fn settings(root: &Path) -> Result<Settings, String> {
-    let s: Settings = serde_json::from_str(
+    let mut s: Settings = serde_json::from_str(
         &fs::read_to_string(root.join("settings.json")).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    // Older settings predate these adapters. Preserve explicitly empty roots and
+    // disabled agents; only absent source keys receive the new defaults.
+    let defaults = Settings::default();
+    for agent in ["qoder", "xiaomi-mimo"] {
+        s.roots.entry(agent.into()).or_insert_with(|| defaults.roots[agent].clone());
+    }
     s.validate()?;
     Ok(s)
 }

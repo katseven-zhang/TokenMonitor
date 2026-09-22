@@ -6,7 +6,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('TokenMonitor UI smoke-' + [guid]:
 New-Item -ItemType Directory -Path $root | Out-Null
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0); $listener.Start()
 $port = $listener.LocalEndpoint.Port; $listener.Stop()
-@{ port=$port; refreshSeconds=86400; roots=@{}; disabledAgents=@('codex','claude-code','ccmr','zcode','dsh','workbuddy','grok','pi','opencode','antigravity') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding utf8NoBOM
+@{ port=$port; refreshSeconds=86400; roots=@{}; disabledAgents=@('codex','claude-code','ccmr','zcode','dsh','workbuddy','grok','pi','opencode','antigravity','qoder','xiaomi-mimo') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding utf8NoBOM
 Add-Type @"
 using System;
 using System.Collections.Generic;

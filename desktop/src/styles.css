@@ -7,6 +7,9 @@
 .quota-history { border-top:1px solid rgb(var(--border)); padding:16px 22px; }
 .quota-history summary { cursor:pointer; font-size:12px; line-height:1.8; }
 .quota-history-table { max-height:420px; }
+/* 会话级计费观测（Qoder 等非额度窗口来源）与窗口卡片共用一张面板，需自己的分隔线。 */
+.credit-block { border-top:1px solid rgb(var(--border)); padding-bottom:8px; }
+.credit-block>.panel-heading { padding:16px 22px 10px; }
 
 .table-sort { padding:0; white-space:nowrap; text-align:inherit; }
 .table-sort:hover { color:rgb(var(--foreground)); }

@@ -11,6 +11,10 @@ $expected = @($PackageFiles + 'manifest.json')
 $actual = @(Get-ChildItem -LiteralPath $directory -Force | ForEach-Object Name)
 if (Compare-Object $expected $actual) { throw 'Distribution whitelist mismatch' }
 $manifest = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
+$packageVersion = (Get-Content -LiteralPath (Join-Path $root 'desktop/package.json') -Raw | ConvertFrom-Json).version
+$tauriVersion = (Get-Content -LiteralPath (Join-Path $root 'desktop/src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
+$binaryVersion = (& (Join-Path $directory 'TokenMonitor.exe') --version | Out-String).Trim()
+if ($manifest.version -ne $packageVersion -or $tauriVersion -ne $packageVersion -or $binaryVersion -ne "TokenMonitor $packageVersion") { throw 'Release version mismatch between package, manifest, Tauri and executable' }
 if (Compare-Object ($expected | Where-Object { $_ -ne 'manifest.json' }) @($manifest.files.name)) { throw 'Manifest whitelist mismatch' }
 foreach ($file in $manifest.files) {
     $path = Join-Path $directory $file.name

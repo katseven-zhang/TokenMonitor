@@ -55,6 +55,11 @@ fn indexed_path(path: &Path) -> String {
         .display()
         .to_string()
 }
+/// Qoder 的会话状态文件（与 `<会话id>.jsonl` 同名的兄弟目录里）。它不是 JSONL，
+/// 只有本源按文件名认领，其它源不会被它干扰。
+fn is_qoder_state(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "state.json")
+}
 fn collect_file(
     db: &mut Connection,
     agent: &str,
@@ -67,7 +72,7 @@ fn collect_file(
     let (size, mtime) = fingerprint(&path)?;
     s.files += 1;
     // SQLite may change only in WAL; never skip it using the main file fingerprint.
-    let sqlite = matches!(agent, "opencode" | "zcode" | "antigravity");
+    let sqlite = matches!(agent, "opencode" | "xiaomi-mimo" | "zcode" | "antigravity");
     if !sqlite && db::unchanged(db, &path_text, agent, size, mtime) {
         s.malformed_lines += db::malformed_lines(db, &path_text, agent)?;
         s.reused += 1;
@@ -75,6 +80,9 @@ fn collect_file(
     }
     let parsed = if agent == "antigravity" {
         collectors::read_antigravity(&path, project.unwrap_or(""))
+    } else if agent == "qoder" && is_qoder_state(&path) {
+        // 会话状态是第二个数据面（真实 token），与转录的 credits 面互不混用
+        crate::qoder::read_state(&path)
     } else if sqlite {
         collectors::read_sqlite(agent, &path)
     } else {
@@ -170,7 +178,7 @@ pub fn scan_cancellable(
                         _ => {}
                     }
                 }
-            } else if matches!(agent, "zcode" | "opencode") {
+            } else if matches!(agent, "zcode" | "opencode" | "xiaomi-mimo") {
                 if !seen.insert(indexed_path(path).to_lowercase()) {
                     continue;
                 }
@@ -187,6 +195,7 @@ pub fn scan_cancellable(
                             let ext = e.path().extension().unwrap_or_default().to_string_lossy();
                             if ext != "jsonl"
                                 && !(agent == "dsh" && (ext == "zstd" || ext == "zst"))
+                                && !(agent == "qoder" && is_qoder_state(e.path()))
                             {
                                 continue;
                             }

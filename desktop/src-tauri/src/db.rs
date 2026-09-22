@@ -1,5 +1,5 @@
 use crate::{
-    model::{Activity, Event, Parsed, Query},
+    model::{Activity, Event, Parsed, Query, Tokens},
     pricing::Prices,
     types::{DailyUsageRow, ModelUsage},
 };
@@ -42,9 +42,11 @@ pub fn open(root: &Path) -> Result<Connection, String> {
       CREATE INDEX IF NOT EXISTS activity_time ON raw_activities(ts,agent);
       CREATE INDEX IF NOT EXISTS activity_identity ON raw_activities(agent,id);
       CREATE TABLE IF NOT EXISTS quota(path TEXT NOT NULL,agent TEXT NOT NULL,session TEXT NOT NULL,ts INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(path,agent,session,ts));
+      CREATE INDEX IF NOT EXISTS quota_request_identity ON quota(agent,session,ts);
       CREATE TABLE IF NOT EXISTS scan_status(agent TEXT PRIMARY KEY,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cache_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS source_health(path TEXT NOT NULL,agent TEXT NOT NULL,malformed_lines INTEGER NOT NULL,PRIMARY KEY(path,agent));
+      CREATE TABLE IF NOT EXISTS qoder_snapshots(session TEXT NOT NULL,ts INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(session,ts));
       CREATE VIEW IF NOT EXISTS events AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_events) WHERE rank=1;
       CREATE VIEW IF NOT EXISTS activities AS SELECT * FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,id ORDER BY path) AS rank FROM raw_activities) WHERE rank=1;").map_err(|e|e.to_string())?;
     let view_revision: Option<String> = db.query_row(
@@ -75,7 +77,7 @@ pub fn open(root: &Path) -> Result<Connection, String> {
     }
     // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
     // while preserving cached data until each replacement transaction is ready.
-    const COLLECTOR_REVISION: &str = "4";
+    const COLLECTOR_REVISION: &str = "5";
     let revision: Option<String> = db
         .query_row(
             "SELECT value FROM cache_metadata WHERE key='collector_revision'",
@@ -111,6 +113,37 @@ pub fn replace_file(
 ) -> Result<(), String> {
     let tx = db.transaction().map_err(|e| e.to_string())?;
     tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS changed_keys(kind TEXT,agent TEXT,id TEXT,PRIMARY KEY(kind,agent,id)); DELETE FROM changed_keys;").map_err(|e|e.to_string())?;
+    let mut snapshot_events = Vec::new();
+    let snapshot = agent == "qoder" && Path::new(path).file_name().is_some_and(|n| n == "state.json");
+    if snapshot {
+        for event in &parsed.events {
+            // A session snapshot can occur in several archived files. Store each
+            // watermark once, then derive a chronological delta ledger. Late old
+            // copies split the initial baseline rather than double counting it.
+            tx.execute("INSERT OR REPLACE INTO qoder_snapshots VALUES(?1,?2,?3)",params![event.session,event.ts,serde_json::to_string(event).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT OR IGNORE INTO changed_keys SELECT 'raw_events',agent,id FROM raw_events WHERE agent='qoder' AND session=?1",[&event.session]).map_err(|e|e.to_string())?;
+            tx.execute("DELETE FROM raw_events WHERE agent='qoder' AND session=?1",[&event.session]).map_err(|e|e.to_string())?;
+            let mut stmt=tx.prepare("SELECT data FROM qoder_snapshots WHERE session=?1 ORDER BY ts").map_err(|e|e.to_string())?;
+            let rows=stmt.query_map([&event.session],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?;
+            let mut previous: Option<Tokens> = None;
+            for row in rows {
+                let mut observed: Event=serde_json::from_str(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                let current=observed.tokens.clone();
+                if let Some(old)=previous {
+                    let reset=current.input+current.cached < old.input+old.cached || current.output < old.output || current.cache_write < old.cache_write;
+                    observed.tokens=if reset { Tokens::default() } else {
+                        let input=(current.input+current.cached-old.input-old.cached).max(0);
+                        let cached=(current.cached-old.cached).clamp(0,input);
+                        Tokens {input:input-cached,cached,cache_write:(current.cache_write-old.cache_write).max(0),output:(current.output-old.output).max(0),reasoning:(current.reasoning-old.reasoning).max(0)}
+                    };
+                }
+                previous=Some(current);
+                observed.path=path.into();
+                observed.id=format!("{}|{}",observed.session,observed.ts);
+                if observed.tokens.total()>0 { snapshot_events.push(observed); }
+            }
+        }
+    }
     for table in ["raw_events","raw_activities"] {
         tx.execute(&format!("INSERT OR IGNORE INTO changed_keys SELECT ?3,agent,id FROM {table} WHERE path=?1 AND agent=?2"),params![path,agent,table]).map_err(|e|e.to_string())?;
     }
@@ -125,7 +158,7 @@ pub fn replace_file(
         let mut stmt = tx
             .prepare("INSERT OR REPLACE INTO raw_events VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
             .map_err(|e| e.to_string())?;
-        for e in &parsed.events {
+        for e in if snapshot { &snapshot_events } else { &parsed.events } {
             stmt.execute(params![
                 path,
                 agent,

@@ -191,8 +191,9 @@ pub fn dashboard(db: &Connection, q: &Query, prices: &Prices) -> Result<Value, S
     for a in &activities {
         *tools.entry(a.name.clone()).or_default() += 1;
     }
-    let mut stmt=db.prepare("SELECT agent,session,ts,payload FROM quota WHERE ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
-    let quotas=stmt.query_map(params![q.end,q.agent],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.map(|row|{let(a,s,t,p)=row.map_err(|e|e.to_string())?;Ok(json!({"agent":a,"session":s,"ts":t,"payload":serde_json::from_str::<Value>(&p).map_err(|e|e.to_string())?}))}).collect::<Result<Vec<_>,String>>()?;
+    let mut stmt=db.prepare("SELECT agent,session,ts,payload FROM quota WHERE agent!='qoder' AND ts<?1 AND (?2 IS NULL OR agent=?2) ORDER BY ts DESC LIMIT 100").map_err(|e|e.to_string())?;
+    let mut quotas=stmt.query_map(params![q.end,q.agent],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?))).map_err(|e|e.to_string())?.map(|row|{let(a,s,t,p)=row.map_err(|e|e.to_string())?;Ok(json!({"agent":a,"session":s,"ts":t,"payload":serde_json::from_str::<Value>(&p).map_err(|e|e.to_string())?}))}).collect::<Result<Vec<_>,String>>()?;
+    quotas.extend(qoder_credit_summary(db,q)?);
     let mut stmt = db
         .prepare("SELECT data FROM scan_status ORDER BY agent")
         .map_err(|e| e.to_string())?;
@@ -212,9 +213,48 @@ pub fn activity_page(db: &Connection, q: &Query, offset: usize, limit: usize) ->
     let (total,items)=db::activity_page(db,q,offset,limit)?;
     Ok(json!({"total":total,"items":items}))
 }
+pub fn qoder_credit_summary(db: &Connection, q: &Query) -> Result<Vec<Value>, String> {
+    let mut groups:BTreeMap<String,Value>=BTreeMap::new();
+    for row in qoder_credits(db,q)? {
+        let session=row["session"].as_str().unwrap_or("").to_string();
+        let p=&row["payload"];
+        if let Some(group)=groups.get_mut(&session) {
+            let target=&mut group["payload"];
+            for key in ["requests","credits","original_credits","billable_requests"] {
+                target[key]=match (target[key].as_f64(),p[key].as_f64()) { (Some(a),Some(b))=>json!(a+b),_=>Value::Null };
+            }
+            target["context_usage_ratio"]=match(target["context_usage_ratio"].as_f64(),p["context_usage_ratio"].as_f64()) {(Some(a),Some(b))=>json!(a.max(b)),_=>Value::Null};
+            if let Some(models)=p["models"].as_object() {
+                for (model,n) in models {target["models"][model]=json!(target["models"][model].as_i64().unwrap_or(0)+n.as_i64().unwrap_or(0));}
+            }
+        } else {
+            let mut summary=row;
+            summary["payload"].as_object_mut().unwrap().remove("request_id");
+            groups.insert(session,summary);
+        }
+    }
+    Ok(groups.into_values().collect())
+}
+
+pub fn qoder_credits(db: &Connection, q: &Query) -> Result<Vec<Value>, String> {
+    if q.agent.as_deref().is_some_and(|a| a!="qoder") { return Ok(vec![]); }
+    // Dedupe globally BEFORE the half-open time filter, including archived and
+    // sidechain copies. The stored session column is the request identity.
+    let mut stmt=db.prepare("SELECT session,ts,payload FROM (SELECT *,ROW_NUMBER() OVER(PARTITION BY agent,session ORDER BY ts,path) AS rank FROM quota WHERE agent='qoder' AND json_extract(payload,'$.request_id') IS NOT NULL) WHERE rank=1 AND ts>=?1 AND ts<?2 ORDER BY ts DESC").map_err(|e|e.to_string())?;
+    let rows=stmt.query_map(params![q.start,q.end],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?;
+    let mut out=vec![];
+    for row in rows {
+        let (id,ts,payload)=row.map_err(|e|e.to_string())?;
+        let p: Value=serde_json::from_str(&payload).map_err(|e|e.to_string())?;
+        let event=crate::model::Event { id,agent:"qoder".into(),session:p["session_id"].as_str().unwrap_or("").into(),project:p["project"].as_str().unwrap_or("").into(),model:p["model"].as_str().unwrap_or("").into(),ts,tokens:Default::default(),path:String::new(),line:0 };
+        if q.matches(&event) { out.push(json!({"agent":"qoder","session":event.session,"ts":ts,"payload":p})); }
+    }
+    Ok(out)
+}
+
 fn quota_history(db: &Connection, q: &Query) -> Result<Value, String> {
     // Archive copies of the same observation do not represent new observations.
-    let selection = "SELECT DISTINCT agent,session,ts,payload FROM quota WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR session=?4)";
+    let selection = "SELECT DISTINCT agent,session,ts,payload FROM quota WHERE agent!='qoder' AND ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR session=?4)";
     let total: i64 = db.query_row(&format!("SELECT COUNT(*) FROM ({selection})"), params![q.start,q.end,q.agent,q.session], |r|r.get(0)).map_err(|e|e.to_string())?;
     let mut stmt = db.prepare(&format!("{selection} ORDER BY ts DESC,session LIMIT 500")).map_err(|e|e.to_string())?;
     let items = stmt.query_map(params![q.start,q.end,q.agent,q.session], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,String>(3)?)))

@@ -8,7 +8,7 @@ TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用
 
 ### 多 Agent 统一采集
 
-当前桌面版支持 10 个本地来源：
+当前桌面版支持 12 个本地来源：
 
 | Agent / 工具 | 默认数据位置或类型 | 采集方式 |
 |---|---|---|
@@ -21,6 +21,8 @@ TokenMonitor 是一款面向 Windows 的本地多 Agent 用量分析桌面应用
 | Grok Build | `~/.grok/sessions` | JSONL |
 | Pi | `~/.pi/agent/sessions` | JSONL |
 | OpenCode | `opencode.db` | SQLite/WAL |
+| Qoder CN | `~/.qoder-cn/projects` | 认证解密累计 token 状态、逐请求 credits |
+| Xiaomi MiMo Desktop | `~/.local/share/mimocode/mimocode.db` | SQLite/WAL；包含 reasoning |
 | Antigravity | `conversation_summaries.db` | SQLite/WAL |
 
 每个来源都归一化为相同的时间、Agent、模型、项目、会话、Token 分类与工具调用结构。扫描采用只读访问，并通过文件游标、数据库水位、来源版本和去重键保证重复扫描尽量不重不漏。
@@ -120,7 +122,7 @@ dist/TokenMonitor-desktop-windows-x64.zip
 本地 Agent 日志 / SQLite / zstd
                 │
                 ▼
-      Rust 原生来源采集器（10 源）
+      Rust 原生来源采集器（12 源）
                 │
                 ▼
       SQLite 统一事件缓存与去重
@@ -180,7 +182,7 @@ TokenMonitor 仅读取用户配置的本机 Agent 记录。索引、统计、价
 
 以下能力是在 TokenMonitor 项目中设计并实现的：
 
-- 10 个 Agent 来源的原生采集器和统一事件模型；
+- 12 个 Agent 来源的原生采集器和统一事件模型；
 - 增量扫描、SQLite/WAL 读取、去重、缓存与来源健康状态；
 - 模型别名、Token 分项、历史生效价格、未知价格语义；
 - 中国模型 CNY、海外模型 USD 的本地价格目录策略；

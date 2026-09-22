@@ -1,6 +1,6 @@
 [package]
 name = "tokenmonitor-desktop"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 license = "MIT"
 default-run = "TokenMonitor"
@@ -31,6 +31,10 @@ walkdir = "2"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
 percent-encoding = "2"
+aes-gcm = "0.10.3"
+base64 = "0.22"
+sha2 = "0.10"
+regex = "1"
 rust_xlsxwriter = "0.94.1"
 tauri = { version = "2", features = ["tray-icon", "image-png"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
