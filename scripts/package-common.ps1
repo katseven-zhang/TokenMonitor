@@ -65,3 +65,74 @@ function Remove-OwnedAutostart([string]$Directory, [string]$RegistryPath) {
         }
     }
 }
+
+# Use the explicit Unicode shell-link interface. WScript.Shell's automation
+# TargetPath setter can reject a Unicode install path on non-Chinese Windows.
+# https://learn.microsoft.com/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishelllinkw
+function Initialize-DesktopShortcuts {
+    if ('TokenMonitor.DesktopShortcuts' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+namespace TokenMonitor {
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    internal class ShellLink { }
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int count, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr list);
+        void SetIDList(IntPtr list);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder text, int count);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string text);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int count);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string path);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int count);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+        void GetHotkey(out short key);
+        void SetHotkey(short key);
+        void GetShowCmd(out int command);
+        void SetShowCmd(int command);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int count, out int index);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string path, int index);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+        void Resolve(IntPtr window, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
+    }
+    public static class DesktopShortcuts {
+        public static void Save(string shortcut, string target, string directory) {
+            object instance = new ShellLink();
+            try {
+                var link = (IShellLinkW)instance;
+                link.SetPath(target);
+                link.SetWorkingDirectory(directory);
+                link.SetDescription("TokenMonitor");
+                ((IPersistFile)instance).Save(shortcut, true);
+            } finally { Marshal.FinalReleaseComObject(instance); }
+        }
+        public static string[] Read(string shortcut) {
+            object instance = new ShellLink();
+            try {
+                ((IPersistFile)instance).Load(shortcut, 0);
+                var link = (IShellLinkW)instance;
+                var target = new StringBuilder(32768);
+                var directory = new StringBuilder(32768);
+                link.GetPath(target, target.Capacity, IntPtr.Zero, 4); // SLGP_RAWPATH
+                link.GetWorkingDirectory(directory, directory.Capacity);
+                return new[] { target.ToString(), directory.ToString() };
+            } finally { Marshal.FinalReleaseComObject(instance); }
+        }
+    }
+}
+"@
+}
+function New-DesktopShortcut([string]$Path, [string]$TargetPath, [string]$WorkingDirectory) {
+    Initialize-DesktopShortcuts
+    [TokenMonitor.DesktopShortcuts]::Save($Path, $TargetPath, $WorkingDirectory)
+}
+function Get-DesktopShortcut([string]$Path) {
+    Initialize-DesktopShortcuts
+    $values = [TokenMonitor.DesktopShortcuts]::Read($Path)
+    [pscustomobject]@{ TargetPath = $values[0]; WorkingDirectory = $values[1] }
+}

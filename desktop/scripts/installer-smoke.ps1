@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $source = Join-Path $repo 'dist/desktop-windows-x64'
 . (Join-Path $source 'package-common.ps1')
-$root = Join-Path ([IO.Path]::GetTempPath()) ('TokenMonitor 安装 smoke-' + [guid]::NewGuid())
+# Include characters outside both Western and Chinese ANSI code pages.
+$root = Join-Path ([IO.Path]::GetTempPath()) ('TokenMonitor 安装 العربية 🚀 smoke-' + [guid]::NewGuid())
 $registry = 'HKCU:\Software\TokenMonitor-Install-Test-' + [guid]::NewGuid()
 New-Item -ItemType Directory -Path $root | Out-Null
 $programs = Join-Path $root 'Programs'; $menu = Join-Path $root 'Menu'; $desktop = Join-Path $root 'Desktop'
@@ -38,8 +39,11 @@ try {
     Assert-DesktopPackage $install
     Check ((Get-FileHash -LiteralPath (Join-Path $sentinel 'database')).Hash -eq $dataHash) 'failed version probe preserves data bytes'
     Check (-not (Test-Path -LiteralPath "$install.new")) 'failed version probe removes only staged program files'
-    $shell = New-Object -ComObject WScript.Shell
-    Check ($shell.CreateShortcut((Join-Path $menu 'TokenMonitor.lnk')).TargetPath -eq (Join-Path $install 'TokenMonitor.exe')) 'start menu points to installed desktop'
+    foreach ($shortcutDirectory in @($menu, $desktop)) {
+        $link = Get-DesktopShortcut (Join-Path $shortcutDirectory 'TokenMonitor.lnk')
+        Check ($link.TargetPath -eq (Join-Path $install 'TokenMonitor.exe')) 'saved Unicode shortcut points to installed desktop'
+        Check ($link.WorkingDirectory -eq $install) 'saved Unicode shortcut preserves working directory'
+    }
     Install
     Check (-not (Test-Path -LiteralPath "$install.old")) 'upgrade removes verified old program copy'
     Check ((Get-Content -LiteralPath (Join-Path $sentinel 'database')) -eq 'preserve-user-data') 'upgrade preserves separate data'
@@ -126,7 +130,7 @@ try {
     Remove-Item Env:TOKENMONITOR_DATA_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $registry) { Remove-Item -LiteralPath $registry -Recurse -Force }
     $full = [IO.Path]::GetFullPath($root)
-    if (-not $full.StartsWith([IO.Path]::GetTempPath(),[StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $full) -notlike 'TokenMonitor 安装 smoke-*') { throw 'Unsafe test cleanup target' }
+    if (-not $full.StartsWith([IO.Path]::GetTempPath(),[StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $full) -notlike 'TokenMonitor 安装 العربية 🚀 smoke-*') { throw 'Unsafe test cleanup target' }
     Assert-PlainTree $full
     Remove-Item -LiteralPath $full -Recurse -Force
 }

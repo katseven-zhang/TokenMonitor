@@ -35,15 +35,12 @@ try {
     Move-Item -LiteralPath $stage -Destination $install
     $swapped = $true
     Assert-DesktopPackage $install
-    $shell = New-Object -ComObject WScript.Shell
     $shortcutRoots = @($StartMenuRoot)
     if ($DesktopShortcut) { $shortcutRoots += $DesktopRoot }
     foreach ($directory in $shortcutRoots) {
         Assert-PlainTree $directory
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
-        $link = $shell.CreateShortcut((Join-Path $directory 'TokenMonitor.lnk'))
-        $link.TargetPath = Join-Path $install 'TokenMonitor.exe'; $link.WorkingDirectory = $install
-        $link.Description = 'TokenMonitor'; $link.Save()
+        New-DesktopShortcut -Path (Join-Path $directory 'TokenMonitor.lnk') -TargetPath (Join-Path $install 'TokenMonitor.exe') -WorkingDirectory $install
     }
 } catch {
     if ($swapped) { Remove-ProgramTree $install $install }
