@@ -14,7 +14,8 @@
     "codex",
     "observability",
     "cli",
-    "macos"
+    "macos",
+    "windows"
   ],
   "homepage": "https://github.com/katseven-zhang/TokenMonitor#readme",
   "bugs": {
@@ -25,7 +26,7 @@
     "url": "git+https://github.com/katseven-zhang/TokenMonitor.git"
   },
   "license": "MIT",
-  "author": "louwill",
+  "author": "TokenMonitor contributors",
   "type": "module",
   "bin": {
     "tokenmonitor": "bin/tokenmonitor.js"
