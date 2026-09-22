@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { extname, join, resolve, dirname } from 'node:path';
+import { sep, extname, join, resolve, dirname } from 'node:path';
 import { WEB_DIR, ECHARTS_PATH, DB_PATH, isOffline, SOURCES, SOURCE_ERRORS } from './config.js';
 import { TOOL_COLORS, TOOL_LABEL } from '../web/lib/theme.js';
 import { learnWorkbuddyRates } from './rates.js';
@@ -713,7 +713,11 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
                SUM(input_tokens) input, SUM(cached_input) cached, SUM(cache_write) cache_write,
                SUM(output_tokens) output, SUM(total_tokens) total, COUNT(*) calls
         FROM events WHERE ts >= ? GROUP BY d, tool ORDER BY d`).all(since);
-      const esc = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
+      // #74：分隔符判定要含 \r。/api/codex/export.csv（本文件另一处导出）早就把 \r
+      // 算进"需要加引号"，这里只判 [",\n]——同一个仓库里两条导出走两套规矩。
+      // 少判 \r 的后果不是崩溃而是静默错位：字段里含裸 CR 时，Excel/CRLF 读取器
+      // 会把一行拆成两行，导出的账看起来对不上，却没人能说是哪一格的问题。
+      const esc = (v) => /[",\n\r]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
       const csv = 'day,tool,input,cached_input,cache_write,output,total,calls\n' +
         rows.map(r => [r.d, r.tool, r.input, r.cached, r.cache_write, r.output, r.total, r.calls].map(esc).join(',')).join('\n') + '\n';
       res.writeHead(200, {
@@ -739,8 +743,14 @@ export function startServer({ store, scanner, balancePoller, port, log = () => {
     // Codex 独立统计页（#48）：稳定可书签路由；真实导航天然支持 Back/Forward
     if (p === '/codex' || p === '/codex/') return serveFile(res, join(WEB_DIR, 'codex.html'));
     // 静态资源：限制在 web 目录内
+    // #74：containment 用的是 startsWith(根目录)，而目录根不带结尾分隔符，于是
+    // "<web 根><任何东西>" 都算"在里面"——同级的 web-internal\、web_bak\ 这类兄弟
+    // 目录会被放行。今天打不到（url.pathname 先被 WHATWG 归一化，`..` 出不了根），
+    // 但这是纵深防御的一层：它挡的正是"哪天上面多了一条不走归一化的分支"。
+    // 比较对象改成"根目录 + 分隔符"，另加"正好等于根目录"这一支。
+    const webRoot = resolve(WEB_DIR);
     const safe = resolve(WEB_DIR, '.' + p);
-    if (safe.startsWith(resolve(WEB_DIR))) return serveFile(res, safe);
+    if (safe === webRoot || safe.startsWith(webRoot + sep)) return serveFile(res, safe);
     res.writeHead(404); res.end();
   }, log));
 

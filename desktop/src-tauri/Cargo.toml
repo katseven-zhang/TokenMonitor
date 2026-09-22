@@ -2,6 +2,17 @@
 name = "tokenmonitor-desktop"
 version = "2.0.0"
 edition = "2021"
+# #102：MSRV 声明。取的是"代码与依赖真的要求多少"，不是 rust-toolchain.toml 钉的
+# 那个 channel（照抄钉住的版本等于把升级工具链和抬高下限这两件无关的事绑在一起，
+# 而且永远说不清下限到底是被谁顶上去的）。查证结果：
+#   - 本 crate 自己的代码：File::try_lock / File::lock（src/main.rs 的 desktop.lock、
+#     src/service.rs 的 service.lock）走的 std::fs::FileLock，标准库里的稳定标记是
+#     since = "1.89.0"；Option::is_none_or（src/model.rs 的查询过滤）是 1.82。
+#   - 依赖闭包（当前 Cargo.lock）里声明的 rust-version 最高为 1.88
+#     （time / image / plist / serde_with / icu_* 这一批）。
+# 取两者最大值 → 1.89。windows/gui 与 windows/tray 是另一条线（只要 1.70，
+# 它们不用这些 API），三条线各自声明，互不牵连。
+rust-version = "1.89"
 license = "MIT"
 default-run = "TokenMonitor"
 

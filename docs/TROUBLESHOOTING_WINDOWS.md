@@ -64,7 +64,8 @@ node bin\tokenmonitor.js install-agent --force           # 冲突的另一条命
 
 ## 3. 托盘不在线 / 托盘 EXE 缺失
 
-- Windows 系统托盘**已实现**（✅ #9 `b534213`，.NET 8 自包含单文件）。`bar` 会查找托盘 EXE 并以 `--port` 拉起；托盘 EXE 属构建产物，源码目录未 `dotnet publish` 时会得到含 `tray` 与面板地址的明确提示——这不是故障，构建托盘（`dotnet publish windows\tray\TokenMonitorTray.csproj -c Release -r win-x64`）或直接用浏览器打开面板均可。
+- Windows 系统托盘**已实现**（✅ #9 `b534213`；#32 起为**原生 Rust Win32 自包含单文件**，零 .NET 依赖）。`bar` 会查找托盘 EXE 并以 `--port` 拉起；托盘 EXE 属构建产物，源码目录未构建时会得到含 `tray` 与面板地址的明确提示——这不是故障，构建托盘（`powershell -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1`，输出固定到 `windows\tray\publish\TokenMonitorTray.exe`，需要仓库 `rust-toolchain.toml` 固定的 Rust 工具链）或直接用浏览器打开面板均可。
+  **旧文档写的 `dotnet publish windows\tray\TokenMonitorTray.csproj` 已失效**：`.csproj` 与 `Program.cs` 随 #32 的 Rust 重写一并删除，照抄只会得到 MSBUILD 找不到工程的错误（`test/windows/tray.test.mjs` 有断言守住".NET 工程不得复活"）。
 - 托盘单实例互斥，重复执行 `bar` 不会开出第二个托盘；托盘显示离线时先 `status` 确认后台，再 `serve` 启动或用托盘菜单「启动或重启后台」；浏览器访问 `http://127.0.0.1:<端口>`。
 
 ## 4. SQLite 数据库被占用 / 来源错误提示 SQLITE_BUSY

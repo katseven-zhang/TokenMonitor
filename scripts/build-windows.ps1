@@ -21,6 +21,9 @@
     as a fresh build; exit code is non-zero on failure.
   - Output is scanned for secrets/runtime artifacts (.agentchatroom, .workbuddy,
     acr.credential_ tokens, *.db/*.log); any hit fails the build.
+  - #74: bin\ is copied entry by entry so the macOS bundle (bin\tokenmonitor.app,
+    left behind by `npm run build-bar`) can never ride along, and every shipped
+    file is checked for a non-PE (ELF / Mach-O) binary header; any hit fails.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-windows.ps1
@@ -34,6 +37,27 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 function Fail([string]$Message) { throw $Message }
+
+# #74：读文件头 4 个字节，认出非 Windows 的原生二进制（ELF / Mach-O / bitcode）。
+# Windows 的 PE 以 MZ 开头，脚本与文本以可读字节开头，都不算命中。
+function Get-ForeignBinaryKind([string]$Path) {
+  $bytes = New-Object byte[] 4
+  $count = 0
+  $stream = [IO.File]::OpenRead($Path)
+  try { $count = $stream.Read($bytes, 0, 4) } finally { $stream.Dispose() }
+  if ($count -lt 4) { return $null }
+  if ($bytes[0] -eq 0x7F -and $bytes[1] -eq 0x45 -and $bytes[2] -eq 0x4C -and $bytes[3] -eq 0x46) { return 'ELF' }
+  $machO = @(
+    @([byte]0xFE, [byte]0xED, [byte]0xFA, [byte]0xCE), @([byte]0xFE, [byte]0xED, [byte]0xFA, [byte]0xCF),
+    @([byte]0xCE, [byte]0xFA, [byte]0xED, [byte]0xFE), @([byte]0xCF, [byte]0xFA, [byte]0xED, [byte]0xFE),
+    @([byte]0xCA, [byte]0xFE, [byte]0xBA, [byte]0xBE))
+  foreach ($magic in $machO) {
+    $same = $true
+    for ($i = 0; $i -lt 4; $i++) { if ($bytes[$i] -ne $magic[$i]) { $same = $false; break } }
+    if ($same) { return 'Mach-O' }
+  }
+  return $null
+}
 
 # --- 1. locate repo root (script lives in <repo>\scripts) ---------------------
 $repo = Split-Path -Parent $PSScriptRoot
@@ -121,8 +145,25 @@ try {
   New-Item -ItemType Directory -Path (Join-Path $dist 'tray') -Force | Out-Null
   Copy-Item -LiteralPath $trayExe -Destination (Join-Path $dist 'tray\TokenMonitorTray.exe')
 
+  # #74：逐条目复制，不是整目录。bin\ 里可能躺着一台跑过 `npm run build-bar` 的
+  # 机器留下的 macOS 胶囊 bin\tokenmonitor.app\（它被 .gitignore 忽略，所以
+  # git status 里完全看不见）。以前这里 `Copy-Item -Recurse` 整个 bin\，Windows 包
+  # 就会带一份 Mach-O 的胶囊可执行文件出去；而下面的内容扫描故意跳过 .exe 只读文本，
+  # 所以没有任何一处会发现。排除项点名 tokenmonitor.app：它是这个仓库里唯一
+  # 会出现在 bin\ 下的非 Windows 产物。
+  $copyExclude = @('tokenmonitor.app')
   foreach ($dir in @('bin', 'src', 'web')) {
-    Copy-Item -Path (Join-Path $repoFull $dir) -Destination (Join-Path $runtime $dir) -Recurse
+    # 只预建这一层，条目本身交给 Copy-Item 落位：目标已存在时 Copy-Item -Recurse
+    # 会把源目录塞进同名子目录里去（runtime\web\web），那是另一种"看起来成功了"。
+    $target = Join-Path $runtime $dir
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+    foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $repoFull $dir) -Force) {
+      if ($copyExclude -contains $entry.Name) {
+        Write-Host "[build] excluded $dir\$($entry.Name) (not a Windows artifact)"
+        continue
+      }
+      Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path $target $entry.Name) -Recurse -Force
+    }
   }
   Copy-Item -LiteralPath (Join-Path $repoFull 'package.json') -Destination (Join-Path $runtime 'package.json')
 
@@ -143,9 +184,12 @@ try {
   # Content level: no credential tokens. (Source code legitimately references the
   # WorkBuddy app's data directory - that is the collector's job - so the string
   # "workbuddy" in code is not a violation.)
+  # #74：路径级的元数据检查顺带盯住 .app 目录（macOS 包就是一个目录）。用 Name 匹配
+  # 而不是 .Extension：DirectoryInfo 没有 Extension 属性，Set-StrictMode 2.0 下
+  # 访问不存在的属性会直接抛错，那条检查会从"拦住 mac 包"变成"整个构建红"。
   $forbiddenNames = @('.agentchatroom', '.workbuddy')
   $nameHits = Get-ChildItem -LiteralPath $dist -Recurse -Force |
-    Where-Object { $forbiddenNames -contains $_.Name }
+    Where-Object { $forbiddenNames -contains $_.Name -or $_.Name -like '*.app' }
   if ($nameHits) { Fail ("forbidden metadata dirs/files in output: " + (($nameHits | ForEach-Object FullName) -join '; ')) }
 
   $scanHits = @()
@@ -157,6 +201,17 @@ try {
     if ($text -match 'Authorization["''\s:=]+Bearer\s+[A-Za-z0-9._~-]{20,}') { $scanHits += "bearer credential -> $($f.FullName)" }
   }
   if ($scanHits.Count -gt 0) { Fail ("forbidden content in output: " + ($scanHits -join '; ')) }
+
+  # #74：非 Windows 的原生二进制一律算违规。以前的扫描分两段——文本读内容、.exe 整体
+  # 跳过——于是"任何不是 PE 的二进制"落在两段之间的缝里：一台跑过 build-bar 的机器
+  # 把 Mach-O 复制进 runtime\bin 也不会被 reported。这条不依赖复制逻辑写得多对，
+  # 它守的是结果（"Windows 包里不能有别的平台的可执行文件"）。
+  $foreignHits = @()
+  foreach ($f in (Get-ChildItem -LiteralPath $dist -Recurse -File)) {
+    $kind = Get-ForeignBinaryKind -Path $f.FullName
+    if ($kind) { $foreignHits += "$kind binary -> $($f.FullName)" }
+  }
+  if ($foreignHits.Count -gt 0) { Fail ("non-Windows binaries in output: " + ($foreignHits -join '; ')) }
 
   $badFiles = Get-ChildItem -LiteralPath $dist -Recurse -File |
     Where-Object { $_.Name -match '\.(db|db-shm|db-wal|log)$' }

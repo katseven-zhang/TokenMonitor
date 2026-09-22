@@ -15,8 +15,8 @@ export function barAppPath() {
 }
 
 /**
- * Windows 托盘构建物（#9 Win-Tray）的候选位置，按序探测：
- * 1. 仓库内 dotnet publish 的固定输出（windows/tray/publish/）；
+ * Windows 托盘构建物（#9 Win-Tray，#32 起为原生 Rust Win32）的候选位置，按序探测：
+ * 1. 仓库内构建的固定输出（windows/tray/publish/，由 windows/tray/build.ps1 产出）；
  * 2. 打包布局（dist/windows-x64 安装后托盘位于 <包>\tray\）。
  */
 export function trayExeCandidates(root = join(import.meta.dirname, '..')) {
@@ -30,10 +30,10 @@ export function openBar({ port = DEFAULT_PORT, log = console.log } = {}) {
   if (process.platform === 'win32') {
     const exe = trayExeCandidates().find(existsSync);
     if (!exe) {
-      // 找不到构建物：给出明确构建指引（需要 .NET 8 SDK），不静默失败
+      // 找不到构建物：给出明确构建指引（需要 Rust 工具链，版本由 rust-toolchain.toml 固定），不静默失败
       throw new Error(
         `找不到 Windows 托盘程序 TokenMonitorTray.exe（tray）。\n` +
-        `  构建自包含单文件（需要 .NET 8 SDK）：\n` +
+        `  构建原生 Rust Win32 自包含单文件：\n` +
         `  powershell -NoProfile -ExecutionPolicy Bypass -File windows\\tray\\build.ps1\n` +
         `  然后重试 tokenmonitor bar --port ${port}；面板地址 http://127.0.0.1:${port}`,
       );

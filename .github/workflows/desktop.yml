@@ -1,9 +1,28 @@
 name: desktop
 
 on:
+  # #102：这个 job 是整个仓库里最贵的一条（45 分钟：npm ci + cargo fetch + 前端构建
+  # + Rust 编译 + 打包 + 生命周期冒烟），但它只消费下面这些输入：
+  #   desktop/**            前端与 src-tauri crate（含 Cargo.lock、scripts/*.ps1、config/）
+  #   LICENSE               build-windows.ps1 把它复制进包，verify-package.ps1 比对哈希
+  #   rust-toolchain.toml   固定的 Rust 工具链
+  #   .github/workflows/desktop.yml  本文件
+  # 所以文档、Node 侧 src/、windows/ 两个 crate 的改动不再触发它（那些分别由
+  # test.yml 与 windows.yml 覆盖）。清单在 push 与 pull_request 下各写一遍是
+  # GitHub 不支持 YAML 锚点，[27] 段会盯着两份是否走岔。
   push:
     branches: [main, 'codex/**']
+    paths:
+      - '.github/workflows/desktop.yml'
+      - 'desktop/**'
+      - 'LICENSE'
+      - 'rust-toolchain.toml'
   pull_request:
+    paths:
+      - '.github/workflows/desktop.yml'
+      - 'desktop/**'
+      - 'LICENSE'
+      - 'rust-toolchain.toml'
   workflow_dispatch:
     inputs:
       gate_probe:
@@ -15,10 +34,24 @@ on:
 permissions:
   contents: read
 
+# #74：并发组把"同分支 push + 它的 PR"合并成一条队列（组的键与另外两个 workflow 同
+# 一套写法，见 test.yml 里的注释）。但这里 **cancel-in-progress: false**，是三个
+# workflow 里唯一不敢 cancel 的：这个 job 是全仓库唯一会产出可下载发布物的地方，
+# 最后一步 upload-artifact 交出的 dist/TokenMonitor-desktop-windows-x64.zip 是
+# 人工核包/reviewer 回看时的对象。cancel 掉一条正在跑的构建，最坏情况是
+# 已经点开的 run 从此没有对应产物（zip 只写了一半、artifact 步骤没跑到），
+# 这比"多花 45 分钟把上一条跑完"贵得多。所以这里宁可排队也不掐。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   windows-desktop:
     runs-on: windows-latest
     timeout-minutes: 45
+    # #102：第三方与官方 action 全部按 commit SHA 固定（`@vN` 浮标签会被上游一次
+    # force-push 静默换掉代码，而 workflow 有 contents:read 与云端缓存权限）。
+    # 版本语义写在行尾注释里，升级时只改 SHA + 注释。test/run.mjs 的 [27] 段守住这条。
     defaults:
       run:
         shell: pwsh
@@ -26,8 +59,8 @@ jobs:
       # Deliberately empty project dependency cache: exercise the documented first build.
       CARGO_HOME: ${{ github.workspace }}/.ci-cargo
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
       - name: Install repository Rust toolchain
@@ -50,16 +83,28 @@ jobs:
       - name: Desktop frontend build
         run: npm run build --prefix desktop
       - name: Desktop Rust tests
+        # #102：windows.yml 早就用 RUSTFLAGS=-Dwarnings 把 gui/tray 的告警当错误，
+        # 同一个仓库不该有两套标准——桌面 crate 是三者中代码量最大的一个，却没有人
+        # 盯着它的告警。cargo 对非 workspace 依赖统一加 --cap-lints allow，所以这
+        # 条只作用于本仓库的 crate，不会被上游依赖的告警误伤。
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: cargo test --offline --locked --tests --manifest-path desktop/src-tauri/Cargo.toml
       - name: 100k and 1m indexed paging regression
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: cargo test --offline --locked --manifest-path desktop/src-tauri/Cargo.toml --test query_scale -- --ignored --nocapture
       - name: Build and package embedded desktop
+        # 真正的 --release 产物在这里编译，零告警门必须盖住它（release 才会跑
+        # 死代码/未使用变量的完整分析，dev profile 的构建不等于这条门）
+        env:
+          RUSTFLAGS: '-Dwarnings'
         run: pwsh -File desktop/scripts/build-windows.ps1
       - name: Verify package and licenses
         run: pwsh -File desktop/scripts/verify-package.ps1
       - name: Packaged service lifecycle smoke
         run: node desktop/scripts/service-smoke.mjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: TokenMonitor-desktop-windows-x64
           path: dist/TokenMonitor-desktop-windows-x64.zip

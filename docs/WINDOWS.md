@@ -75,7 +75,7 @@ schtasks /Query /TN "TokenMonitor-Server" /V /FO LIST  # 手动核对任务状�
 
 ## 5. 系统托盘（✅ 已集成，#9）
 
-实现：[../windows/tray/](../windows/tray/)（独立 Windows 系统托盘，自包含单文件 x64）；测试：[../test/windows/tray.test.mjs](../test/windows/tray.test.mjs)。
+实现：[../windows/tray/](../windows/tray/)（独立 Windows 系统托盘，**原生 Rust Win32**、自包含单文件 x64、零 .NET/运行时依赖；#32 由 .NET 版重写，旧文档中的 "WinForms"/"dotnet publish" 均已失效）；测试：[../test/windows/tray.test.mjs](../test/windows/tray.test.mjs)。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File windows\tray\build.ps1 # 固定目录覆盖构建托盘
@@ -174,7 +174,7 @@ Copy-Item "$env:USERPROFILE\.tokenmonitor" "D:\备份路径\tokenmonitor-backup"
 | Windows 源码/路径 CI 烟测 | ✅ | #14 `d85f78a` | [windows.yml](../.github/workflows/windows.yml)、[verify-windows-source.ps1](../scripts/verify-windows-source.ps1) | [ci-smoke.mjs](../test/windows/ci-smoke.mjs) |
 | 文件监听降级与防抖生命周期 | 🟡 | #7 `e24ad72` | [watch.js](../src/platform/watch.js) | [watch.test.mjs](../test/windows/watch.test.mjs) |
 | 单实例锁/日志/端口诊断/受控关闭 | 🟡 | #11 `235cbda` | [runtime.js](../src/platform/runtime.js) | [runtime.test.mjs](../test/windows/runtime.test.mjs) |
-| 系统托盘（WinForms，单实例，状态轮询） | ✅ | #9 `b534213` | [windows/tray/](../windows/tray/) | [tray.test.mjs](../test/windows/tray.test.mjs) |
+| 系统托盘（原生 Rust Win32，单实例，状态轮询） | ✅ | #9 `b534213`，#32 Rust 重写 | [windows/tray/](../windows/tray/) | [tray.test.mjs](../test/windows/tray.test.mjs) |
 | 非管理员安装器（安装/升级/卸载/回滚） | ✅ | #13 `558380a`/`50fab85` | [install-windows.ps1](../scripts/install-windows.ps1)、[uninstall-windows.ps1](../scripts/uninstall-windows.ps1) | [installer.test.mjs](../test/windows/installer.test.mjs) |
 | EXE 覆盖式构建（dist/windows-x64 + manifest） | ✅ | #12 `c5db723` | [build-windows.ps1](../scripts/build-windows.ps1) | —（验收轮实跑验证） |
 | 面板来源元数据动态展示（/api/sources + 回退色） | ✅ | #16 `eedf2c4` | [../src/server.js](../src/server.js)、[../web/lib/sources.js](../web/lib/sources.js) | [ui-sources.test.mjs](../test/windows/ui-sources.test.mjs) |

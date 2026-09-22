@@ -9,10 +9,10 @@
  *     易错点），scan 两次（幂等），断言 DB 黄金数字与 /api/summary 结构
  */
 import { spawnSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, appendFileSync, readdirSync } from 'node:fs';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import net from 'node:net';
@@ -2307,4 +2307,89 @@ console.log(failed ? `\n✗ ${failed} 项失败` : '\n✓ 全部通过');
 process.exit(failed ? 1 : 0);
 
 function read(p) { return readFileSync(p, 'utf8'); }
+
+/**
+ * #102：抽出 workflow 文本里所有 `uses:` 步骤 → [{ ref, comment }]。
+ * 两种写法都要吃到：`- uses: a/b@sha # v1` 与 `- name: cache` 下另起一行的
+ * `uses: c/d@sha # v2`（第三方 action 基本都是后者）。只认前一种会让 rust-cache
+ * 这类真正需要固定的 action 一条都不进检查，门全绿却是空转。
+ */
+function ciUsesRefs(text) {
+  const re = /^[ \t]*(?:-[ \t]+)?uses:[ \t]*([^\s#]+)(?:[ \t]+#[ \t]*(\S+))?[ \t]*$/gm;
+  return [...text.matchAll(re)].map((m) => ({ ref: m[1], comment: m[2] ?? '' }));
+}
+
+/** #102：两段式版本（"1.89" ≥ "1.87"）的大小比较，供 MSRV 判定用。 */
+function atLeast(declared, required) {
+  const [am, ai] = String(declared).split('.').map(Number);
+  const [bm, bi] = String(required).split('.').map(Number);
+  return am > bm || (am === bm && ai >= bi);
+}
+
+/**
+ * #102：抽出 `on:` 里各事件的 `paths:` / `paths-ignore:` 清单
+ * → { 事件名: { paths: [...], 'paths-ignore': [...] } }（没写的那个键就是 undefined）。
+ * 只认块式（`- 'a/**'`）写法：GitHub 不支持 YAML 锚点，所以两份清单必然各写一遍，
+ * 这里按行扫就够；改成流式写法会解析出 0 条，[27] 的"清单 ≥5 条"立刻判红，
+ * 不会静默放行。缩进约定与本文件的其它 workflow 解析一致（事件名 2 空格、
+ * 键 4 空格、条目 6 空格）。
+ */
+function ciPathFilters(text) {
+  const out = {};
+  let inOn = false;
+  let ev = null;
+  let list = null;
+  for (const ln of text.split(/\r?\n/)) {
+    if (/^\s*#/.test(ln)) continue;                      // 注释不参与结构判定
+    if (/^on\s*:\s*$/.test(ln)) { inOn = true; continue; }
+    if (inOn && /^\S/.test(ln)) { inOn = false; ev = null; list = null; } // 下一个顶层键＝on: 块结束
+    if (!inOn) continue;
+    let m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);   // 事件名（push / pull_request / …）
+    if (m) { ev = m[1]; out[ev] = out[ev] || {}; list = null; continue; }
+    if (!ev) continue;
+    m = /^ {4}(paths|paths-ignore):\s*(?:#.*)?$/.exec(ln);
+    if (m) { list = (out[ev][m[1]] = []); continue; }
+    m = /^ {6}-\s*['"]?([^'"\s#]+?)['"]?\s*(?:#.*)?$/.exec(ln);
+    if (m && list) list.push(m[1]);
+  }
+  return out;
+}
+
+/**
+ * #102：按"步骤"取回包含某条 run 命令的整块文本（从 `- ` 行到下一个 `- ` 行之前）。
+ * env 是按步骤生效的，所以判断"零告警门有没有挂上"必须按步骤看；全文匹配会把
+ * 挂在别的步骤上的 RUSTFLAGS 也算成挂上了。找不到返回 null（调用方判红）。
+ */
+function ciStepWithRun(text, runRe) {
+  const lines = text.split(/\r?\n/);
+  const starts = lines.map((ln, i) => (/^ {6}- /.test(ln) ? i : -1)).filter((i) => i >= 0);
+  for (const i of starts) {
+    const end = starts.find((s) => s > i);
+    const body = lines.slice(i, end === undefined ? lines.length : end).join('\n');
+    if (runRe.test(body)) return { body };
+  }
+  return null;
+}
+
+/**
+ * #67/#102 共用：按两空格缩进把 workflow 的 job 块切出来（只用于本文件的门，
+ * 不做通用 YAML 解析）。返回 [{ name, body }]，body 是该 job 的原文缩进块。
+ */
+function parseCiJobs(text) {
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let inJobs = false;
+  let cur = null;
+  for (const ln of lines) {
+    if (/^jobs:\s*$/.test(ln)) { inJobs = true; continue; }
+    if (inJobs && /^\S/.test(ln)) { inJobs = false; }
+    if (!inJobs) continue;
+    const m = /^ {2}([\w][\w-]*):\s*(?:#.*)?$/.exec(ln);
+    if (m) { if (cur) out.push(cur); cur = { name: m[1], body: '' }; continue; }
+    if (cur) cur.body += `${ln}
+`;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
 import { readFileSync, statSync } from 'node:fs';
