@@ -1,5 +1,5 @@
 # 固定 Rust 工具链（#41）：本地与 CI 同版本，避免「本地过 CI 红」的工具链漂移。
-# 升级需显式改这里并同步跑 windows/gui 与 windows/tray 两个 crate 的零 warning 构建门。
+# 升级需显式改这里并运行 desktop/src-tauri 的 locked 构建、测试及 desktop.yml 全部门禁。
 [toolchain]
 channel = "1.98.0"
 profile = "minimal"

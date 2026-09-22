@@ -21,8 +21,20 @@ function Get-PackageFingerprint([string[]]$Paths) {
     try { return [Convert]::ToHexString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprint.ToString()))) } finally { $sha.Dispose() }
 }
 
+$publishingStarted = $false
 Push-Location $desktopRoot
 try {
+    # Invalidate publishable artifacts before a build/stamp failure can leave a
+    # previous package looking current. Only these two fixed files are removed.
+    Assert-PlainTree (Split-Path $outputRoot -Parent)
+    Assert-InstallStopped $outputRoot
+    $publishingStarted = $true
+    foreach ($artifact in @((Join-Path $outputRoot 'manifest.json'),$archivePath)) {
+        if (Test-Path -LiteralPath $artifact) {
+            if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) { throw "Expected artifact file: $artifact" }
+            Remove-Item -LiteralPath $artifact -Force
+        }
+    }
     if (-not $SkipBuild) {
         $beforeBuild = Get-PackageFingerprint $inputs
         & npm.cmd run build
@@ -106,4 +118,15 @@ try {
     $archiveInputs = @($names + 'manifest.json') | ForEach-Object { Join-Path $outputRoot $_ }
     Compress-Archive -LiteralPath $archiveInputs -DestinationPath $archivePath -Force
     [pscustomobject]@{ExecutableBytes=(Get-Item -LiteralPath $exePath).Length;ApplicationBytes=($files | Measure-Object bytes -Sum).Sum;ArchiveBytes=(Get-Item -LiteralPath $archivePath).Length;Directory=$outputRoot;Archive=$archivePath} | ConvertTo-Json
+} catch {
+    # Also cover failures after manifest creation, such as ZIP compression.
+    if ($publishingStarted) {
+        foreach ($artifact in @((Join-Path $outputRoot 'manifest.json'),$archivePath)) {
+            if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+                Assert-PlainTree $artifact
+                Remove-Item -LiteralPath $artifact -Force
+            }
+        }
+    }
+    throw
 } finally { Pop-Location }

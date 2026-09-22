@@ -49,7 +49,7 @@ function Remove-ProgramTree([string]$Path, [string]$InstallDirectory) {
 function Assert-InstallStopped([string]$Directory) {
     foreach ($process in Get-Process -Name TokenMonitor,TokenMonitorTray,node -ErrorAction SilentlyContinue) {
         try { $path = $process.Path } catch { throw 'Cannot establish running TokenMonitor path; exit it first' }
-        if ($path -and [IO.Path]::GetFullPath($path).StartsWith($Directory + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Exit TokenMonitor and its background service before installing or uninstalling' }
+        if ($path -and [IO.Path]::GetFullPath($path).StartsWith($Directory + '\',[StringComparison]::OrdinalIgnoreCase)) { throw "Exit TokenMonitor and its background service before installing or uninstalling (PID $($process.Id): $path)" }
     }
 }
 function Remove-OwnedAutostart([string]$Directory, [string]$RegistryPath) {

@@ -47,6 +47,8 @@ jobs:
         run: Add-Content desktop/src-tauri/src/lib.rs 'compile_error!("intentional gate probe");'
       - name: Desktop-only repository guard
         run: node desktop/scripts/retirement-check.mjs
+      - name: Failed builds invalidate stale distribution artifacts
+        run: pwsh -File desktop/scripts/package-failure-smoke.ps1
       - name: Desktop frontend tests
         run: npm test --prefix desktop
       - name: Desktop frontend build
