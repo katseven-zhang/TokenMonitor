@@ -3,7 +3,7 @@
   "currency": "USD",
   "displayCurrency": "USD",
   "usdCny": 6.7521,
-  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。 2026-09-22 增补 Qwen3.8-Max、Qwen3.7-Max、Qwen3.8-Flash 与 MiMo V2.5/V2.6：采用官方国内实时 API 标价（CNY/百万 tokens），作为 API 等价费用估算，不折算 Qoder credits/套餐优惠。Qwen 缓存读采用隐式缓存价，cacheWrite 采用官方显式创建价；两种缓存命中方式目前不能区分。MiMo 缓存写入按官方限时免费填0，V2.5 Flash 的官方ID为 mimo-v2.5。qmodel_38max 按名称映射 Qwen3.8-Max；不明路由 qfmodel、mimo-auto 保持未定价。新增项按当前价格回算已有记录，不代表历史账单。",
+  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。 2026-09-22 增补 Qwen3.8-Max、Qwen3.7-Max、Qwen3.8-Flash 与 MiMo V2.5/V2.6：采用官方国内实时 API 标价（CNY/百万 tokens），作为 API 等价费用估算，不折算 Qoder credits/套餐优惠。Qwen 缓存读采用隐式缓存价，cacheWrite 采用官方显式创建价；两种缓存命中方式目前不能区分。MiMo 缓存写入按官方限时免费填0，V2.5 Flash 的官方ID为 mimo-v2.5。qmodel_38max 按名称映射 Qwen3.8-Max；不明路由 qfmodel、mimo-auto 保持未定价。2026-09-24 增补 GPT-6 Sol/Luna 的 OpenAI Standard 短上下文 API 标价（USD/百万 tokens）。新增项按当前价格回算已有记录，不代表历史账单。",
   "aliases": {
     "GLM-5": "glm-5",
     "GLM-5.3": "glm-5.3",
@@ -240,6 +240,24 @@
         "cached": 1.0,
         "cacheWrite": 12.5,
         "output": 50.0
+      }
+    ],
+    "gpt-6-luna": [
+      {
+        "currency": "USD",
+        "input": 0.1,
+        "cached": 0.01,
+        "cacheWrite": 0.125,
+        "output": 0.5
+      }
+    ],
+    "gpt-6-sol": [
+      {
+        "currency": "USD",
+        "input": 2.0,
+        "cached": 0.2,
+        "cacheWrite": 2.5,
+        "output": 10.0
       }
     ],
     "grok-4.6": [
