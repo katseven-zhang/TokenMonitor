@@ -272,14 +272,14 @@
   "filters": {
     "preset_5h": "Last 5 hours",
     "preset_24h": "Last 24 hours",
-    "preset_7d": "Last 7 days",
-    "preset_30d": "Last 30 days",
+    "preset_7d": "Last 7 calendar days",
+    "preset_30d": "Last 30 calendar days",
     "start": "Start",
     "end": "End (exclusive)",
     "start_aria": "Start time",
     "end_aria": "End time",
     "apply": "Query",
-    "note": "Local time zone · minute precision · fixed start and end; a preset refreshes the end to the current minute",
+    "note": "Local time zone · 5/24 hours are rolling windows; 7/30 days start at local midnight and include today · presets refresh to the current minute",
     "invalid_range": "Choose a valid range: the start time must be earlier than the end time.",
     "active": "Filters: {{value}}",
     "clear": "Clear filters"

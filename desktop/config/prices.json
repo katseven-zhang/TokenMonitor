@@ -3,7 +3,7 @@
   "currency": "USD",
   "displayCurrency": "USD",
   "usdCny": 6.7521,
-  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。 2026-09-22 增补 Qwen3.8-Max、Qwen3.7-Max、Qwen3.8-Flash 与 MiMo V2.5/V2.6：采用官方国内实时 API 标价（CNY/百万 tokens），作为 API 等价费用估算，不折算 Qoder credits/套餐优惠。Qwen 缓存读采用隐式缓存价，cacheWrite 采用官方显式创建价；两种缓存命中方式目前不能区分。MiMo 缓存写入按官方限时免费填0，V2.5 Flash 的官方ID为 mimo-v2.5。qmodel_38max 按名称映射 Qwen3.8-Max；不明路由 qfmodel、mimo-auto 保持未定价。2026-09-24 增补 GPT-6 Sol/Luna 的 OpenAI Standard 短上下文 API 标价（USD/百万 tokens）。新增项按当前价格回算已有记录，不代表历史账单。",
+  "description": "2026-09-20 官方定价快照，仅覆盖本机日志中可可靠对应公开型号的模型。中国模型按 CNY、美国模型按 USD，单价均为每百万 tokens；人民币换算使用 2026-09-18 人民币兑美元中间价 1 USD = 6.7521 CNY。无法表示的长上下文、时段、服务等级、缓存存储时长与工具调用附加费不计；有上下文分档时采用常用基础档，GLM-5/5.1 采用较高上下文档，DeepSeek 采用高峰价。官方未单列 cacheWrite 时按普通未缓存输入价填写，明确免费时填 0。没有官方按 token 价格或无法确认底层型号的本机内部路由保持未定价。 2026-09-22 增补 Qwen3.8-Max、Qwen3.7-Max、Qwen3.8-Flash 与 MiMo V2.5/V2.6：采用官方国内实时 API 标价（CNY/百万 tokens），作为 API 等价费用估算，不折算 Qoder credits/套餐优惠。Qwen 缓存读采用隐式缓存价，cacheWrite 采用官方显式创建价；两种缓存命中方式目前不能区分。MiMo 缓存写入按官方限时免费填0，V2.5 Flash 的官方ID为 mimo-v2.5。qmodel_38max 按名称映射 Qwen3.8-Max；不明路由 qfmodel、mimo-auto 保持未定价。2026-09-24 增补 GPT-6 Sol/Luna 的 OpenAI Standard 短上下文 API 标价（USD/百万 tokens）。新增项按当前价格回算已有记录，不代表历史账单。2026-09-25 增补 codex-auto-review 路由别名的 API 等价估价：根据 ccusage 对 2026-03-05 至 07-29 的 GPT-5.4、07-30 起的 GPT-5.6 Luna 日期映射；日志未记录服务端实际模型，故这是近似估值，早于 03-05 的记录保持未定价。",
   "aliases": {
     "GLM-5": "glm-5",
     "GLM-5.3": "glm-5.3",
@@ -195,6 +195,24 @@
         "cached": 0.23,
         "cacheWrite": 0.8,
         "output": 2.8
+      }
+    ],
+    "codex-auto-review": [
+      {
+        "currency": "USD",
+        "effectiveFrom": "2026-03-05T00:00:00Z",
+        "input": 2.5,
+        "cached": 0.25,
+        "cacheWrite": 2.5,
+        "output": 15.0
+      },
+      {
+        "currency": "USD",
+        "effectiveFrom": "2026-07-30T00:00:00Z",
+        "input": 0.2,
+        "cached": 0.02,
+        "cacheWrite": 0.25,
+        "output": 1.2
       }
     ],
     "gpt-5.5": [

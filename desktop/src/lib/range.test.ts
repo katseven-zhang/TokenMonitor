@@ -2,9 +2,23 @@ import { describe,it,expect,vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { preset,localInput,dateRange,windowOf } from './range';
+import { preset,rangePreset,isRangePresetSelected,initialQuery,localInput,dateRange,windowOf } from './range';
 describe('minute-accurate windows',()=>{
- it('uses exactly 300 and 10080 minutes, not calendar day boundaries',()=>{vi.spyOn(Date,'now').mockReturnValue(new Date('2026-09-20T12:34:56Z').getTime());const a=preset(300),b=preset(10080);expect(a.end%60000).toBe(0);expect(a.end-a.start).toBe(18_000_000);expect(b.end-b.start).toBe(604_800_000);vi.restoreAllMocks();});
+ it('keeps hour presets as elapsed minute windows',()=>{vi.spyOn(Date,'now').mockReturnValue(new Date('2026-09-20T12:34:56Z').getTime());const a=preset(300),b=preset(1440);expect(a.end%60000).toBe(0);expect(a.end-a.start).toBe(18_000_000);expect(b.end-b.start).toBe(86_400_000);vi.restoreAllMocks();});
+ it('includes seven local calendar dates, matching the daily comparison range',()=>{
+  const previous=process.env.TZ;
+  process.env.TZ='Asia/Singapore';
+  vi.spyOn(Date,'now').mockReturnValue(new Date('2026-09-25T03:24:56Z').getTime());
+  try{
+   const seven=rangePreset(10080),thirty=rangePreset(43200);
+   expect(localInput(seven.start)).toBe('2026-09-19T00:00');
+   expect(localInput(seven.end)).toBe('2026-09-25T11:24');
+   expect(localInput(thirty.start)).toBe('2026-08-27T00:00');
+   expect(initialQuery().start).toBe(seven.start);
+   expect(isRangePresetSelected(seven,10080)).toBe(true);
+   expect(isRangePresetSelected({...seven,start:seven.start+60_000},10080)).toBe(false);
+  }finally{vi.restoreAllMocks();process.env.TZ=previous;}
+ });
  it('anchors offsetMinutes at the window start, so a DST-crossing range stays on one grid',()=>{
   // US clocks fall back on 2026-11-01: this hour starts in EDT and ends in EST, which is
   // exactly the case where the two anchors disagree by 60 minutes.

@@ -199,6 +199,34 @@ mod tests {
         e.model = "unknown".into();
         assert_eq!(p.cost(&e), None);
     }
+    #[test]
+    fn bundled_auto_review_estimate_uses_dated_models() {
+        let prices = Prices::parse(include_str!("../../config/prices.json")).unwrap();
+        let mut event = Event {
+            id: "review".into(),
+            agent: "codex".into(),
+            session: "s".into(),
+            project: "p".into(),
+            model: "codex-auto-review".into(),
+            ts: 0,
+            tokens: Tokens {
+                input: 1_000_000,
+                cached: 1_000_000,
+                cache_write: 1_000_000,
+                output: 1_000_000,
+                reasoning: 0,
+            },
+            path: String::new(),
+            line: 1,
+        };
+        let at = |timestamp: &str| chrono::DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_millis();
+        event.ts = at("2026-03-04T23:59:59Z");
+        assert_eq!(prices.cost_parts(&event), None);
+        event.ts = at("2026-07-29T23:59:59Z");
+        assert_eq!(prices.cost_parts(&event), Some([2.5, 0.25, 2.5, 15.0]));
+        event.ts = at("2026-07-30T00:00:00Z");
+        assert_eq!(prices.cost_parts(&event), Some([0.2, 0.02, 0.25, 1.2]));
+    }
     /// #78：价目表的键、别名两端与查找键按同一条词法规则（去空白 + 小写）匹配。
     /// 修前配置里写 `"GLM-5.3-Flash"` 而事件是 `glm-5.3-flash` 会静默不计费，
     /// 只能靠人工往 aliases 里补大小写变体（漏一个就少一栏成本）。
