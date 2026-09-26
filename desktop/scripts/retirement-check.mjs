@@ -39,3 +39,25 @@ for (const path of ['tsconfig.json','Cargo.lock','tauri.conf.json']) assert.ok(i
 assert.match(builder, /\$appVersion = \[string\]\$tauriConfig.version/);
 assert.match(builder, /git rev-parse HEAD[\s\S]*?\$LASTEXITCODE -ne 0/);
 console.log('PASS: pinned actions, complete path filters, warnings gates and package fingerprint inputs');
+
+// #129：活跃文档不得引用已退役路径。历史/退役说明类文档（docs/history、docs/legacy、
+// 文件名带 PLAN-/RETIRE-/INTEGRATION- 的快照）整体豁免；仍活跃的文档只有在同一行
+// 明确写着"退役/已删/removed"时才允许点名这些路径（如 WINDOWS.md 的退役说明段）。
+const ACTIVE_DOCS = [
+  'README.md',
+  'desktop/README.md',
+  ...readdirSync(resolve(root, 'docs')).filter(n => n.endsWith('.md')).map(n => `docs/${n}`),
+].filter(doc => !/(^|\/)(docs\/)?(history|legacy)\//.test(doc) && !/docs\/(PLAN-|RETIRE-|INTEGRATION-|RELEASE-REVIEW-|CODEX-MIGRATION-|QODER-MIMO-|PRICING-)/.test(doc));
+const RETIRED_PATHS = ['windows/gui', 'windows/tray', 'test/run.mjs', 'src/server.js', 'src/scanner.js', 'web/app.js', 'menubar/'];
+const RETIRED_MENTION = /退役|已删除|已移除|已随|removed|retired|deleted in|历史版本线/;
+for (const doc of ACTIVE_DOCS) {
+  const lines = readFileSync(resolve(root, doc), 'utf8').split('\n');
+  lines.forEach((line, index) => {
+    for (const path of RETIRED_PATHS) {
+      if (line.includes(path) && !RETIRED_MENTION.test(line)) {
+        assert.fail(`Active doc references retired path "${path}": ${doc}:${index + 1}: ${line.trim().slice(0, 120)}`);
+      }
+    }
+  });
+}
+console.log('PASS: active docs reference no retired paths outside explicit retirement notes');

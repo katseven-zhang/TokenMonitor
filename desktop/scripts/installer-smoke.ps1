@@ -97,6 +97,11 @@ try {
     New-ItemProperty -LiteralPath (Join-Path $registry 'StartupApproved') -Name TokenMonitor -Value ([byte[]]@(2,0,0,0,0,0,0,0,0,0,0,0)) -PropertyType Binary | Out-Null
     & (Join-Path $source 'uninstall-windows.ps1') -InstallRoot $programs -StartMenuRoot $menu -DesktopRoot $desktop -AutostartRegistryPath $registry
     Check (-not (Test-Path -LiteralPath $install)) 'uninstall removes program'
+    # #129：卸载段此前只查安装目录/注册表/数据——WScript.Shell 读回非 ANSI 目标
+    # 恒不匹配、.lnk 残留的缺陷在全绿 CI 下不可见。补上快捷方式删除断言。
+    foreach ($shortcutDirectory in @($menu, $desktop)) {
+        Check (-not (Test-Path -LiteralPath (Join-Path $shortcutDirectory 'TokenMonitor.lnk'))) 'uninstall removes owned Unicode shortcuts'
+    }
     Check (-not (Get-ItemProperty -LiteralPath $registry).PSObject.Properties['TokenMonitor']) 'uninstall removes only owned autostart command'
     Check (-not (Get-ItemProperty -LiteralPath (Join-Path $registry 'StartupApproved')).PSObject.Properties['TokenMonitor']) 'owned task-manager startup metadata removed'
     Check ((Get-ItemPropertyValue -LiteralPath $registry -Name unrelated) -eq 'keep') 'unrelated registry entry preserved'
