@@ -78,7 +78,11 @@ pub fn fetch_session_detail(db: &Connection, path: &str) -> Result<SessionReplay
         // message readable everywhere else it is shown raw.
         "E_SESSION_NOT_INDEXED: 会话文件尚未入库，请重新扫描后重试".to_string()
     })?;
-    let raw_jsonl = fs::read_to_string(&record.path).map_err(|error| error.to_string())?;
+    // #127：与采集侧 read_jsonl→decode_jsonl_bytes（#109）同一条 lossy 容错。
+    // 严格 read_to_string 让任何一个坏字节把整个回放拒之门外——面板里看得见这条
+    // 会话（采集侧照常入库），点开却永远报 "stream did not contain valid UTF-8"。
+    let raw_bytes = fs::read(&record.path).map_err(|error| error.to_string())?;
+    let raw_jsonl = crate::collectors::decode_jsonl_bytes(&raw_bytes).into_owned();
     let agents = build_agent_hierarchy(db, path, prices.as_ref())?;
     Ok(parse_session_detail_with_agents(record, raw_jsonl, agents))
 }
@@ -123,9 +127,17 @@ pub fn fetch_session_raw_page(
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut lines = Vec::with_capacity(limit);
     let mut total_lines = 0usize;
-    for (index, line) in BufReader::new(file).lines().enumerate() {
+    // #127：按字节切段 + lossy 解码。BufRead::lines 对坏 UTF-8 行返回 Err，
+    // 一个坏字节就让整页请求失败；这里坏行照常以替换字符返回，与回放本体
+    // 和事件缓存（#109/#127）同一条口径。行尾 \r 的剥离与 lines() 保持一致。
+    for (index, chunk) in BufReader::new(file).split(b'\n').enumerate() {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        let mut line = String::from_utf8_lossy(&chunk).into_owned();
+        if line.ends_with('\r') {
+            line.pop();
+        }
         if index >= start && lines.len() < limit {
-            lines.push(line.map_err(|error| error.to_string())?);
+            lines.push(line);
         }
         total_lines = index + 1;
     }
@@ -1164,11 +1176,17 @@ fn build_summary(
     let mut projects = BTreeSet::new();
     let mut models = BTreeSet::new();
     for row in rows {
-        summary.input_tokens += row.input_tokens;
-        summary.cached_input_tokens += row.cached_input_tokens;
-        summary.output_tokens += row.output_tokens;
-        summary.reasoning_output_tokens += row.reasoning_output_tokens;
-        summary.total_tokens += row.total_tokens;
+        // #127：与 #83(11) 的 Tokens::total/add、db.rs rollup 同一条饱和纪律——
+        // 两个"各自含一条 i64::MAX 级事件"的日行在此相加不得回绕成负数。
+        summary.input_tokens = summary.input_tokens.saturating_add(row.input_tokens);
+        summary.cached_input_tokens = summary
+            .cached_input_tokens
+            .saturating_add(row.cached_input_tokens);
+        summary.output_tokens = summary.output_tokens.saturating_add(row.output_tokens);
+        summary.reasoning_output_tokens = summary
+            .reasoning_output_tokens
+            .saturating_add(row.reasoning_output_tokens);
+        summary.total_tokens = summary.total_tokens.saturating_add(row.total_tokens);
         summary.cost_usd += row.cost_usd;
         models.extend(row.models.keys().cloned());
         projects.extend(row.projects.keys().cloned());
@@ -1259,8 +1277,13 @@ fn is_patch_event(event_type: &str) -> bool {
     event_type.contains("patch_apply") || event_type.contains("apply_patch")
 }
 
+/// #127：与 #73(4) 给 reasoning/summary 收窄时同一条裁决。`contains("error")`
+/// 会把"类型名带 error 子串的非错误事件"（error_cleared 一类）吞进 Error 时间线
+/// 并虚增 error_count；这里只认显式已知的错误类型与结构性判定（level/status），
+/// 其余含 error 子串的未知类型照常落入 unrecognized_events，由 summary 可见。
+/// 新的真实错误类型出现时加进枚举，而不是退回通配。
 fn is_error_event(event_type: &str, event: &Value) -> bool {
-    event_type.contains("error")
+    event_type == "error"
         || string_field(event, "level").as_deref() == Some("error")
         || string_field(event, "status").as_deref() == Some("failed")
 }
@@ -2903,6 +2926,119 @@ mod tests {
         // an event this parser does not know.
         assert!(detail.turns[0].reasoning_summaries.is_empty());
         assert_eq!(detail.summary.unrecognized_event_count, 1);
+    }
+
+    /// #127：回放与事件缓存对同一坏字节的口径一致——采集侧（read_jsonl→
+    /// decode_jsonl_bytes，#109）lossy 入库的会话，回放必须打得开且坏行同计
+    /// malformed；raw 页返回该行 lossy 文本而非 Err。修前 read_to_string /
+    /// BufRead::lines 对任一坏字节整体失败："面板可见、回放必败"。
+    #[test]
+    fn a_replay_and_its_raw_pages_tolerate_the_bad_bytes_the_collector_tolerates() {
+        let temp_dir = tempfile_dir();
+        let mut db = open_database(&temp_dir.join("usage.sqlite")).unwrap();
+        let path = temp_dir.join("bad-byte.jsonl");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(
+            serde_json::json!({"type":"session_meta","payload":{"id":"s1","cwd":"/repo/app"}})
+                .to_string()
+                .as_bytes(),
+        );
+        bytes.push(b'\n');
+        bytes.extend_from_slice(b"{\"oops\":");
+        bytes.extend_from_slice(&[0xC3, 0x28, 0x41]);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(
+            serde_json::json!({"timestamp":"2026-06-01T00:00:02.000Z","type":"event_msg","payload":{"type":"token_count","turn_id":"turn-1","info":{"model":"gpt-5","last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}}})
+                .to_string()
+                .as_bytes(),
+        );
+        bytes.push(b'\n');
+        fs::write(&path, &bytes).unwrap();
+        // 采集侧同一条容错：坏行计 malformed，好行照常入库。
+        let parsed = crate::collectors::read_jsonl("codex", &path).unwrap();
+        assert_eq!(parsed.malformed_lines, 1, "采集侧坏行计数：{:?}", parsed);
+        assert_eq!(parsed.events.len(), 1);
+        crate::db::replace_file(
+            &mut db,
+            &path.display().to_string(),
+            "codex",
+            bytes.len() as i64,
+            1,
+            &parsed,
+        )
+        .unwrap();
+
+        let detail = fetch_session_detail(&db, &path.to_string_lossy()).unwrap();
+        assert_eq!(detail.summary.total_tokens, 15, "回放照常出数");
+        assert_eq!(detail.summary.malformed_lines, 1, "回放侧同一坏行同计 malformed");
+
+        let page = fetch_session_raw_page(&db, &path.to_string_lossy(), 1, 10, detail.size_bytes).unwrap();
+        // start=1 → 坏行（index 1）与其后的 usage 行。
+        assert_eq!(page.lines.len(), 2);
+        assert_eq!(page.total_lines, 3);
+        assert!(
+            page.lines[0].contains('\u{FFFD}'),
+            "坏行以替换字符 lossy 返回而非整页失败：{:?}",
+            page.lines[0]
+        );
+        drop(db);
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// #127：回放头部日行累加与 #83(11) 同一条饱和契约——两个各含一条 i64::MAX
+    /// 级日行的汇总不得把总量回绕成负数（修前是裸 `+=`）。
+    #[test]
+    fn replay_header_totals_saturate_like_every_other_accumulator() {
+        let day = |total: i64| DailyUsageRow {
+            date: "2026-06-01".to_string(),
+            input_tokens: total,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: total,
+            cost_usd: 0.0,
+            unpriced_events: 0,
+            models: BTreeMap::new(),
+            projects: BTreeMap::new(),
+        };
+        let detail = parse_session_detail(
+            SessionRollupRecord {
+                path: "/tmp/session.jsonl".into(),
+                modified_at_ms: 1,
+                size_bytes: 1,
+                rows: vec![day(i64::MAX), day(i64::MAX)],
+                prompt_title: None,
+            },
+            String::new(),
+        );
+        assert_eq!(detail.summary.total_tokens, i64::MAX);
+        assert_eq!(detail.summary.input_tokens, i64::MAX);
+        assert!(detail.summary.total_tokens > 0, "回放头部不得出负数");
+    }
+
+    /// #127：is_error_event 收窄——名字带 error 子串的非错误事件落入
+    /// unrecognized_events（summary 可见），不再产 Error 项虚增 error_count。
+    #[test]
+    fn error_substring_types_that_are_not_errors_become_unrecognized_not_errors() {
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            event_msg(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({"type":"error_cleared","turn_id":"turn-1"}),
+            ),
+            event_msg(
+                "2026-06-01T00:00:03.000Z",
+                serde_json::json!({"type":"error","turn_id":"turn-1","message":"boom"}),
+            ),
+        ]
+        .join("\n");
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+        assert_eq!(detail.turns[0].errors, vec!["boom".to_string()], "{:?}", detail.turns[0].errors);
+        assert_eq!(detail.summary.error_count, 1);
+        assert_eq!(
+            detail.summary.unrecognized_event_count, 1,
+            "error_cleared 按未知类型上报，summary 可见"
+        );
     }
 
     #[test]
