@@ -1949,8 +1949,11 @@ fn normalize_raw_usage(value: Option<&Value>) -> Option<RawUsage> {
         // Same accounting as the event cache: reasoning is already in output.
         // 本结构的 input 是上游原值（OpenAI 口径已含缓存命中），所以四项之和就是
         // 事件缓存那一条 `total = input + cache_write + output`（collectors.rs 拆成
-        // 新输入/缓存命中两列后再相加，同一个数）。
-        total_tokens: input + cache_write + output,
+        // 新输入/缓存命中两列后再相加，同一个数）。#130：三列各自可至 i64::MAX，
+        // 相加必须饱和——与 #83(11) 的 Tokens::total 同一条契约。
+        total_tokens: input
+            .saturating_add(cache_write)
+            .saturating_add(output),
     })
 }
 
@@ -1977,7 +1980,10 @@ fn subtract_raw_usage(current: &RawUsage, previous: Option<&RawUsage>) -> RawUsa
         // total 只能由差分后的三列相加得到，不能"把上游 total 也差一次"：某一项被截 0
         // 时（如 cache_write 因写法冲突回落）独立差出来的 total 会小于各列之和，
         // 而事件缓存那一条 `Tokens::total()` 恒等于列和 —— 两个读者又分家。
-        total_tokens: input_tokens + cache_write_tokens + output_tokens,
+        // #130：三列各自非负但都可至 i64::MAX，相加同样饱和。
+        total_tokens: input_tokens
+            .saturating_add(cache_write_tokens)
+            .saturating_add(output_tokens),
     }
 }
 
@@ -1999,7 +2005,10 @@ fn convert_to_delta(raw: &RawUsage) -> ModelUsage {
         total_tokens: if raw.total_tokens > 0 {
             raw.total_tokens
         } else {
-            raw.input_tokens + raw.cache_write_tokens + raw.output_tokens
+            // #130：同一条饱和契约——三个原始字段相加不得回绕成负数。
+            raw.input_tokens
+                .saturating_add(raw.cache_write_tokens)
+                .saturating_add(raw.output_tokens)
         },
     }
 }
@@ -3039,6 +3048,32 @@ mod tests {
             detail.summary.unrecognized_event_count, 1,
             "error_cleared 按未知类型上报，summary 可见"
         );
+    }
+
+    /// #130：RawUsage 三个构造点的总量与 #83(11) 同一条饱和契约——一条合法 JSON
+    /// 的 token_count 携带三个各自可解析、相加溢出的字段（≈2^62×3）时，回放
+    /// 时间线的总量必须饱和为正；修前 debug 构建直接 panic，release 回绕成负数
+    /// （L766 的闸门只拦 ==0，拦不住负值）。#127 修的是日行累加端，这里是源头。
+    #[test]
+    fn replay_token_totals_saturate_on_pathological_components() {
+        let huge = 4_611_686_018_427_387_903i64; // ≈2^62，三项相加超出 i64::MAX
+        let raw = [
+            turn_context("2026-06-01T00:00:01.000Z", "turn-1", "gpt-5", "/repo/app"),
+            event_msg(
+                "2026-06-01T00:00:02.000Z",
+                serde_json::json!({"type":"token_count","turn_id":"turn-1","info":{"model":"gpt-5","total_token_usage":{"input_tokens":huge,"cached_input_tokens":0,"cache_creation_input_tokens":huge,"output_tokens":huge,"reasoning_output_tokens":0},"last_token_usage":{"input_tokens":huge,"cached_input_tokens":0,"cache_creation_input_tokens":huge,"output_tokens":huge,"reasoning_output_tokens":0}}}),
+            ),
+        ]
+        .join("\n");
+        let detail = parse_session_detail(record("/tmp/session.jsonl"), raw);
+        let events: Vec<_> = detail
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.token_events)
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].total_tokens, i64::MAX, "三列相加饱和，不回绕不 panic");
+        assert!(events[0].total_tokens > 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { useCurrency } from '../lib/currency';
 import {
   withBaseMessages, buildSessionConversation, countTurnPatches, cleanExecOutput, formatActivityDuration, formatJsonForDisplay, formatToolArgumentValue,
   parseToolContentBlocks, parseUserInputAnswers, processExitCode, processSignal, splitWebSearchResults, summarizeOutput,
-  type ConversationBlock, type DisplayTokenUsageItem, type NestedActivity, type ReplayItem, type TimelineEntry, type TokenUsageItem, type ToolActivity, type UserInputQuestion, type WebSearchResult,
+  type ConversationBlock, type DisplayTokenUsageItem, type Exploration, type NestedActivity, type ReplayItem, type TimelineEntry, type TokenUsageItem, type ToolActivity, type UserInputQuestion, type WebSearchResult,
 } from "@/lib/session-conversation";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Bot, Check, ChevronDown, ChevronRight, Clipboard, Clock3, Coins, Database, FileDiff, FileJson, FolderOpen, GitBranch, Info, List, Loader2, MessageSquare, Terminal, Wrench, X } from "lucide-react";
@@ -46,6 +46,14 @@ const TOOL_STATUS_KEYS: Record<string, string> = {
   failed: "sessions.detail.status_failed",
   success: "sessions.detail.status_success",
   ok: "sessions.detail.status_success",
+};
+
+// #130：探索组的标签来自 classifyExploration 的字面量（Read/Search/List），
+// 组名此前也是硬编码英文——zh/ja 界面因此出现英文。这里统一映射进三表键。
+const EXPLORATION_LABEL_KEYS: Record<Exploration["label"], string> = {
+  Read: "sessions.detail.explored_read",
+  Search: "sessions.detail.explored_search",
+  List: "sessions.detail.explored_list",
 };
 
 function toolStatusLabel(status: string | null | undefined, t: (key: string) => string) {
@@ -1118,7 +1126,7 @@ function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; 
   const [expanded, setExpanded] = useState(false);
   if (block.kind === "item") return <TimelineItem {...block.entry} rawJsonlLines={rawJsonlLines} />;
   // Merge adjacent reads only, retaining a badge for each original token event.
-  const rows: { label: string; names: string[]; entries: TimelineEntry[] }[] = [];
+  const rows: { label: Exploration["label"]; names: string[]; entries: TimelineEntry[] }[] = [];
   block.actions.forEach((actions, index) => {
     actions.forEach((action, actionIndex) => {
       const previous = rows.at(-1);
@@ -1130,9 +1138,9 @@ function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; 
     });
   });
   return (
-    <section className={`rounded-lg border p-3 ${ITEM_TONES.tool}`} aria-label="Explored">
+    <section className={`rounded-lg border p-3 ${ITEM_TONES.tool}`} aria-label={t("sessions.detail.explored")}>
       <button type="button" className={`flex w-full items-center gap-2 text-left text-xs text-muted-foreground ${DISCLOSURE_BUTTON_CLASS}`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-        <span aria-hidden="true">•</span><span className="font-semibold">Explored</span>
+        <span aria-hidden="true">•</span><span className="font-semibold">{t("sessions.detail.explored")}</span>
         <span>{t("sessions.detail.tool_count", { count: block.entries.length })}</span>
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         <span className="sr-only">{t(expanded ? "sessions.detail.collapse" : "sessions.detail.expand")}</span>
@@ -1141,7 +1149,7 @@ function ConversationItem({ block, rawJsonlLines }: { block: ConversationBlock; 
         {block.entries.map((entry, index) => <TimelineItem key={index} {...entry} rawJsonlLines={rawJsonlLines} />)}
       </div> : <div className="ml-2 mt-2 space-y-2 border-l border-border/60 pl-4">
         {rows.map((row, index) => <div key={index} className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-xs">
-          <span className="min-w-0 break-words text-muted-foreground"><span className="mr-2 font-medium text-foreground">{row.label}</span>{row.names.join(", ")}</span>
+          <span className="min-w-0 break-words text-muted-foreground"><span className="mr-2 font-medium text-foreground">{t(EXPLORATION_LABEL_KEYS[row.label])}</span>{row.names.join(", ")}</span>
           <span className="flex flex-wrap justify-end gap-2">{row.entries.map((entry, entryIndex) => entry.tokenUsage ? <span key={entryIndex} className="inline-flex items-center gap-1" title={entry.activity?.execArguments?.command}>
             {row.entries.length > 1 ? <span className="text-[10px] text-muted-foreground">#{entryIndex + 1}</span> : null}<TokenMetadata usage={entry.tokenUsage} />
           </span> : null)}</span>
@@ -1359,6 +1367,15 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
 
   function reportCopyFailure() {
     const message = t("sessions.detail.copy_failed");
+    setCopyError(message);
+    window.setTimeout(() => setCopyError((current) => (current === message ? null : current)), COPY_FEEDBACK_MS);
+  }
+
+  // #130：reveal 的 invoke 失败（文件已撤回、shell 打开失败）必须有人接住——
+  // 修前 `void` 丢弃 rejected promise，用户点了没有任何反馈。与复制失败共用
+  // 同一条 raw 页横幅反馈位。
+  function reportRevealFailure() {
+    const message = t("sessions.detail.reveal_failed");
     setCopyError(message);
     window.setTimeout(() => setCopyError((current) => (current === message ? null : current)), COPY_FEEDBACK_MS);
   }
@@ -1716,7 +1733,7 @@ export function SessionDetailModal({ session, query, onClose }: SessionDetailMod
                     <Clipboard className="mr-2 h-4 w-4" />
                     {copiedLabel ?? t("sessions.detail.copy")}
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => void revealInFileManager(detail.path)}>
+                  <Button variant="secondary" size="sm" onClick={() => revealInFileManager(detail.path).catch(reportRevealFailure)}>
                     <FolderOpen className="mr-2 h-4 w-4" />
                     {t("sessions.detail.reveal_in_file_manager")}
                   </Button>
