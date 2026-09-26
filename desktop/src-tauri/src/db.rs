@@ -7,7 +7,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::Path,
     time::Duration,
 };
 
@@ -26,13 +26,6 @@ pub fn prices_parse_count() -> usize {
 
 pub fn event_deserialize_count() -> usize {
     EVENT_DESERIALIZE_COUNT.with(|counter| counter.get())
-}
-
-pub fn prices_path(db: &Connection) -> PathBuf {
-    Path::new(db.path().unwrap_or(""))
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("prices.json")
 }
 
 /// Read and parse `prices.json` once; callers keep the result and pass it down by
@@ -440,6 +433,16 @@ pub fn forget_file(db: &mut Connection, path: &str, agent: &str) -> Result<(), S
         )
         .map_err(|e| e.to_string())?;
     }
+    // #125：qoder 的快照账本随撤回一起收敛。账本以 (session,ts) 为键、不带 path，
+    // 同一会话的归档副本本就共享它；这里只清掉"已没有任何已索引事件"的会话，
+    // 让"删掉源文件=撤回其用量"对第二个数据面同样成立，账本也不再只增不减。
+    if agent == "qoder" {
+        tx.execute(
+            "DELETE FROM qoder_snapshots WHERE session NOT IN (SELECT DISTINCT session FROM raw_events WHERE agent='qoder')",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.execute("DELETE FROM source_files WHERE path=?1 AND agent=?2", params![path, agent])
         .map_err(|e| e.to_string())?;
     // Recompute after source_files was dropped, so the forgotten file's mtime
@@ -784,6 +787,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM source_files WHERE size=-1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rearmed, 0, "重解析成功后指纹要重新有效");
+        drop(db);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// #125：qoder 快照账本的两条纪律。①同一会话连续推进（模拟重写 state.json）
+    /// 时账本按 (session,ts) 一行一个观测，不随写入次数累计；②源文件撤回后账本
+    /// 随之清零，同会话文件日后重新出现时从零重建——修前账本没有任何 DELETE
+    /// 路径，删掉的会话历史永久滞留并可在副本回流时整体复活。
+    #[test]
+    fn forget_file_retracts_qoder_snapshots_and_growth_is_bounded() {
+        let root = temp_root();
+        let mut db = open(&root).unwrap();
+        let snapshot = |input: i64, ts: i64| Parsed {
+            events: vec![Event {
+                id: format!("q1|{ts}"),
+                agent: "qoder".into(),
+                session: "q1".into(),
+                project: "proj".into(),
+                model: "m".into(),
+                ts,
+                tokens: Tokens { input, ..Default::default() },
+                path: String::new(),
+                line: 0,
+            }],
+            ..Default::default()
+        };
+        let ledger = |db: &Connection| -> i64 {
+            db.query_row("SELECT COUNT(*) FROM qoder_snapshots", [], |r| r.get(0))
+                .unwrap()
+        };
+        for (round, input, ts) in [(0, 100, 60_000), (1, 150, 120_000), (2, 200, 180_000)] {
+            replace_file(&mut db, "state.json", "qoder", round, round, &snapshot(input, ts)).unwrap();
+        }
+        assert_eq!(ledger(&db), 3, "三轮推进 = 三个观测，不随写入次数累计");
+        forget_file(&mut db, "state.json", "qoder").unwrap();
+        assert_eq!(ledger(&db), 0, "源文件撤回后快照账本不得滞留");
+        replace_file(&mut db, "restored/state.json", "qoder", 1, 1, &snapshot(100, 60_000)).unwrap();
+        assert_eq!(ledger(&db), 1, "重新出现的会话从零重建，不带已删历史");
         drop(db);
         std::fs::remove_dir_all(&root).unwrap();
     }
