@@ -658,7 +658,8 @@ pub fn parse_jsonl(agent: &str, path: &str, text: &str) -> Parsed {
             }
             "qoder" => {
                 session = first(&[string(&rec, "sessionId"), string(&rec, "session_id")], &session);
-                project = first(&[string(&rec, "cwd")], &project);
+                // #126：与其余十源同一条 #85 口径——cwd 取末段，不存整条路径。
+                project = first(&[project_name(&string(&rec, "cwd"))], &project);
                 if kind != "assistant" { continue; }
                 let u = &msg["usage"];
                 let model = string(msg, "model");
@@ -738,7 +739,12 @@ pub fn decode_jsonl_bytes(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
                 // 规则 3：末段且是"截断"（error_len 为 None = 尾部不完整）→ 丢掉这一行，
                 // 等下一轮写完整了再读；中间段的截断不可能出现，所以不必额外判 i。
                 if e.error_len().is_none() && i == last {
-                    out.truncate(out.len() - 1); // 收回刚写的分隔符
+                    // #126：i==0 时还没写过分隔符（整份文件就是一段还没写完的开头），
+                    // out 为空——修前这里无条件收回"刚写的分隔符"，对空串做 0-1，
+                    // debug 构建（cargo test / dev，overflow-checks 开）直接 panic。
+                    if i > 0 {
+                        out.truncate(out.len() - 1); // 收回刚写的分隔符
+                    }
                     continue;
                 }
                 out.push_str(&String::from_utf8_lossy(line));
@@ -834,7 +840,14 @@ pub fn parse_qoder_state(path: &str, text: &str) -> Parsed {
         id: format!("{session}|{updated}"),
         agent: "qoder".into(),
         session,
-        project: first(&[string(&v, "cwd"), string(&v["data"], "cwd")], ""),
+        // #126：与其余十源同一条 #85 口径——cwd 取末段，不存整条路径。
+        project: first(
+            &[
+                project_name(&string(&v, "cwd")),
+                project_name(&string(&v["data"], "cwd")),
+            ],
+            "",
+        ),
         model: first(&[string(&v, "model"), string(&v["data"], "model")], "unknown"),
         ts,
         tokens,
@@ -1576,6 +1589,25 @@ mod tests_utf8_tolerance {
         assert!(!text.contains("元"), "半行必须整条丢掉：{text}");
     }
 
+    /// #126：整份文件**就是**一段还没写完的多字节序列且没有换行（单段，i==0==last）。
+    /// 修前"收回分隔符"分支对空 out 做 0-1，debug 构建（cargo test / dev）
+    /// panic `attempt to subtract with overflow`，扫描线程炸、该源标 error。
+    #[test]
+    fn a_whole_file_incomplete_multibyte_head_is_dropped_without_panicking() {
+        // 单字节不完整序列：无换行、单段。
+        let text = decode_jsonl_bytes(&[0xe4]);
+        assert_eq!(text, "", "不完整的开头整段丢弃，返回空串");
+        // 全链路：read_jsonl 在 debug（overflow-checks 开）下也不得 panic。
+        let dir = std::env::temp_dir().join(format!("tm-utf8-head-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("刚起头.jsonl");
+        std::fs::write(&path, [0xe4]).unwrap();
+        let p = read_jsonl("codex", &path).expect("整文件即不完整多字节尾行不得让 read_jsonl 失败");
+        assert_eq!(p.events.len(), 0);
+        assert_eq!(p.malformed_lines, 0, "还在写的内容不算坏行");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// dsh 的 zstd 帧与纯文本共用同一个按行解码（口径一致，验收项 3）。
     #[test]
     fn zstd_frames_share_the_same_line_tolerance_as_plain_text() {
@@ -2250,7 +2282,8 @@ mod collector_parity_tests {
         assert_eq!(payload["billable_requests"], 1);
         assert_eq!(payload["context_usage_ratio"], 0.2);
         assert_eq!(payload["session_id"], "q-s");
-        assert_eq!(payload["project"], "D:\\我的 项目");
+        // #126：project 与其余十源同取 cwd 末段，quota payload 不再固化全路径。
+        assert_eq!(payload["project"], "我的 项目");
         // 缺 request_id 的那条：想记而记不了，才是 health 的 warning
         assert_eq!(p.malformed_lines, 1, "{:?}", p.malformed_lines);
     }
@@ -2270,7 +2303,8 @@ mod collector_parity_tests {
         assert_eq!(p.events[0].tokens.total(), 165);
         assert_eq!(p.events[0].tokens.reasoning, 10); // 单列，不重复计入 total
         assert!(p.events[0].ts > 0);
-        assert_eq!(p.events[0].project, "D:\\repo");
+        // #126：project 与其余十源同取 cwd 末段。
+        assert_eq!(p.events[0].project, "repo");
         assert_eq!(p.malformed_lines, 0);
         // 兼容别名：早期版本把累计值放在 usage
         let alias = plain.replace("\"total\":", "\"usage\":");

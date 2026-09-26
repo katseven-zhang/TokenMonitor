@@ -212,7 +212,9 @@ fn qoder_credits_range_filters_sidechain_and_over_100_requests() {
     assert!(query::qoder_credits(&cache, &q).unwrap().is_empty());
     q.model = None;
     q.session = Some("s".into());
-    q.project = Some("d:\\REPO".into());
+    // #126：qoder 的 project 与其余十源同取 cwd 末段（"D:/repo" → "repo"），
+    // 项目过滤按末段精确命中；不再依赖全路径的 Windows 折叠。
+    q.project = Some("repo".into());
     assert_eq!(query::qoder_credits(&cache, &q).unwrap().len(), 3);
     q.session = Some("other".into());
     assert!(query::qoder_credits(&cache, &q).unwrap().is_empty());

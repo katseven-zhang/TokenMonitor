@@ -73,7 +73,7 @@ fn all_eleven_sources_minute_filters_and_repeated_scans() {
         // 夹具里各源的项目来源不同（cwd / session.directory / workspace_uris / 目录名），
         // 所以逐个登记期望值。
         const PROJECT_85: [(&str, &str); 11] = [
-            ("qoder", "D:\\我的 项目"),
+            ("qoder", "我的 项目"),          // #126：cwd 末段（与其余十源同口径）
             ("codex", "我的 项目"),          // session_meta.payload.cwd 末段
             ("claude-code", "我的 项目"),    // rec.cwd 末段
             ("ccmr", "我的 项目"),

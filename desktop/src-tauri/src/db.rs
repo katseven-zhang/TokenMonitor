@@ -78,12 +78,12 @@ pub fn open_read(root: &Path) -> Result<Connection, String> {
 
 // Bump when a collector's accounting changes. Rebuild snapshots from source logs,
 // while preserving cached data until each replacement transaction is ready.
-// 5 = #71：BOM 不再吞首条、浮点 token 字段不再归零、重复配额快照不入库——
-// 三者都改变已缓存文件的解析结果，旧行必须按新语义重解析。
+// 11 = #126：qoder 的 project 与其余十源对齐为 basename（取 cwd 末段）——已缓存
+// 的 qoder 行还存着全路径，不升号就永远混着两种口径分组。
 // #110 故意**不**升这个号：本次只是开始给"失败"记账（source_files.error 从此有了
 // 写入方），已成功文件的解析结果一个字节都没变。升号等于把全量重扫当代价付掉，
 // 与 #110 要的"少做事"正好相反。
-pub const COLLECTOR_REVISION: &str = "10";
+pub const COLLECTOR_REVISION: &str = "11";
 pub fn open(root: &Path) -> Result<Connection, String> {
     let db = Connection::open(root.join("events-v2.sqlite")).map_err(|e| e.to_string())?;
     register_query_functions(&db)?;
