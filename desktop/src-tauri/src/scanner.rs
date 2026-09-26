@@ -91,6 +91,14 @@ fn dedup_key(path: String) -> String {
     path
 }
 
+/// #128：删除对账与 seen 集合用**同一条**大小写口径（dedup_key）。
+/// 修前 stale 判定无条件 `to_lowercase()`——POSIX 上 seen 存原始大小写的规范
+/// 路径，含大写的已索引路径经小写化后永远 miss，文件明明还在却被判消失而撤回
+/// 缓存行（#85 第十项修复只改了 seen 侧，漏了这个比较点）。
+fn is_stale(seen: &BTreeSet<String>, stored_path: &str) -> bool {
+    !seen.contains(&dedup_key(stored_path.to_string()))
+}
+
 /// Qoder 的会话状态文件（与 `<会话id>.jsonl` 同名的兄弟目录里）。它不是 JSONL，
 /// 只有本源按文件名认领，其它源不会被它干扰。
 fn is_qoder_state(path: &Path) -> bool {
@@ -295,7 +303,7 @@ pub fn scan_cancellable(
                 .collect::<Result<Vec<String>, _>>()
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .filter(|p| !seen.contains(&p.to_lowercase()))
+                .filter(|p| is_stale(&seen, p))
                 .collect();
             for path in stale {
                 if let Err(e) = db::forget_file(&mut db, &path, agent) {
@@ -335,7 +343,8 @@ pub fn scan_cancellable(
 /// 当成重复静默跳过（少一份用量、零错误）；Windows 上它们是同一个文件，不归一就会采两遍。
 #[cfg(test)]
 mod tests {
-    use super::dedup_key;
+    use super::{dedup_key, is_stale};
+    use std::collections::BTreeSet;
 
     #[test]
     fn seen_dedup_key_folds_case_only_where_the_filesystem_is_case_insensitive() {
@@ -352,5 +361,29 @@ mod tests {
                 "POSIX：大小写不同的两个文件名不能被并成一个键"
             );
         }
+    }
+
+    /// #128：删除对账与 seen 同一条口径。含大写的路径在 POSIX 上不得因
+    /// to_lowercase 被误判成"已消失"；Windows 上折叠语义保持不变。
+    #[test]
+    fn stale_reconciliation_folds_case_only_where_the_filesystem_is_case_insensitive() {
+        let mut seen = BTreeSet::new();
+        seen.insert(dedup_key(if cfg!(windows) {
+            r"C:\Logs\A.jsonl".into()
+        } else {
+            "/Home/User/A.jsonl".into()
+        }));
+        let stored = if cfg!(windows) {
+            r"C:\logs\a.jsonl"
+        } else {
+            "/Home/User/A.jsonl"
+        };
+        assert!(!is_stale(&seen, stored), "仍存在的文件不得被误判 stale");
+        let gone = if cfg!(windows) {
+            r"C:\Logs\Gone.jsonl"
+        } else {
+            "/Home/User/Gone.jsonl"
+        };
+        assert!(is_stale(&seen, gone), "真正消失的文件仍要被对账撤回");
     }
 }

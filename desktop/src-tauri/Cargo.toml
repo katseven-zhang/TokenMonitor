@@ -10,8 +10,9 @@ edition = "2021"
 #     since = "1.89.0"；Option::is_none_or（src/model.rs 的查询过滤）是 1.82。
 #   - 依赖闭包（当前 Cargo.lock）里声明的 rust-version 最高为 1.88
 #     （time / image / plist / serde_with / icu_* 这一批）。
-# 取两者最大值 → 1.89。windows/gui 与 windows/tray 是另一条线（只要 1.70，
-# 它们不用这些 API），三条线各自声明，互不牵连。
+# 取两者最大值 → 1.89。（#128：原注释还提到 windows/gui 与 windows/tray 两条
+# 历史版本线"各自声明，互不牵连"——这两条线已随 #123 退役删除，本 crate 是
+# 唯一的 rust-version 声明点。）
 rust-version = "1.89"
 license = "MIT"
 default-run = "TokenMonitor"
