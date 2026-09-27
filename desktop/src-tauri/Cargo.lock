@@ -3786,8 +3786,8 @@ dependencies = [
  "tauri-plugin-dialog",
  "uuid",
  "walkdir",
- "zip",
  "winreg 0.55.0",
+ "zip",
  "zstd",
 ]
 

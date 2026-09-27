@@ -107,6 +107,14 @@ const DYNAMIC_KEYS = [
   "quota.window_five_hours",
   "quota.window_seven_days",
   "quota.window_minutes",
+  // #130 moved the exploration group labels behind `EXPLORATION_LABEL_KEYS` in
+  // `session-detail-modal.tsx` (classifyExploration produces the Read/Search/List
+  // literals), so the literal scan cannot see them either. Listing them here is
+  // what forces all three tables to carry them.
+  "sessions.detail.explored",
+  "sessions.detail.explored_read",
+  "sessions.detail.explored_search",
+  "sessions.detail.explored_list",
   ...Object.keys(tables.en).filter((key) => key.startsWith("sessions.detail.tool_argument_labels.")),
 ];
 
