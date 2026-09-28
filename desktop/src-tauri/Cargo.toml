@@ -1,6 +1,6 @@
 [package]
 name = "tokenmonitor-desktop"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 # #102：MSRV 声明。取的是"代码与依赖真的要求多少"，不是 rust-toolchain.toml 钉的
 # 那个 channel（照抄钉住的版本等于把升级工具链和抬高下限这两件无关的事绑在一起，
