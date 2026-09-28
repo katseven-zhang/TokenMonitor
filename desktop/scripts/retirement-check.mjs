@@ -32,6 +32,14 @@ assert.equal((workflow.match(/RUSTFLAGS: '-Dwarnings'/g)||[]).length,3);
 for (const path of ['desktop/**','scripts/**','package.json','package-lock.json','LICENSE','rust-toolchain.toml']) {
   assert.equal(workflow.split(`- '${path}'`).length-1,2, `Both path filters must include ${path}`);
 }
+// #121：锁文件门禁的形状守卫。原先由被 #123 退役的 run.mjs 承担，现由本护栏接管：
+// `npm ci` 的全部价值在于 package.json 与 package-lock.json 失配即失败，任何
+// `run: … npm ci … || npm install …` 兜底都会在锁文件漂移时静默改依赖树继续跑绿。
+for (const name of readdirSync(resolve(root, '.github/workflows'))) {
+  const text = readFileSync(resolve(root, '.github/workflows', name), 'utf8');
+  assert.equal(/run:[^\n]*npm\s+ci[^\n]*\|\|/.test(text), false, `Lockfile fallback restored in workflow: ${name}`);
+}
+assert.match(workflow, /^(\s*)run: npm ci --prefix desktop\s*$/m, 'Desktop install step must stay a bare npm ci');
 const builder = readFileSync(resolve(root,'desktop/scripts/build-windows.ps1'),'utf8');
 const inputs = builder.match(/\$fingerprintInputs = @\(([^\n]+)\)/)[1];
 for (const [,path] of inputs.matchAll(/'([^']+)'/g)) assert.ok(existsSync(resolve(root,'desktop',path.replaceAll('\\','/'))), `Missing fingerprint input: ${path}`);
