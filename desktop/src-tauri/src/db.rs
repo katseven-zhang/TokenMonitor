@@ -327,25 +327,32 @@ pub fn replace_file(
         for event in &parsed.events {
             // A session snapshot can occur in several archived files. Store each
             // watermark once, then derive a chronological delta ledger. Late old
-            // copies split the initial baseline rather than double counting it.
-            tx.execute("INSERT OR REPLACE INTO qoder_snapshots VALUES(?1,?2,?3)",params![event.session,event.ts,serde_json::to_string(event).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+            // copies split the initial baseline without double counting it.
+            let mut snapshot_data = serde_json::to_value(event).map_err(|e| e.to_string())?;
+            snapshot_data["qoderCreatedAt"] = serde_json::json!(parsed.qoder_created_at);
+            tx.execute("INSERT OR REPLACE INTO qoder_snapshots VALUES(?1,?2,?3)",params![event.session,event.ts,snapshot_data.to_string()]).map_err(|e|e.to_string())?;
             tx.execute("INSERT OR IGNORE INTO changed_keys SELECT 'raw_events',agent,id FROM raw_events WHERE agent='qoder' AND session=?1",[&event.session]).map_err(|e|e.to_string())?;
             tx.execute("DELETE FROM raw_events WHERE agent='qoder' AND session=?1",[&event.session]).map_err(|e|e.to_string())?;
             let mut stmt=tx.prepare("SELECT data FROM qoder_snapshots WHERE session=?1 ORDER BY ts").map_err(|e|e.to_string())?;
             let rows=stmt.query_map([&event.session],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?;
-            let mut previous: Option<Tokens> = None;
+            let mut previous: Option<(i64, Tokens)> = None;
             for row in rows {
-                let mut observed: Event=serde_json::from_str(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                let data: serde_json::Value=serde_json::from_str(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                let mut observed: Event=serde_json::from_value(data.clone()).map_err(|e|e.to_string())?;
                 let current=observed.tokens.clone();
-                if let Some(old)=previous {
+                if let Some((old_ts, old))=previous {
                     let reset=current.input+current.cached < old.input+old.cached || current.output < old.output || current.cache_write < old.cache_write;
-                    observed.tokens=if reset { Tokens::default() } else {
+                    observed.tokens=if reset || !qoder_same_day(old_ts, observed.ts) { Tokens::default() } else {
                         let input=(current.input+current.cached-old.input-old.cached).max(0);
                         let cached=(current.cached-old.cached).clamp(0,input);
                         Tokens {input:input-cached,cached,cache_write:(current.cache_write-old.cache_write).max(0),output:(current.output-old.output).max(0),reasoning:(current.reasoning-old.reasoning).max(0)}
                     };
+                } else if !data["qoderCreatedAt"].as_i64().is_some_and(|created| qoder_same_day(created, observed.ts)) {
+                    // Without a verified same-day start, the first cumulative
+                    // watermark cannot be assigned to its observation date.
+                    observed.tokens = Tokens::default();
                 }
-                previous=Some(current);
+                previous=Some((observed.ts,current));
                 observed.path=path.into();
                 observed.id=format!("{}|{}",observed.session,observed.ts);
                 if observed.tokens.total()>0 { snapshot_events.push(observed); }
@@ -428,6 +435,13 @@ pub fn replace_file(
         tx.execute(&format!("INSERT INTO {current} SELECT {columns} FROM changed_keys k JOIN {raw} e ON e.agent=k.agent AND e.id=k.id WHERE k.kind=?1 AND e.path=(SELECT r.path FROM {raw} r LEFT JOIN source_files f ON f.path=r.path AND f.agent=r.agent WHERE r.agent=k.agent AND r.id=k.id ORDER BY r.ts DESC,COALESCE(f.mtime,0) DESC,r.path LIMIT 1)"),[raw]).map_err(|e|e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+fn qoder_same_day(start: i64, end: i64) -> bool {
+    let Some(start) = chrono::DateTime::from_timestamp_millis(start) else { return false; };
+    let Some(end) = chrono::DateTime::from_timestamp_millis(end) else { return false; };
+    start.date_naive() == end.date_naive()
+        && start.with_timezone(&chrono::Local).date_naive() == end.with_timezone(&chrono::Local).date_naive()
 }
 
 /// #71: retract one source file that no longer exists: drop its raw rows, quota

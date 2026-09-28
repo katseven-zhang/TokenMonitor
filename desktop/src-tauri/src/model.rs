@@ -64,6 +64,8 @@ pub struct Quota {
 #[derive(Debug, Default)]
 pub struct Parsed {
     pub events: Vec<Event>,
+    /// Qoder state is cumulative; its session start bounds the first watermark.
+    pub qoder_created_at: Option<i64>,
     pub activities: Vec<Activity>,
     pub quotas: Vec<Quota>,
     pub title: Option<String>,

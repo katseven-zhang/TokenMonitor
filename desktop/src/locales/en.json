@@ -490,7 +490,7 @@
   "credits": {
     "title": "Session billing observations",
     "model_breakdown": "Requests and credits by model",
-    "model_note": "Models and credits come from request records. Cumulative tokens in a mixed-model session remain unattributed when they cannot be split reliably.",
+    "model_note": "Models and credits come from request records. Cumulative tokens in a mixed-model session remain unattributed when they cannot be split reliably. Qoder token changes spanning different days are excluded from daily totals because their dates cannot be verified; later same-day changes are counted.",
     "model": "Model",
     "sessions": "{{count}} sessions · requests accumulated within query range",
     "none_yet": "No local quota or billing records yet",

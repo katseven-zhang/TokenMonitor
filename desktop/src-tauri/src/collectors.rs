@@ -836,6 +836,7 @@ pub fn parse_qoder_state(path: &str, text: &str) -> Parsed {
         out.malformed_lines += 1;
         return out;
     }
+    out.qoder_created_at = v.get("createdAt").and_then(timestamp);
     out.events.push(Event {
         id: format!("{session}|{updated}"),
         agent: "qoder".into(),

@@ -497,7 +497,7 @@
   "credits": {
     "title": "会话计费观测",
     "model_breakdown": "按模型统计的请求与 credits",
-    "model_note": "模型与 credits 来自逐请求记录；跨模型会话的累计 token 无法可靠拆分时归为未知模型。",
+    "model_note": "模型与 credits 来自逐请求记录；跨模型会话的累计 token 无法可靠拆分时归为未知模型。Qoder 的跨日累计水位无法确认每天的 token，已从每日 token 统计中排除，后续同日增量仍会计入。",
     "model": "模型",
     "sessions": "{{count}} 个会话 · 查询范围内逐请求累加",
     "none_yet": "尚无本地额度或计费记录",

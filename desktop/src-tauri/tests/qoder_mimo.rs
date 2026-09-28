@@ -100,6 +100,7 @@ fn qoder_snapshots_preserve_history_dedupe_copies_and_handle_reset() {
     let f = Fixture::new();
     let mut cache = db::open(&f.0).unwrap();
     let snapshot = |ts, input, output| Parsed {
+        qoder_created_at: Some(60_000),
         events: vec![Event {
             id: format!("s|{ts}"),
             agent: "qoder".into(),
@@ -183,6 +184,41 @@ fn qoder_snapshots_preserve_history_dedupe_copies_and_handle_reset() {
 }
 
 #[test]
+fn qoder_cross_day_watermarks_keep_baseline_without_false_daily_tokens() {
+    let f = Fixture::new();
+    let mut cache = db::open(&f.0).unwrap();
+    let created = "2026-09-26T12:00:00Z";
+    let ingest = |cache: &mut Connection, updated: &str, input: i64| {
+        let state = json!({"sessionId":"cross-day","createdAt":created,"updatedAt":updated,"model":"qfmodel","total":{"input_tokens":input,"output_tokens":0}});
+        let parsed = collectors::parse_qoder_state("state.json", &state.to_string());
+        assert_eq!(parsed.qoder_created_at, Some(chrono::DateTime::parse_from_rfc3339(created).unwrap().timestamp_millis()));
+        db::replace_file(cache,"live/state.json","qoder",1,1,&parsed).unwrap();
+    };
+    let on = |day: &str| {
+        let start = chrono::DateTime::parse_from_rfc3339(&format!("{day}T00:00:00Z")).unwrap().timestamp_millis();
+        let mut q = query("qoder");
+        q.start = start;
+        q.end = start + 86_400_000;
+        q
+    };
+    ingest(&mut cache,"2026-09-27T12:00:00Z",100);
+    assert!(db::events(&cache,&on("2026-09-27")).unwrap().is_empty());
+    ingest(&mut cache,"2026-09-27T13:00:00Z",130);
+    assert_eq!(db::events(&cache,&on("2026-09-27")).unwrap().iter().map(|e|e.tokens.total()).sum::<i64>(),30);
+    ingest(&mut cache,"2026-09-28T12:00:00Z",200);
+    assert!(db::events(&cache,&on("2026-09-28")).unwrap().is_empty());
+    ingest(&mut cache,"2026-09-28T13:00:00Z",215);
+    assert_eq!(db::events(&cache,&on("2026-09-28")).unwrap().iter().map(|e|e.tokens.total()).sum::<i64>(),15);
+    ingest(&mut cache,"2026-09-28T13:00:00Z",215);
+    assert_eq!(db::events(&cache,&on("2026-09-28")).unwrap().iter().map(|e|e.tokens.total()).sum::<i64>(),15);
+    let unknown_start = json!({"sessionId":"missing-start","updatedAt":"2026-09-28T14:00:00Z","total":{"input_tokens":500}});
+    let parsed = collectors::parse_qoder_state("state.json", &unknown_start.to_string());
+    assert_eq!(parsed.qoder_created_at, None);
+    db::replace_file(&mut cache,"unknown/state.json","qoder",1,1,&parsed).unwrap();
+    assert_eq!(db::events(&cache,&on("2026-09-28")).unwrap().iter().map(|e|e.tokens.total()).sum::<i64>(),15);
+}
+
+#[test]
 fn qoder_credits_range_filters_sidechain_and_over_100_requests() {
     let f = Fixture::new();
     let mut cache = db::open(&f.0).unwrap();
@@ -228,7 +264,7 @@ fn corrupt_qoder_state_preserves_cache_and_is_retried() {
     let dir = f.0.join("projects").join("s");
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join("state.json");
-    fs::write(&path,json!({"sessionId":"s","updatedAt":1800000000000i64,"total":{"input_tokens":100,"output_tokens":20}}).to_string()).unwrap();
+    fs::write(&path,json!({"sessionId":"s","createdAt":1800000000000i64,"updatedAt":1800000000000i64,"total":{"input_tokens":100,"output_tokens":20}}).to_string()).unwrap();
     let settings = config::Settings {
         roots: BTreeMap::from([("qoder".into(), vec![dir.display().to_string()])]),
         ..Default::default()
