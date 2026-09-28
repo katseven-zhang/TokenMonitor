@@ -148,6 +148,22 @@ pub fn open(root: &Path) -> Result<Connection, String> {
         .map_err(|e| e.to_string())?;
         db.execute_batch("COMMIT;").map_err(|e| e.to_string())?;
     }
+    // Qoder CN renamed its installed SDK key constant. Previous builds left
+    // encrypted state files in the failure backoff queue. Retry only those
+    // failed state files once after this reader upgrade, without rescanning
+    // every source or modifying any successful observation.
+    let qoder_key_revision: Option<String> = db.query_row(
+        "SELECT value FROM cache_metadata WHERE key='qoder_key_revision'", [], |r|r.get(0)
+    ).ok();
+    if qoder_key_revision.as_deref() != Some("2") {
+        db.execute_batch("BEGIN IMMEDIATE;").map_err(|e|e.to_string())?;
+        db.execute(
+            "UPDATE source_files SET size=-1 WHERE agent='qoder' AND error IS NOT NULL AND (path LIKE '%/state.json' OR path LIKE '%\\state.json')",
+            [],
+        ).map_err(|e|e.to_string())?;
+        db.execute("INSERT OR REPLACE INTO cache_metadata VALUES('qoder_key_revision','2')",[]).map_err(|e|e.to_string())?;
+        db.execute_batch("COMMIT;").map_err(|e|e.to_string())?;
+    }
     Ok(db)
 }
 /// 快速路径：这个指纹上有一次**完整成功**的解析，可以直接复用。

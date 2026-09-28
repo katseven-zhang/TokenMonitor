@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Dashboard } from '../lib/api';
-import { creditWindows, quotaHistoryRows, quotaWindowName, quotaWindows } from '../lib/quota-observations';
+import { creditModelRows, creditWindows, quotaHistoryRows, quotaWindowName, quotaWindows } from '../lib/quota-observations';
 import { sharedQuotaClock, type QuotaClock } from '../lib/quota-clock';
 import { formatCount, formatTimestamp } from '../lib/localized-format';
 import { QuotaWindowCountdown } from './quota-countdown';
@@ -20,6 +20,7 @@ export function QuotaPanel({data, clock = sharedQuotaClock()}:{data:QuotaPanelDa
   const latestByAgent = [...new Map([...data.quotas].sort((a,b)=>a.ts-b.ts).filter(row=>quotaWindows(row).length>0).map(row=>[row.agent,row])).values()];
   const latest = [...latestByAgent].sort((a,b)=>b.ts-a.ts)[0];
   const credits = creditWindows(data.quotas);
+  const creditModels = creditModelRows(credits);
   const time=(value:number)=>formatTimestamp(value,language);
   const num=(value:number|null,digits=4)=>value==null?'—':value.toLocaleString(language,{maximumFractionDigits:digits});
   const pct=(value:number|null)=>value==null?'—':`${(value*100).toFixed(1)}%`;
@@ -40,6 +41,13 @@ export function QuotaPanel({data, clock = sharedQuotaClock()}:{data:QuotaPanelDa
     {!!credits.length&&<div className="credit-block">
       <div className="panel-heading"><h2>{t('credits.title')}</h2><span>{t('credits.sessions',{count:credits.length})}</span></div>
       <p className="table-note">{t('credits.disclaimer')}</p>
+      {!!creditModels.length&&<>
+        <h3>{t('credits.model_breakdown')}</h3>
+        <p className="table-note">{t('credits.model_note')}</p>
+        <div className="table-wrap"><table><thead><tr><th>{t('credits.source')}</th><th>{t('credits.model')}</th><th>{t('credits.requests')}</th><th>{t('credits.credits')}</th></tr></thead><tbody>
+          {creditModels.map(row=><tr key={`${row.agent}:${row.model}`}><td>{row.agent}</td><td>{row.model}</td><td className="number">{num(row.requests,0)}</td><td className="number">{num(row.credits)}</td></tr>)}
+        </tbody></table></div>
+      </>}
       <div className="table-wrap"><table><thead><tr><th>{t('credits.source')}</th><th>{t('credits.recent')}</th><th>{t('credits.session')}</th><th>{t('credits.project')}</th><th>{t('credits.requests')}</th><th>{t('credits.credits')}</th><th>{t('credits.original')}</th><th>{t('credits.billable')}</th><th>{t('credits.context')}</th><th>{t('credits.models')}</th></tr></thead><tbody>
         {credits.map(row=><tr key={`${row.agent}:${row.session}`}>
           <td>{row.agent}</td>

@@ -186,7 +186,7 @@ fn qoder_snapshots_preserve_history_dedupe_copies_and_handle_reset() {
 fn qoder_credits_range_filters_sidechain_and_over_100_requests() {
     let f = Fixture::new();
     let mut cache = db::open(&f.0).unwrap();
-    let records=(0..150).map(|i|json!({"type":"assistant","timestamp":1800000000000i64+i*1000,"sessionId":"s","cwd":"D:/repo","isSidechain":true,"message":{"model":"m","usage":{"credits":0.25,"request_id":format!("r{i}")}}}).to_string()).collect::<Vec<_>>().join("\n");
+    let records=(0..150).map(|i|json!({"type":"assistant","timestamp":1800000000000i64+i*1000,"sessionId":"s","cwd":"D:/repo","isSidechain":true,"message":{"model":if i%2==0 {"qfmodel"} else {"qmodel_38max"},"usage":{"credits":0.25,"request_id":format!("r{i}")}}}).to_string()).collect::<Vec<_>>().join("\n");
     let parsed = collectors::parse_jsonl("qoder", "a.jsonl", &records);
     for path in ["parent.jsonl", "subagent.jsonl", "archive.jsonl"] {
         db::replace_file(&mut cache, path, "qoder", 1, 1, &parsed).unwrap();
@@ -197,6 +197,8 @@ fn qoder_credits_range_filters_sidechain_and_over_100_requests() {
     assert_eq!(summary.len(), 1);
     assert_eq!(summary[0]["payload"]["requests"], 150.0);
     assert_eq!(summary[0]["payload"]["credits"], 37.5);
+    assert_eq!(summary[0]["payload"]["model_credits"]["qfmodel"], 18.75);
+    assert_eq!(summary[0]["payload"]["model_credits"]["qmodel_38max"], 18.75);
     assert!(summary[0]["payload"]["original_credits"].is_null());
     q.start = 1800000001000;
     q.end = 1800000004000;
@@ -247,6 +249,30 @@ fn corrupt_qoder_state_preserves_cache_and_is_retried() {
             .total(),
         120
     );
+}
+
+#[test]
+fn qoder_reader_upgrade_retries_only_failed_state_files() {
+    let f = Fixture::new();
+    let cache = db::open(&f.0).unwrap();
+    for (path,agent,error) in [
+        (r"D:\logs\s\state.json","qoder",Some("old SDK reader")),
+        (r"D:\logs\s.jsonl","qoder",Some("unrelated failure")),
+        (r"D:\logs\other\state.json","other",Some("unrelated failure")),
+        (r"D:\logs\ok\state.json","qoder",None),
+    ] {
+        cache.execute("INSERT INTO source_files VALUES(?1,?2,9,10,NULL,?3,11)",rusqlite::params![path,agent,error]).unwrap();
+    }
+    cache.execute("DELETE FROM cache_metadata WHERE key='qoder_key_revision'",[]).unwrap();
+    drop(cache);
+    let cache = db::open(&f.0).unwrap();
+    let sizes = cache.prepare("SELECT size FROM source_files ORDER BY path").unwrap()
+        .query_map([],|r|r.get::<_,i64>(0)).unwrap().map(Result::unwrap).collect::<Vec<_>>();
+    assert_eq!(sizes,vec![9,9,9,-1]);
+    cache.execute("UPDATE source_files SET size=9 WHERE agent='qoder' AND error IS NOT NULL",[]).unwrap();
+    drop(cache);
+    let cache = db::open(&f.0).unwrap();
+    assert_eq!(cache.query_row("SELECT size FROM source_files WHERE agent='qoder' AND path LIKE '%state.json' AND error IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),9);
 }
 
 #[test]

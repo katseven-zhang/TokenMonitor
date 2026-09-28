@@ -243,6 +243,8 @@ pub fn qoder_credit_summary(db: &Connection, q: &Query) -> Result<Vec<Value>, St
     for row in qoder_credits(db,q)? {
         let session=row["session"].as_str().unwrap_or("").to_string();
         let p=&row["payload"];
+        let model=p["model"].as_str().filter(|s|!s.is_empty()).unwrap_or("unknown").to_string();
+        let model_credits=p["credits"].as_f64().filter(|n|n.is_finite() && *n>=0.0);
         if let Some(group)=groups.get_mut(&session) {
             let target=&mut group["payload"];
             for key in ["requests","credits","original_credits","billable_requests"] {
@@ -252,9 +254,15 @@ pub fn qoder_credit_summary(db: &Connection, q: &Query) -> Result<Vec<Value>, St
             if let Some(models)=p["models"].as_object() {
                 for (model,n) in models {target["models"][model]=json!(target["models"][model].as_i64().unwrap_or(0)+n.as_i64().unwrap_or(0));}
             }
+            if let Some(credits)=model_credits {
+                target["model_credits"][model.as_str()]=json!(target["model_credits"][model.as_str()].as_f64().unwrap_or(0.0)+credits);
+            }
         } else {
             let mut summary=row;
             summary["payload"].as_object_mut().unwrap().remove("request_id");
+            if let Some(credits)=model_credits {
+                summary["payload"]["model_credits"]=json!({model:credits});
+            }
             groups.insert(session,summary);
         }
     }

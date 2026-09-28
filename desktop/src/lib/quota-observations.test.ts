@@ -1,5 +1,5 @@
 import { describe,it,expect } from 'vitest';
-import { creditWindows, type QuotaObservation, quotaHistoryRows, quotaWindowLabel, quotaWindowName, quotaWindows } from './quota-observations';
+import { creditModelRows, creditWindows, type QuotaObservation, quotaHistoryRows, quotaWindowLabel, quotaWindowName, quotaWindows } from './quota-observations';
 
 // A stand-in for the component's `t`: the module under test must hand back a key plus the
 // values a sentence needs, and never one language's text (task #103).
@@ -52,7 +52,7 @@ const creditRow =(patch:Partial<QuotaObservation>):QuotaObservation => ({
   agent:'qoder', session:'sess-1', ts:1_800_000_000_000,
   payload:{
     session_id:'sess-1', requests:2, credits:0.75, original_credits:1.5, billable_requests:1,
-    context_usage_ratio:0.4, models:{qfmodel:2}, last_ts:1_800_000_000_000,
+    context_usage_ratio:0.4, models:{qfmodel:2}, model_credits:{qfmodel:0.75}, last_ts:1_800_000_000_000,
     project:'D:\\work\\我的 项目', degraded:{'request-deduped':1},
   },
   ...patch,
@@ -61,7 +61,7 @@ describe('session credit observations (#105)',()=>{
   it('merges the parent transcript and its subagent transcript into one session row',()=>{
     const rows=creditWindows([
       creditRow({}),
-      creditRow({session:'agent-x',payload:{...creditRow({}).payload,session_id:'sess-1',requests:3,credits:0.25,original_credits:0.5,billable_requests:2,context_usage_ratio:0.1,models:{'glm-5.3-flash':3},last_ts:1_800_000_001_000,degraded:{'sidechain-skipped':4}} as QuotaObservation['payload']}),
+      creditRow({session:'agent-x',payload:{...creditRow({}).payload,session_id:'sess-1',requests:3,credits:0.25,original_credits:0.5,billable_requests:2,context_usage_ratio:0.1,models:{'glm-5.3-flash':3},model_credits:{'glm-5.3-flash':0.25},last_ts:1_800_000_001_000,degraded:{'sidechain-skipped':4}} as QuotaObservation['payload']}),
     ]);
     expect(rows).toHaveLength(1);
     const row = rows[0];
@@ -76,6 +76,10 @@ describe('session credit observations (#105)',()=>{
     expect(row.ts).toBe(1_800_000_001_000);
     expect(row.project).toBe('D:\\work\\我的 项目');
     expect(row.models).toEqual([{key:'glm-5.3-flash',requests:3},{key:'qfmodel',requests:2}]);
+    expect(creditModelRows(rows)).toEqual([
+      {agent:'qoder',model:'qfmodel',requests:2,credits:0.75},
+      {agent:'qoder',model:'glm-5.3-flash',requests:3,credits:0.25},
+    ]);
     expect(row.degraded).toEqual([{key:'sidechain-skipped',count:4},{key:'request-deduped',count:1}]);
   });
   it('keeps window-shaped quota rows out of the credit table',()=>{

@@ -72,6 +72,7 @@ export type CreditWindow = {
   billableRequests: number | null;
   contextUsageRatio: number | null;
   models: { key: string; requests: number }[];
+  modelCredits: { key: string; credits: number }[];
   degraded: { key: string; count: number }[];
 };
 
@@ -138,8 +139,31 @@ export function creditWindows(rows: QuotaObservation[]): CreditWindow[] {
           return ratios.length ? Math.max(...ratios) : null;
         })(),
         models: merged(group, 'models').map(row => ({ key: row.key, requests: row.count })),
+        modelCredits: merged(group, 'model_credits').map(row => ({ key: row.key, credits: row.count })),
         degraded: merged(group, 'degraded').map(row => ({ key: row.key, count: row.count })),
       };
     })
     .sort((a, b) => b.ts - a.ts || a.agent.localeCompare(b.agent) || a.session.localeCompare(b.session));
+}
+
+/** Model labels and credits come from request records, never from session token estimates. */
+export function creditModelRows(sessions: CreditWindow[]) {
+  const groups = new Map<string, { agent: string; model: string; requests: number; credits: number; hasCredits: boolean }>();
+  for (const session of sessions) {
+    for (const item of session.models) {
+      const key = `${session.agent}\u0000${item.key}`;
+      const row = groups.get(key) ?? { agent: session.agent, model: item.key, requests: 0, credits: 0, hasCredits: false };
+      row.requests += item.requests;
+      groups.set(key, row);
+    }
+    for (const item of session.modelCredits) {
+      const key = `${session.agent}\u0000${item.key}`;
+      const row = groups.get(key) ?? { agent: session.agent, model: item.key, requests: 0, credits: 0, hasCredits: false };
+      row.credits += item.credits;
+      row.hasCredits = true;
+      groups.set(key, row);
+    }
+  }
+  return [...groups.values()].map(({ hasCredits, ...row }) => ({ ...row, credits: hasCredits ? row.credits : null }))
+    .sort((a, b) => (b.credits ?? -1) - (a.credits ?? -1) || b.requests - a.requests || a.model.localeCompare(b.model));
 }

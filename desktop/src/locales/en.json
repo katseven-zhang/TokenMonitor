@@ -489,6 +489,9 @@
   },
   "credits": {
     "title": "Session billing observations",
+    "model_breakdown": "Requests and credits by model",
+    "model_note": "Models and credits come from request records. Cumulative tokens in a mixed-model session remain unattributed when they cannot be split reliably.",
+    "model": "Model",
     "sessions": "{{count}} sessions · requests accumulated within query range",
     "none_yet": "No local quota or billing records yet",
     "disclaimer": "Credits are product subscription billing units, separate from currency and model costs. Missing prices do not trigger credit warnings. Context usage shows the session peak against the provider window. Missing values are shown as —, not zero.",

@@ -60,14 +60,33 @@ fn runtime_key() -> Result<[u8; 32], String> {
 }
 
 fn format_key(text: &str) -> Option<[u8; 32]> {
-    let re = regex::Regex::new(r"nBl\s*=\s*Buffer\.from\(\[([\d,\s]+)\]\)").ok()?;
-    let capture = re.captures(text)?;
-    let values: Vec<u8> = capture[1]
-        .split(',')
-        .map(|s| s.trim().parse())
-        .collect::<Result<_, _>>()
-        .ok()?;
-    values.try_into().ok()
+    fn bytes(capture: &regex::Captures<'_>) -> Option<[u8; 32]> {
+        capture[1]
+            .split(',')
+            .map(|s| s.trim().parse())
+            .collect::<Result<Vec<u8>, _>>()
+            .ok()?
+            .try_into()
+            .ok()
+    }
+
+    // Older installed SDKs used this name. Prefer it if the SDK contains
+    // other byte arrays; the name itself is obfuscated and can change.
+    let old = regex::Regex::new(r"nBl\s*=\s*Buffer\.from\(\[([\d,\s]{1,200})\]\)").ok()?;
+    if let Some(capture) = old.captures(text) {
+        return bytes(&capture);
+    }
+
+    // Newer Qoder CN builds renamed the variable. Accept the sole 32-byte
+    // Buffer.from literal in the installed CN SDK; ambiguity fails closed.
+    // AES-GCM authentication still verifies it against the session state.
+    let arrays = regex::Regex::new(r"Buffer\.from\(\[([\d,\s]{1,200})\]\)").ok()?;
+    let mut candidates = arrays.captures_iter(text).filter_map(|c| bytes(&c));
+    let key = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    Some(key)
 }
 
 fn project_hash(cwd: &str) -> Option<String> {
@@ -233,6 +252,42 @@ pub fn read_state(path: &Path) -> Result<Parsed, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sdk_key_rename_is_accepted_only_when_unambiguous() {
+        let literal = (0..32)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let old = format!("nBl=Buffer.from([{literal}]); other=Buffer.from([1,2]);");
+        let renamed = format!("KDl=Buffer.from([{literal}]); other=Buffer.from([1,2]);");
+        let expected: [u8; 32] = std::array::from_fn(|n| n as u8);
+        assert_eq!(format_key(&old), Some(expected));
+        assert_eq!(format_key(&renamed), Some(expected));
+        assert_eq!(format_key(&format!("{renamed} second=Buffer.from([{literal}]);")), None);
+        assert_eq!(format_key("renamed=Buffer.from([999,1,2]);"), None);
+    }
+
+    #[test]
+    fn mixed_model_session_keeps_cumulative_tokens_unattributed() {
+        let root = std::env::temp_dir().join(format!("tm-qoder-model-{}", uuid::Uuid::new_v4()));
+        let session_dir = root.join("s");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            root.join("s.jsonl"),
+            concat!(
+                "{\"sessionId\":\"s\",\"message\":{\"model\":\"qfmodel\"}}\n",
+                "{\"sessionId\":\"s\",\"message\":{\"model\":\"qmodel_38max\"}}\n"
+            ),
+        ).unwrap();
+        let state = session_dir.join("state.json");
+        fs::write(&state, r#"{"sessionId":"s","updatedAt":"2026-09-28T12:00:00Z","total":{"input_tokens":100,"output_tokens":20}}"#).unwrap();
+        let parsed = read_state(&state).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].model, "unknown");
+        assert_eq!(parsed.events[0].tokens.total(), 120);
+    }
+
     #[test]
     fn authenticated_format_accepts_both_aads_and_rejects_tampering() {
         let key = [42u8; 32];
