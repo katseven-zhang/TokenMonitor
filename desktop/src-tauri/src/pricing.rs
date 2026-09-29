@@ -165,6 +165,20 @@ mod tests {
         }
         assert_eq!(prices.aliases["mimo-v2.5-flash"], "mimo-v2.5");
         assert_eq!(prices.aliases["qmodel_38max"], "qwen3.8-max");
+        assert_eq!(prices.aliases["qfmodel"], "qwen3.8-flash");
+        let mut event = Event {
+            id: "qoder-price".into(), agent: "qoder".into(), session: "s".into(),
+            project: String::new(), model: "qfmodel".into(), ts: 1_800_000_000_000,
+            tokens: Tokens { input: 1_000_000, output: 1_000_000, ..Default::default() },
+            path: String::new(), line: 0,
+        };
+        let flash = prices.cost(&event).expect("qfmodel API-equivalent price");
+        event.model = "qwen3.8-flash".into();
+        assert_eq!(Some(flash), prices.cost(&event));
+        event.model = "qmodel_38max".into();
+        let max = prices.cost(&event).expect("qmodel_38max API-equivalent price");
+        event.model = "qwen3.8-max".into();
+        assert_eq!(Some(max), prices.cost(&event));
     }
     #[test]
     fn historical_prices_and_cache_are_independent() {

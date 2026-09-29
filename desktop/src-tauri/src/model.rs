@@ -42,6 +42,7 @@ pub struct Event {
     pub path: String,
     pub line: usize,
 }
+pub const QODER_UNATTRIBUTED_MODEL: &str = "qoder:unattributed";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
@@ -108,7 +109,7 @@ impl Query {
         e.ts >= self.start
             && e.ts < self.end
             && self.agent.as_ref().is_none_or(|x| x == &e.agent)
-            && self.model.as_ref().is_none_or(|x| x == &e.model)
+            && self.model.as_ref().is_none_or(|x| (x == &e.model && !(x == "unknown" && e.agent == "qoder")) || (x == QODER_UNATTRIBUTED_MODEL && e.agent == "qoder" && e.model == "unknown"))
             && self.project.as_ref().is_none_or(|x| project_key(x) == project_key(&e.project))
             && self.session.as_ref().is_none_or(|x| x == &e.session)
             && (self.search.is_empty()

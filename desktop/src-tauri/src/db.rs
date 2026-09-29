@@ -494,7 +494,7 @@ pub fn events(db: &Connection, q: &Query) -> Result<Vec<Event>, String> {
     let mut without_search = q.clone();
     without_search.search.clear();
     let windows_project=q.project.as_deref().and_then(crate::model::windows_project_key).map(|key|key.trim_end_matches('/').to_string());
-    let mut stmt=db.prepare("SELECT data FROM events WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR model=?4) AND (?5 IS NULL OR project=?5 OR (?7 IS NOT NULL AND lower(rtrim(replace(project,char(92),'/'),'/'))=?7)) AND (?6 IS NULL OR session=?6) ORDER BY ts,id").map_err(|e|e.to_string())?;
+    let mut stmt=db.prepare("SELECT data FROM events WHERE ts>=?1 AND ts<?2 AND (?3 IS NULL OR agent=?3) AND (?4 IS NULL OR (model=?4 AND NOT (?4='unknown' AND agent='qoder')) OR (?4='qoder:unattributed' AND agent='qoder' AND model='unknown')) AND (?5 IS NULL OR project=?5 OR (?7 IS NOT NULL AND lower(rtrim(replace(project,char(92),'/'),'/'))=?7)) AND (?6 IS NULL OR session=?6) ORDER BY ts,id").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map(
             params![q.start, q.end, q.agent, q.model, q.project, q.session,windows_project],
@@ -522,7 +522,7 @@ pub fn events(db: &Connection, q: &Query) -> Result<Vec<Event>, String> {
     }
     Ok(out)
 }
-const EVENT_FILTER:&str="e.ts>=?1 AND e.ts<?2 AND (?3 IS NULL OR e.agent=?3) AND (?4 IS NULL OR e.model=?4) AND (?5 IS NULL OR tm_project(e.project)=tm_project(?5)) AND (?6 IS NULL OR e.session=?6) AND (?7='' OR instr(tm_lower(e.model||' '||e.project||' '||e.session||' '||COALESCE((SELECT title FROM source_files f WHERE f.path=e.path AND f.agent=e.agent),'')),?7)>0)";
+const EVENT_FILTER:&str="e.ts>=?1 AND e.ts<?2 AND (?3 IS NULL OR e.agent=?3) AND (?4 IS NULL OR (e.model=?4 AND NOT (?4='unknown' AND e.agent='qoder')) OR (?4='qoder:unattributed' AND e.agent='qoder' AND e.model='unknown')) AND (?5 IS NULL OR tm_project(e.project)=tm_project(?5)) AND (?6 IS NULL OR e.session=?6) AND (?7='' OR instr(tm_lower(e.model||' '||e.project||' '||e.session||' '||COALESCE((SELECT title FROM source_files f WHERE f.path=e.path AND f.agent=e.agent),'')),?7)>0)";
 
 fn sql_page<T:serde::de::DeserializeOwned>(db:&Connection,q:&Query,selection:&str,alias:&str,offset:usize,limit:usize)->Result<(usize,Vec<T>),String> {
     q.validate()?;

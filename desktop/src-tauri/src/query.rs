@@ -1,6 +1,6 @@
 use crate::{
     db,
-    model::{Event, Query, Tokens},
+    model::{Event, Query, Tokens, QODER_UNATTRIBUTED_MODEL},
     pricing::Prices,
 };
 use rusqlite::{params, Connection};
@@ -163,7 +163,8 @@ fn dashboard_snapshot(db: &Connection, q: &Query, prices: &Prices) -> Result<Val
     let mut session_keys = BTreeSet::new();
     for e in &events {
         totals.add(e, prices);
-        group(&mut models, &e.model, &e.model, e, prices);
+        let model_key = if e.agent == "qoder" && e.model == "unknown" { QODER_UNATTRIBUTED_MODEL } else { &e.model };
+        group(&mut models, model_key, model_key, e, prices);
         group(
             &mut projects,
             &crate::model::project_key(&e.project),

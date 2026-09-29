@@ -402,6 +402,9 @@
   },
   "summary": {
     "kind_models": "Models",
+    "qoder_unattributed_label": "Qoder · model-unattributed tokens",
+    "qoder_unattributed_note": "Qoder's cumulative state has no reliable token totals by model. See actual credits by model in the quota panel.",
+    "qoder_auto_price_note": "Mapped to Qwen3.8-Flash as confirmed by the user. The table shows an API-equivalent estimate; see actual Qoder credits in the quota panel.",
     "kind_projects": "Projects",
     "kind_sessions": "Sessions",
     "kind_days": "Days",
@@ -490,7 +493,7 @@
   "credits": {
     "title": "Session billing observations",
     "model_breakdown": "Requests and credits by model",
-    "model_note": "Models and credits come from request records. Cumulative tokens in a mixed-model session remain unattributed when they cannot be split reliably. Qoder token changes spanning different days are excluded from daily totals because their dates cannot be verified; later same-day changes are counted.",
+    "model_note": "Models and actual credits come from request records. Based on the user-confirmed mapping, qfmodel and qmodel_38max use Qwen3.8-Flash and Qwen3.8-Max API-equivalent rates; these are not Qoder charges. Mixed-session tokens cannot be split by model. Qoder token changes spanning different days are excluded from daily totals because their dates cannot be verified; later same-day changes are counted.",
     "model": "Model",
     "sessions": "{{count}} sessions · requests accumulated within query range",
     "none_yet": "No local quota or billing records yet",

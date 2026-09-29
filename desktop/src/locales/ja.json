@@ -402,6 +402,9 @@
   },
   "summary": {
     "kind_models": "モデル",
+    "qoder_unattributed_label": "Qoder · モデル未帰属トークン",
+    "qoder_unattributed_note": "Qoder の累計状態には信頼できるモデル別トークン数がありません。実際のモデル別 Credits は利用枠パネルを参照してください。",
+    "qoder_auto_price_note": "ユーザー確認に基づき Qwen3.8-Flash に対応付けています。表は API 相当の概算で、実際の Qoder Credits は利用枠パネルを参照してください。",
     "kind_projects": "プロジェクト",
     "kind_sessions": "セッション",
     "kind_days": "日",
@@ -490,7 +493,7 @@
   "credits": {
     "title": "セッション課金の観測",
     "model_breakdown": "モデル別のリクエストと credits",
-    "model_note": "モデルと credits はリクエスト記録に基づきます。複数モデルのセッションで分割できない累計 token はモデル不明として扱います。Qoder の日をまたぐ累計差分は日付を確認できないため日別 token 集計から除外し、その後の同日差分は計上します。",
+    "model_note": "モデルと実際の Credits はリクエスト記録に基づきます。ユーザー確認の対応付けにより、qfmodel と qmodel_38max にはそれぞれ Qwen3.8-Flash と Qwen3.8-Max の API 相当単価を使用します。これは Qoder の請求額ではありません。混合セッションのトークンはモデル別に分割できません。日をまたぐ累計差分は日付を確認できないため日別集計から除外し、その後の同日差分は計上します。",
     "model": "モデル",
     "sessions": "{{count}} セッション · 検索期間内のリクエスト累計",
     "none_yet": "ローカルの利用枠・課金記録はまだありません",

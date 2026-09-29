@@ -3,8 +3,8 @@ use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 use tokenmonitor_core::{
     collectors, config, db,
-    model::{Event, Parsed, Query, Tokens},
-    query, scanner,
+    model::{Event, Parsed, Query, Tokens, QODER_UNATTRIBUTED_MODEL},
+    pricing::Prices, query, scanner,
 };
 
 struct Fixture(PathBuf);
@@ -216,6 +216,37 @@ fn qoder_cross_day_watermarks_keep_baseline_without_false_daily_tokens() {
     assert_eq!(parsed.qoder_created_at, None);
     db::replace_file(&mut cache,"unknown/state.json","qoder",1,1,&parsed).unwrap();
     assert_eq!(db::events(&cache,&on("2026-09-28")).unwrap().iter().map(|e|e.tokens.total()).sum::<i64>(),15);
+}
+
+#[test]
+fn qoder_unattributed_model_is_separate_from_other_unknown_and_drills_down() {
+    let f = Fixture::new();
+    let mut cache = db::open(&f.0).unwrap();
+    let at = 1_800_000_000_000i64;
+    let event = |agent: &str, session: &str, input: i64| Event {
+        id: session.into(), agent: agent.into(), session: session.into(), project: "p".into(),
+        model: "unknown".into(), ts: at, tokens: Tokens { input, ..Default::default() },
+        path: "state.json".into(), line: 0,
+    };
+    db::replace_file(&mut cache,"qoder/state.json","qoder",1,1,&Parsed {
+        qoder_created_at: Some(at), events: vec![event("qoder","mixed",100)], ..Default::default()
+    }).unwrap();
+    db::replace_file(&mut cache,"other.jsonl","codex",1,1,&Parsed {
+        events: vec![event("codex","other",50)], ..Default::default()
+    }).unwrap();
+    let prices = Prices::parse(r#"{"version":1,"currency":"USD","models":{}}"#).unwrap();
+    let mut q = query("qoder"); q.agent = None;
+    let board = query::dashboard(&cache,&q,&prices).unwrap();
+    let models = board["models"].as_array().unwrap();
+    assert!(models.iter().any(|r|r["key"]==QODER_UNATTRIBUTED_MODEL && r["totalTokens"]==100 && r["costUsd"].is_null()));
+    assert!(models.iter().any(|r|r["key"]=="unknown" && r["totalTokens"]==50));
+    q.model = Some(QODER_UNATTRIBUTED_MODEL.into());
+    assert_eq!(db::events(&cache,&q).unwrap().len(),1);
+    assert_eq!(db::event_page(&cache,&q,0,10).unwrap().0,1);
+    assert_eq!(query::dashboard(&cache,&q,&prices).unwrap()["totals"]["totalTokens"],100);
+    q.model = Some("unknown".into());
+    assert_eq!(db::events(&cache,&q).unwrap().len(),1);
+    assert_eq!(query::dashboard(&cache,&q,&prices).unwrap()["totals"]["totalTokens"],50);
 }
 
 #[test]
